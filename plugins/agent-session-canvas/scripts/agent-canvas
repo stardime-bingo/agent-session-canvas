@@ -1,0 +1,59 @@
+#!/bin/zsh
+set -euo pipefail
+
+APP_HOME="${AGENT_CANVAS_HOME:-$HOME/.agent-session-canvas}"
+REPO_URL="${AGENT_CANVAS_REPO_URL:-https://github.com/bingo0621/agent-session-canvas.git}"
+LABEL="com.bingo.agent-canvas"
+DOMAIN="gui/$(id -u)"
+COMMAND="${1:-open}"
+
+require_checkout() {
+  if [[ ! -x "$APP_HOME/scripts/doctor.sh" ]]; then
+    echo "未找到 AGENT 会话指挥塔：$APP_HOME" >&2
+    echo "请先运行: $0 install" >&2
+    exit 1
+  fi
+}
+
+case "$COMMAND" in
+  install)
+    if [[ -e "$APP_HOME" && ! -d "$APP_HOME/.git" ]]; then
+      echo "安装目录已存在且不是 Git 仓库，未覆盖：$APP_HOME" >&2
+      exit 1
+    fi
+    if [[ ! -d "$APP_HOME/.git" ]]; then
+      command -v git >/dev/null 2>&1 || { echo "未找到 git。" >&2; exit 1; }
+      git clone "$REPO_URL" "$APP_HOME"
+    fi
+    exec "$APP_HOME/scripts/install.sh"
+    ;;
+  doctor)
+    require_checkout
+    exec "$APP_HOME/scripts/doctor.sh"
+    ;;
+  start|restart)
+    require_checkout
+    if ! launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+      echo "launchd 服务尚未安装；请先运行: $0 install" >&2
+      exit 1
+    fi
+    launchctl kickstart -k "$DOMAIN/$LABEL"
+    for _ in {1..20}; do
+      curl -fsS http://localhost:4517/api/graph >/dev/null 2>&1 && exit 0
+      sleep 0.25
+    done
+    echo "服务已重启但 localhost:4517 仍无响应。" >&2
+    exit 1
+    ;;
+  open)
+    require_checkout
+    if ! curl -fsS --max-time 2 http://localhost:4517/api/graph >/dev/null 2>&1; then
+      "$0" start
+    fi
+    open http://localhost:4517
+    ;;
+  *)
+    echo "用法: $0 {install|doctor|start|restart|open}" >&2
+    exit 2
+    ;;
+esac

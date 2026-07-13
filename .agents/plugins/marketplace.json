@@ -1,0 +1,20 @@
+{
+  "name": "agent-session-canvas",
+  "interface": {
+    "displayName": "Agent Session Canvas"
+  },
+  "plugins": [
+    {
+      "name": "agent-session-canvas",
+      "source": {
+        "source": "local",
+        "path": "./plugins/agent-session-canvas"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

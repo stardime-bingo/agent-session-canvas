@@ -1,0 +1,12 @@
+node_modules/
+web/dist/
+web/public/fonts/
+data/
+.DS_Store
+.claude/
+output/
+*.bak
+*.backup
+审计提示词.md
+infra/*.plist
+!infra/*.plist.template
