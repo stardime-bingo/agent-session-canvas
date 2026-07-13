@@ -34,6 +34,6 @@ The plugin can install, diagnose, start, restart, and open the local application
 
 ## Security and support
 
-Please do not include private session content, credentials, or personal data in a public issue. Security and privacy reports can be opened through the repository's [GitHub issue tracker](https://github.com/bingo0621/agent-session-canvas/issues).
+Please do not include private session content, credentials, or personal data in a public issue. Security and privacy reports can be opened through the repository's [GitHub issue tracker](https://github.com/stardime-bingo/agent-session-canvas/issues).
 
 Material changes to this policy will be published in this repository.

@@ -28,4 +28,4 @@ The software is provided "as is", without warranties of any kind, to the maximum
 
 ## Support
 
-Questions and reports can be submitted through the repository's [GitHub issue tracker](https://github.com/bingo0621/agent-session-canvas/issues). Do not post credentials or private session content in public issues.
+Questions and reports can be submitted through the repository's [GitHub issue tracker](https://github.com/stardime-bingo/agent-session-canvas/issues). Do not post credentials or private session content in public issues.

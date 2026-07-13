@@ -8,10 +8,10 @@ This file is the source copy for an OpenAI Platform skills-only plugin submissio
 - **Developer name:** BINGOAI
 - **Short description:** Install and open a local visual command tower for Claude Code and Codex sessions.
 - **Category:** Developer Tools
-- **Website:** https://github.com/bingo0621/agent-session-canvas
-- **Support:** https://github.com/bingo0621/agent-session-canvas/issues
-- **Privacy policy:** https://github.com/bingo0621/agent-session-canvas/blob/main/PRIVACY.md
-- **Terms of use:** https://github.com/bingo0621/agent-session-canvas/blob/main/TERMS.md
+- **Website:** https://github.com/stardime-bingo/agent-session-canvas
+- **Support:** https://github.com/stardime-bingo/agent-session-canvas/issues
+- **Privacy policy:** https://github.com/stardime-bingo/agent-session-canvas/blob/main/PRIVACY.md
+- **Terms of use:** https://github.com/stardime-bingo/agent-session-canvas/blob/main/TERMS.md
 - **Logo:** `plugins/agent-session-canvas/assets/agent-session-canvas.svg`
 
 ### Long description

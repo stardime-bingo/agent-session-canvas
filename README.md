@@ -31,7 +31,7 @@
 ## 直接安装
 
 ```bash
-git clone https://github.com/bingo0621/agent-session-canvas.git ~/.agent-session-canvas
+git clone https://github.com/stardime-bingo/agent-session-canvas.git ~/.agent-session-canvas
 cd ~/.agent-session-canvas
 ./scripts/install.sh
 open http://localhost:4517
@@ -48,7 +48,7 @@ open http://localhost:4517
 ## 通过 Claude Code 插件安装
 
 ```bash
-claude plugin marketplace add bingo0621/agent-session-canvas
+claude plugin marketplace add stardime-bingo/agent-session-canvas
 claude plugin install agent-session-canvas@agent-session-canvas
 ```
 
@@ -61,7 +61,7 @@ claude plugin install agent-session-canvas@agent-session-canvas
 ## 通过 Codex 插件安装
 
 ```bash
-codex plugin marketplace add bingo0621/agent-session-canvas --ref main
+codex plugin marketplace add stardime-bingo/agent-session-canvas --ref main
 codex plugin add agent-session-canvas@agent-session-canvas
 ```
 

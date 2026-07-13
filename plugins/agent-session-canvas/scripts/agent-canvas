@@ -2,7 +2,7 @@
 set -euo pipefail
 
 APP_HOME="${AGENT_CANVAS_HOME:-$HOME/.agent-session-canvas}"
-REPO_URL="${AGENT_CANVAS_REPO_URL:-https://github.com/bingo0621/agent-session-canvas.git}"
+REPO_URL="${AGENT_CANVAS_REPO_URL:-https://github.com/stardime-bingo/agent-session-canvas.git}"
 LABEL="com.bingo.agent-canvas"
 DOMAIN="gui/$(id -u)"
 COMMAND="${1:-open}"

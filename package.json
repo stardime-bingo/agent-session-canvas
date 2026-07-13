@@ -4,7 +4,7 @@
   "type": "module",
   "version": "1.2.0",
   "license": "MIT",
-  "repository": "https://github.com/bingo0621/agent-session-canvas",
+  "repository": "https://github.com/stardime-bingo/agent-session-canvas",
   "engines": {
     "node": "^20.19.0 || >=22.12.0"
   },

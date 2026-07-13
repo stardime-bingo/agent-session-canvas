@@ -16,7 +16,7 @@
       "author": {
         "name": "BINGOAI"
       },
-      "repository": "https://github.com/bingo0621/agent-session-canvas",
+      "repository": "https://github.com/stardime-bingo/agent-session-canvas",
       "license": "MIT",
       "keywords": ["claude-code", "codex", "sessions", "canvas", "local-first"]
     }
