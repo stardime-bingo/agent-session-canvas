@@ -6,7 +6,7 @@
 成员清单
 index.mjs: HTTP 总入口(:4517 仅本机)，路由表驱动 API（/api/session 同时返回开场 digest 与独立尾部 endingDigest）+ SSE 广播(图签名 diff：会话增删/状态翻转/改名/接力产出才举旗，
   纯 mtime/体积增长静默——治"有新活动"常亮) + fs.watch 防抖重扫 + 静态托管 web/dist。
-  路由族: layout(存/清/批量,含 w/h)/backfill/name(单会话AI起名)/delete(移废纸篓+清增强+清血缘)/
+  路由族: layout(单条/批量合并，replace=true 时原子替换供整理与撤销，含 w/h)/backfill/name(单会话AI起名)/delete(移废纸篓+清增强+清血缘)/
   手绘层(edge/note/board → data/canvas.json)/ws-rename(工作区别名)/rename(看板层+按原生格式写回本体:
   claude=会话文件尾追加 custom-title 行【10 分钟活跃门禁,热文件不动本体】，codex=session_index.jsonl 追加 last-wins 行)。
   安全律: delete 有 10 分钟活跃门禁+force 破门+如实报成败；SSE 30s 心跳清死连接；process 级 uncaught 兜底；

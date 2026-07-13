@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 独立样式文件，依赖系统 Inter/PingFang 字体栈
- * [OUTPUT]: 对外提供全局 CSS 变量（Dify 浅色画布基因）、基础排版、面板/按钮/徽章通用类
+ * [OUTPUT]: 对外提供全局 CSS 变量（Dify 浅色画布基因）、基础排版、面板/按钮/徽章与可操作 toast 通用类
  * [POS]: web 的视觉唯一真相源——浅灰画布 + 纯白卡片 + Dify 蓝锚点 + 柔和阴影，动画只走合成器
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -189,6 +189,7 @@ input.search:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--ac
 
 /* ===== React Flow 覆写 ===== */
 .react-flow__attribution { display: none; }
+.react-flow__pane.selection { cursor: default; }
 .react-flow__edge-path { stroke: var(--line-strong); stroke-width: 2.5; }
 
 /* ============================================================
@@ -319,10 +320,17 @@ input.search:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--ac
 .toast {
   background: var(--ink); color: #fff;
   font-size: 12.5px; padding: 8px 16px; border-radius: 99px;
+  display: flex; align-items: center; gap: 12px;
   box-shadow: var(--shadow-drag); max-width: 70vw;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   animation: toast-in 0.22s var(--ease-panel);
 }
+.toast:has(.toast-action) { pointer-events: auto; }
+.toast-action {
+  border: 0; border-left: 1px solid rgba(255, 255, 255, 0.35); padding: 0 0 0 12px;
+  background: transparent; color: #fff; font: inherit; font-weight: 700; cursor: pointer;
+}
+.toast-action:hover { text-decoration: underline; }
 .toast.error { background: #b42318; }
 .toast.ok { background: #067647; }
 @keyframes toast-in { from { transform: translateY(10px); opacity: 0; } }

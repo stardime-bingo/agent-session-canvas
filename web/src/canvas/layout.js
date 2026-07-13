@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 工作区列表、layout 手工位置记忆、工作区实时高度
- * [OUTPUT]: 提供画布布局常量、成员打包与街区碰撞修复：保留用户位置，同时为增量内容消除重叠
+ * [OUTPUT]: 提供画布布局常量、成员打包、街区碰撞修复与可撤销整理所需的归属提取
  * [POS]: FlowCanvas 的纯布局内核；不读写磁盘，不触碰真实会话，可由 node:test 直接证伪
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -15,6 +15,13 @@ export const HEADER_H = 66;
 export const CARD_H = 62;
 export const CARD_GAP = 8;
 export const MAX_SHOW = 8;
+
+/** 自动整理只重置几何记忆，人工划入街区/画板的 layout.d 必须留下。 */
+export function tidyLayoutEntries(layout) {
+  return Object.entries(layout || {}).flatMap(([path, pos]) =>
+    typeof pos?.d === 'string' && pos.d ? [{ path, d: pos.d }] : [],
+  );
+}
 
 const horizontalConflict = (x, other) =>
   x < other.x + COL_W + GAP_IN && x + COL_W + GAP_IN > other.x;

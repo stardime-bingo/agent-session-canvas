@@ -1,16 +1,17 @@
 /**
  * [INPUT]: 依赖 api 的数据通道、canvas/FlowCanvas 画布、panels 三件套、ui 的 UIHost/toast
- * [OUTPUT]: 对外提供 App 根组件：全局状态、过滤管道（含时间裁剪）、SSE 订阅、岛屿布局、空态指路牌
+ * [OUTPUT]: 对外提供 App 根组件：全局状态、过滤管道、SSE 订阅、岛屿布局、保留归属且可撤销的自动整理
  * [POS]: web 的总装线——数据如河流单向流动：graph → 过滤 → 画布/面板
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
 import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { api, subscribeEvents } from './api.js';
 import FlowCanvas from './canvas/FlowCanvas.jsx';
+import { tidyLayoutEntries } from './canvas/layout.js';
 import TopBar from './panels/TopBar.jsx';
 import Sidebar from './panels/Sidebar.jsx';
 import DetailPanel from './panels/DetailPanel.jsx';
-import { UIHost, toast, confirmPop, Icon } from './ui.jsx';
+import { UIHost, toast, Icon } from './ui.jsx';
 
 const RANGE_MS = { '7d': 7 * 864e5, '30d': 30 * 864e5, all: Infinity };
 const DEFAULT_FILTERS = () => ({
@@ -29,6 +30,7 @@ export default function App() {
   const [drawing, setDrawing] = useState(false);                   // 绘图模式：动作岛让位
   const focusRef = useRef(() => {});
   const actionsRef = useRef({});
+  const layoutUndoRef = useRef(null);
 
   // ---- 双侧边栏：宽度可拖、可收回，记进 localStorage ----
   const [leftW, setLeftW] = useState(+localStorage.leftW || 250);
@@ -57,22 +59,39 @@ export default function App() {
     strip.addEventListener('pointerup', up);
   };
 
-  const reload = () => api.graph().then(g => { setGraph(g); setLive(true); setPending(false); });
+  const reload = useCallback(() => api.graph().then(g => { setGraph(g); setLive(true); setPending(false); }), []);
 
-  // ---- 自动整理 = 清空手工布局：不可逆的事必须过确认 ----
-  const arrange = async pos => {
-    const count = Object.keys(graph?.layout || {}).length;
-    const ok = await confirmPop({
-      x: pos?.x, y: pos?.y, yesLabel: '重新整理', danger: count > 0,
-      text: '自动整理全部布局？',
-      detail: count > 0
-        ? `将清除 ${count} 条手工位置记忆（你拖过的容器与工作区），按路径亲缘重新排布。此操作不可撤销。`
-        : '按路径亲缘重新聚簇排布。',
-    });
-    if (!ok) return;
-    api.clearLayout().then(reload).then(() => { focusRef.current(null); toast('已重新整理', 'ok'); })
-      .catch(e => toast(`整理失败：${e.message}`, 'error'));
-  };
+  const undoArrange = useCallback(async () => {
+    const snapshot = layoutUndoRef.current;
+    if (!snapshot) {
+      toast('已有新的手工调整，不能再撤销上次整理');
+      return;
+    }
+    layoutUndoRef.current = null;
+    try {
+      await api.layoutBatch(Object.entries(snapshot).map(([path, pos]) => ({ path, ...pos })), true);
+      await reload();
+      focusRef.current(null);
+      toast('已撤销整理', 'ok');
+    } catch (e) {
+      layoutUndoRef.current = snapshot;
+      toast(`撤销失败：${e.message}`, 'error');
+    }
+  }, [reload]);
+
+  // ---- 自动整理只清几何、不清人工归属；原子替换后可由按钮或 Cmd/Ctrl+Z 撤销 ----
+  const arrange = useCallback(async () => {
+    const snapshot = graph?.layout || {};
+    try {
+      await api.layoutBatch(tidyLayoutEntries(snapshot), true);
+      if (!layoutUndoRef.current) layoutUndoRef.current = snapshot;
+      await reload();
+      focusRef.current(null);
+      toast('已整理位置，人工归属保持不变', 'ok', { label: '撤销', onClick: undoArrange });
+    } catch (e) {
+      toast(`整理失败：${e.message}`, 'error');
+    }
+  }, [graph?.layout, reload, undoArrange]);
 
   // ---- 手绘层动作分发：先落后端，再改本地状态；失败一律回读真相 ----
   const handleCanvas = useCallback((action, payload) => {
@@ -114,19 +133,24 @@ export default function App() {
   useEffect(() => {
     reload();
     return subscribeEvents(() => setPending(true), up => setLive(up));
-  }, []);
+  }, [reload]);
 
   // ---- 快捷键：N 便签 / B 画板 / F 全景 / "/" 搜索 / Esc 关面板；输入框内不劫持 ----
   useEffect(() => {
     const onKey = e => {
       const t = e.target;
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable) {
         if (e.key === 'Escape') t.blur();
         return;
       }
       // 绘图模式下让位：n/b/f/d 是 Excalidraw 自己的工具快捷键
       if (document.querySelector('.draw-active')) return;
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'z' && layoutUndoRef.current) {
+        e.preventDefault();
+        undoArrange();
+        return;
+      }
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
       const k = e.key.toLowerCase();
       if (k === 'n') actionsRef.current.addNote?.();
       else if (k === 'b') actionsRef.current.addBoard?.();
@@ -141,7 +165,7 @@ export default function App() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, []);
+  }, [undoArrange]);
 
   // ============================================================
   //  过滤管道：会话级过滤（工具/状态/时间/搜索）→ 工作区聚合裁剪
@@ -213,6 +237,7 @@ export default function App() {
           })}
           onDrawMode={setDrawing}
           onMoveNode={entries => {
+            layoutUndoRef.current = null;   // 整理后又手动摆过，旧快照不再有资格覆盖新意图
             api.layoutBatch(entries).catch(() => api.graph().then(setGraph).catch(() => {}));
             // 本地与后端同律：按字段合并——快照不带 w/h 时不许抹掉已存的手调尺寸
             setGraph(g => {

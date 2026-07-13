@@ -88,7 +88,7 @@ The application is local-first and has no publisher-operated account, telemetry,
 
 ## Release notes
 
-Version 1.1.0 adds an independent “where the session stopped” tail view, deterministic collision-free incremental canvas layout, drag feedback that makes the local-file boundary explicit, and BINGOAI publisher metadata. It retains the skills-only installer/controller, macOS launchd diagnosis, local privacy boundaries, and audited dependency overrides.
+Version 1.2.0 adds design-tool canvas controls: drag-to-select, Space/middle-button pan, trackpad two-finger pan, pinch zoom, and title-bar-only container moves. Automatic arrange now preserves manual board/district membership and offers immediate Undo or Cmd/Ctrl+Z instead of destructively clearing layout state. It retains the independent session stopping-point view, collision-free incremental layout, BINGOAI publisher metadata, local privacy boundaries, and audited dependency overrides.
 
 ## Submission fields that require the publisher
 

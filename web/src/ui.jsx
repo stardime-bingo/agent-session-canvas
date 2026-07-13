@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 react
- * [OUTPUT]: 对外提供 Icon 单色图标集、toast()、confirmPop()、<UIHost/>（单例宿主）、<InlineEdit/> 就地改名
+ * [OUTPUT]: 对外提供 Icon 单色图标集、支持撤销动作的 toast()、confirmPop()、<UIHost/>、<InlineEdit/> 就地改名
  * [POS]: web 的 UI 原子库——自绘轻提示/确认弹层/行内编辑，全面取代原生 alert/confirm/prompt 与 emoji 图标
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -49,8 +49,8 @@ export const Icon = ({ name, size = 13, style }) => (
 let pushToast = () => {};
 let openConfirm = () => Promise.resolve(false);
 
-/** 轻提示：toast('已拉起终端') / toast('失败原因', 'error') */
-export const toast = (msg, type = 'info') => pushToast(msg, type);
+/** 轻提示：第三参可给 { label, onClick }，用于整理这类可逆动作。 */
+export const toast = (msg, type = 'info', action = null) => pushToast(msg, type, action);
 
 /** 自绘确认弹层：confirmPop({ x, y, text, detail?, yesLabel?, danger? }) → Promise<boolean>
     坐标缺省时落屏幕中上——键盘触发的删除也有处安身 */
@@ -61,9 +61,9 @@ export function UIHost() {
   const [cf, setCf] = useState(null);
 
   useEffect(() => {
-    pushToast = (msg, type) => {
+    pushToast = (msg, type, action) => {
       const id = Date.now() + Math.random();
-      setToasts(t => [...t.slice(-2), { id, msg, type }]);
+      setToasts(t => [...t.slice(-2), { id, msg, type, action }]);
       setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 3400);
     };
     openConfirm = opts => new Promise(resolve => {
@@ -113,7 +113,15 @@ export function UIHost() {
       {toasts.length > 0 && (
         <div className="toast-stack">
           {toasts.map(t => (
-            <div key={t.id} className={`toast ${t.type}`}>{t.msg}</div>
+            <div key={t.id} className={`toast ${t.type}`}>
+              <span>{t.msg}</span>
+              {t.action && (
+                <button className="toast-action" onClick={() => {
+                  setToasts(xs => xs.filter(x => x.id !== t.id));
+                  t.action.onClick();
+                }}>{t.action.label}</button>
+              )}
+            </div>
           ))}
         </div>
       )}

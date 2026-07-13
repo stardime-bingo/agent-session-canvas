@@ -2,7 +2,7 @@
   "name": "agent-session-canvas",
   "private": true,
   "type": "module",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "license": "MIT",
   "repository": "https://github.com/bingo0621/agent-session-canvas",
   "engines": {

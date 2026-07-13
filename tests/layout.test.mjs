@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CARD_GAP, COL_W, GAP_IN, GUTTER, HEADER_H, PAD, packWorkspaces, resolveContainerOverlaps } from '../web/src/canvas/layout.js';
+import { CARD_GAP, COL_W, GAP_IN, GUTTER, HEADER_H, PAD, packWorkspaces, resolveContainerOverlaps, tidyLayoutEntries } from '../web/src/canvas/layout.js';
 
 const ws = (path, count = 1) => ({ path, visibleKeys: Array.from({ length: count }, (_, i) => `${path}:${i}`) });
 const heightOf = item => HEADER_H + item.visibleKeys.length * (62 + CARD_GAP) + 8;
@@ -58,4 +58,18 @@ test('a growing saved district pushes later containers away without changing the
   assert.equal(blocks[1].x, 600);
   assert.equal(blocks[1].y, 700 + GUTTER);
   assert.equal(blocks[2].y, 500);
+});
+
+test('tidy resets geometry but preserves manual district and board membership', () => {
+  const layout = {
+    '/auto': { x: 20, y: 30 },
+    '/district-member': { x: 120, y: 230, d: 'BINGO-Space / Claude_Code' },
+    '/board-member': { x: 18, y: 68, d: 'board:demo' },
+    'district:BINGO-Space / AI-code': { x: 900, y: 400, w: 1200, h: 800 },
+  };
+
+  assert.deepEqual(tidyLayoutEntries(layout), [
+    { path: '/district-member', d: 'BINGO-Space / Claude_Code' },
+    { path: '/board-member', d: 'board:demo' },
+  ]);
 });

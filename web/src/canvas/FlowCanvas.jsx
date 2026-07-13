@@ -1,7 +1,7 @@
 /**
  * [INPUT]: 依赖 @xyflow/react、layout 纯布局内核、五种自定义节点、menus 的菜单构建器与删除流程、ui 的 toast/Icon
  * [OUTPUT]: 对外提供 FlowCanvas 组件：统一容器模型、弹性生长、拖放改归属、三系统边+手动边、
- *           增量成员防重叠、Backspace 删除治理（便签/画板/手动边可删且过确认，其余免疫）、就地改名信号、折叠展开、视口记忆
+ *           增量成员防重叠、Figma 式框选/平移/触控板手势、容器标题栏拖动、Backspace 删除治理、折叠展开与视口记忆
  * [POS]: canvas 的画布引擎。归属律：layout.d 手动指定 > 路径推断；容器永远生长包住成员；
  *        每一次点击必有可感知的回应：选中态/菜单/提示三选一
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -138,7 +138,7 @@ function buildGraph(workspaces, sessionsByKey, layout, boards, relEdges, expande
           id: containerId, type: 'board', position: { x: b.x, y: b.y },
           width: b.w, height: b.h,
           data: { board: b.board, count: b.count, _w: b.w, _h: b.h },
-          draggable: true, selectable: true, deletable: true,
+          draggable: true, dragHandle: '.container-drag-handle', selectable: true, deletable: true,
         }
       : {
           id: containerId, type: 'district', position: { x: b.x, y: b.y },
@@ -147,7 +147,7 @@ function buildGraph(workspaces, sessionsByKey, layout, boards, relEdges, expande
             name: b.key, count: b.count, _w: b.w, _h: b.h, _minW: b.minW, _minH: b.minH,
             _dir: b.placed[0] ? districtDir(b.placed[0].ws.path) : null,
           },
-          draggable: true, selectable: true, deletable: false,
+          draggable: true, dragHandle: '.container-drag-handle', selectable: true, deletable: false,
         });
 
     for (const { ws, x, y } of b.placed) {
@@ -636,6 +636,12 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       onEdgeClick={onEdgeClick}
       onEdgeMouseEnter={onEdgeMouseEnter}
       onEdgeMouseLeave={onEdgeMouseLeave}
+      selectionOnDrag
+      panOnDrag={[1]}
+      panOnScroll
+      panOnScrollSpeed={1}
+      zoomOnScroll={false}
+      zoomOnPinch
       zoomOnDoubleClick={false}
       onConnect={onConnect}
       onConnectStart={() => rootRef.current?.classList.add('connecting')}
@@ -724,7 +730,8 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
         <button className="btn ghost" onClick={addNote} title="贴一张便签到视野中央（快捷键 N）"><Icon name="note" /> 便签</button>
         <button className="btn ghost" onClick={addBoard} title="创建自定义画板：拉角调大小、双击改名、工作区拖进来就归它管（快捷键 B）"><Icon name="board" /> 画板</button>
         <button className="btn ghost" onClick={toggleDraw} title="绘图：自由画笔/形状/箭头/文字（快捷键 D）"><Icon name="pen" /> 绘图</button>
-        <button className="btn ghost" onClick={() => focusRef.current(null)} title="全景归位（快捷键 F）"><Icon name="fit" /> 全景</button>
+        <button className="btn ghost" onClick={() => focusRef.current(null)}
+          title="全景归位（F）· 空白左拖框选 · 双指/空格拖动平移 · 捏合缩放"><Icon name="fit" /> 全景</button>
       </>}
       {drawMode && (
         <button className="btn primary" onClick={toggleDraw} title="退出绘图（Esc 或点击）"><Icon name="pen" /> 收笔返回看板 (Esc)</button>

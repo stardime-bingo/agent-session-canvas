@@ -1,7 +1,7 @@
 /**
  * [INPUT]: 依赖 react、@xyflow/react 的 NodeResizer/Handle、ui 的 InlineEdit/Icon
  * [OUTPUT]: 对外提供 BoardNode 自定义节点（React Flow node type: board，memo 化）与 BOARD_COLORS 色表
- * [POS]: canvas 的用户自建画板——五色一等容器，可选中可连线，拉角调大小、双击就地改名、
+ * [POS]: canvas 的用户自建画板——五色一等容器，仅标题栏搬家，可选中可连线，拉角调大小、双击就地改名、
  *        删除走自绘确认流（成员自动回原街区）
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -26,7 +26,7 @@ export default memo(function BoardNode({ data, dragging, selected }) {
       style={{
         width: '100%', height: '100%',
         '--face-fill': c.fill, '--face-line': c.line,
-        cursor: dragging ? 'grabbing' : 'grab',
+        cursor: 'default',
       }}
     >
       <NodeResizer
@@ -43,7 +43,8 @@ export default memo(function BoardNode({ data, dragging, selected }) {
       <Handle type="target" position={Position.Left} style={{ top: 30 }} />
 
       {/* ===== 画板路牌：锚线 + 就地改名 + 五色盘 + 删除 ===== */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '18px 24px 0' }}>
+      <div className="container-drag-handle" title="拖动标题栏搬动画板（成员仅在明确搬家时跟随）"
+        style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '18px 24px 12px', cursor: dragging ? 'grabbing' : 'grab' }}>
         <span style={{ width: 22, height: 3, background: c.ink, borderRadius: 2, opacity: 0.8 }} />
         <span className="eyebrow nodrag" style={{ fontSize: 11.5, color: c.ink, opacity: 0.9 }}>
           <InlineEdit

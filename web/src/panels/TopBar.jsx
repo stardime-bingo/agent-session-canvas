@@ -1,7 +1,7 @@
 /**
  * [INPUT]: 依赖 react、api 的 backfill 接口、ui 的 Icon
- * [OUTPUT]: 对外提供 TopBar 组件——右上动作岛：有新活动举旗/整理（过确认）/批量命名/重扫
- * [POS]: panels 的动作岛（历史名 TopBar）；整理是清布局的不可逆动作，确认流在 App 统一把关
+ * [OUTPUT]: 对外提供 TopBar 组件——右上动作岛：有新活动举旗/可撤销整理/批量命名/重扫
+ * [POS]: panels 的动作岛（历史名 TopBar）；整理只重置几何且保留人工归属，回执可直接撤销
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
 import React, { useEffect, useState } from 'react';
@@ -24,7 +24,7 @@ export default function TopBar({ onRescan, pending, onRefresh, onArrange }) {
           ● 有新活动
         </button>
       )}
-      <button className="btn ghost" title="清掉手工布局，按关联亲缘重新聚块并全景归位（会先向你确认）" onClick={onArrange}>
+      <button className="btn ghost" title="整理位置并全景归位；保留人工街区/画板归属，可立即撤销" onClick={onArrange}>
         <Icon name="tidy" /> 整理
       </button>
       <button className="btn ghost" disabled={bf?.running}

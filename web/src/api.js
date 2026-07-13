@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖浏览器 fetch / EventSource，对接 server/index.mjs 的 API 契约
- * [OUTPUT]: 对外提供 api.graph/session/launch/summarize/handoff/rename/reveal/rescan 与 subscribeEvents
+ * [OUTPUT]: 对外提供 api.graph/session/launch/summarize/handoff/rename/reveal/rescan/layoutBatch（可原子替换）与 subscribeEvents
  * [POS]: web 的数据访问唯一通道，组件不直接碰 fetch
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -32,7 +32,7 @@ export const api = {
   wsRename: (path, name) => post('/api/ws-rename', { path, name }),
   reveal: path => post('/api/reveal', { path }),
   layout: (path, x, y, d) => post('/api/layout', { path, x, y, d }),
-  layoutBatch: entries => post('/api/layout-batch', { entries }),
+  layoutBatch: (entries, replace = false) => post('/api/layout-batch', { entries, replace }),
   addEdge: (from, to) => post('/api/edge-add', { from, to }),
   delEdge: id => post('/api/edge-del', { id }),
   setNote: note => post('/api/note-set', note),
@@ -40,7 +40,6 @@ export const api = {
   setBoard: board => post('/api/board-set', board),
   delBoard: id => post('/api/board-del', { id }),
   setDrawing: elements => post('/api/drawing-set', { elements }),
-  clearLayout: () => post('/api/layout-clear', {}),
   del: (key, force) => post('/api/delete', { key, force }),
   backfill: () => post('/api/backfill', {}),
   backfillStatus: () => call('/api/backfill-status'),

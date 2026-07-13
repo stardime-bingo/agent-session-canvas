@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 scanner 的图数据、launcher 的终端拉起、ai 的摘要/接力、store 的增强仓与静态目录
- * [OUTPUT]: 对外提供 HTTP 服务（:4517）：/api/graph /api/session(含开场 digest + 独立尾部 endingDigest) /api/scan /api/launch /api/summarize /api/handoff /api/rename /api/events(SSE) + 前端静态托管
+ * [OUTPUT]: 对外提供 HTTP 服务（:4517）：graph/session/scan/launch/AI/rename/events + 可合并或原子替换的画布布局 API + 前端静态托管
  * [POS]: server 的总入口与路由层，前端画布与本地地形之间唯一的桥
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -208,21 +208,14 @@ const routes = {
     return { ok: true };
   },
 
-  // 拖动一个 = 快照整个街区：兄弟成员不再瀑布补位乱跑
+  // 拖动一个 = 合并快照；自动整理/撤销 = 原子替换整份布局，绝不经历“先清空再补回”的危险窗口
   'POST /api/layout-batch': async body => {
-    const layout = readJson(LAYOUT_FILE, {});
+    const layout = body.replace === true ? {} : readJson(LAYOUT_FILE, {});
     for (const e of body.entries || []) {
       layout[e.path] = pickLayout(e, layout[e.path]);
     }
     writeJson(LAYOUT_FILE, layout);
     return { ok: true, saved: (body.entries || []).length };
-  },
-
-  // 自动整理 = 清空手工布局，回到路径亲缘街区算法
-  'POST /api/layout-clear': async () => {
-    writeJson(LAYOUT_FILE, {});
-    refresh();
-    return { ok: true };
   },
 
   // 删除 = 移入 macOS 废纸篓（看板干净，但可反悔），增强数据一并清除
