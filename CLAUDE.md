@@ -18,7 +18,7 @@ docs/ + PRIVACY.md + TERMS.md - Codex 市场提交文案、隐私披露与公开
 </directory>
 
 <config>
-package.json - 前端依赖与脚本 (build/serve/scan/start)
+package.json - 前端依赖与脚本 (build/serve/scan/start) + 上游精确旧依赖的安全补丁 overrides
 vite.config.mjs - 前端构建: root=web, 产物 web/dist, dev 代理 :4517
 </config>
 

@@ -87,7 +87,7 @@ The application is local-first and has no publisher-operated account, telemetry,
 
 ## Release notes
 
-Initial public release. Adds the skills-only installer/controller for the existing local AGENT Session Canvas, macOS launchd installation and diagnosis, local privacy boundaries, and Claude Code / Codex marketplace manifests.
+Initial public release. Adds the skills-only installer/controller for the existing local AGENT Session Canvas, macOS launchd installation and diagnosis, local privacy boundaries, Claude Code / Codex marketplace manifests, and audited transitive dependency security overrides.
 
 ## Submission fields that require the publisher
 

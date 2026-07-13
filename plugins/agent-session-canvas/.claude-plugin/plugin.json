@@ -1,6 +1,6 @@
 {
   "name": "agent-session-canvas",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Install, diagnose, start, and open the real local AGENT Session Canvas.",
   "author": {
     "name": "BINGO",
