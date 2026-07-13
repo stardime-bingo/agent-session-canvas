@@ -1,9 +1,9 @@
 {
   "name": "agent-session-canvas",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "description": "Install, diagnose, start, and open the local AGENT Session Canvas app.",
   "author": {
-    "name": "BINGO",
+    "name": "BINGOAI",
     "url": "https://github.com/bingo0621"
   },
   "homepage": "https://github.com/bingo0621/agent-session-canvas",
@@ -15,7 +15,7 @@
     "displayName": "AGENT 会话指挥塔",
     "shortDescription": "Install and open the local session canvas",
     "longDescription": "A thin controller for installing, diagnosing, starting, and opening the real local AGENT Session Canvas at localhost:4517. It does not ship a second UI or operate a hosted session map.",
-    "developerName": "BINGO",
+    "developerName": "BINGOAI",
     "category": "Developer Tools",
     "capabilities": ["Interactive"],
     "websiteURL": "https://github.com/bingo0621/agent-session-canvas",

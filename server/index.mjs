@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 scanner 的图数据、launcher 的终端拉起、ai 的摘要/接力、store 的增强仓与静态目录
- * [OUTPUT]: 对外提供 HTTP 服务（:4517）：/api/graph /api/scan /api/launch /api/summarize /api/handoff /api/rename /api/events(SSE) + 前端静态托管
+ * [OUTPUT]: 对外提供 HTTP 服务（:4517）：/api/graph /api/session(含开场 digest + 独立尾部 endingDigest) /api/scan /api/launch /api/summarize /api/handoff /api/rename /api/events(SSE) + 前端静态托管
  * [POS]: server 的总入口与路由层，前端画布与本地地形之间唯一的桥
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -11,7 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { scanAll } from './scanner.mjs';
 import { launch } from './launcher.mjs';
-import { summarize, makeHandoff, extractDigest, nameSession } from './ai.mjs';
+import { summarize, makeHandoff, extractDigest, extractEndingDigest, nameSession } from './ai.mjs';
 import { runBackfill, backfillStatus, findCandidates } from './backfill.mjs';
 import { WEB_DIST, loadEnrich, updateEnrich, appendJsonlVerified, DATA_DIR, readJson, writeJson } from './store.mjs';
 
@@ -278,7 +278,12 @@ const routes = {
     const s = findSession(query.key);
     if (!s) throw new Error('会话不存在: ' + query.key);
     const enrich = loadEnrich();
-    return { ...s, handoff: enrich.handoffs[s.key]?.text || null, digest: extractDigest(s) };
+    return {
+      ...s,
+      handoff: enrich.handoffs[s.key]?.text || null,
+      digest: extractDigest(s),
+      endingDigest: extractEndingDigest(s),
+    };
   },
 
   'POST /api/launch': async body => {

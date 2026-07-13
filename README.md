@@ -9,6 +9,7 @@
 - 扫描 `~/.claude/projects` 与 `~/.codex/sessions`，统一成同一种会话卡片。
 - 从工作区、会话状态、时间与工具维度定位上千条历史会话。
 - 保留手工布局、便签、画板与连线；地图随本地会话自然生长。
+- 详情同时展示会话开场与“最后停在哪里”，不用展开整份日志才能找到接手点。
 - 生成摘要与接力提示词，并从原会话续开或带上下文新开。
 - 过滤子智能体、空壳与 headless 自噪，automation 多次运行会自动聚合。
 
@@ -102,6 +103,8 @@ launchctl kickstart -k gui/$(id -u)/com.bingo.agent-canvas
 ## License
 
 [MIT](./LICENSE)
+
+Published by BINGOAI.
 
 ## Policies
 

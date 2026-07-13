@@ -1,20 +1,20 @@
 {
   "name": "agent-session-canvas",
   "owner": {
-    "name": "BINGO"
+    "name": "BINGOAI"
   },
   "metadata": {
     "description": "Local-first Claude Code and Codex session canvas.",
-    "version": "1.0.1"
+    "version": "1.1.0"
   },
   "plugins": [
     {
       "name": "agent-session-canvas",
       "source": "./plugins/agent-session-canvas",
       "description": "Install, diagnose, start, and open the real local AGENT Session Canvas.",
-      "version": "1.0.1",
+      "version": "1.1.0",
       "author": {
-        "name": "BINGO"
+        "name": "BINGOAI"
       },
       "repository": "https://github.com/bingo0621/agent-session-canvas",
       "license": "MIT",

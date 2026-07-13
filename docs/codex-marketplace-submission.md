@@ -5,6 +5,7 @@ This file is the source copy for an OpenAI Platform skills-only plugin submissio
 ## Listing
 
 - **Plugin name:** AGENT Session Canvas
+- **Developer name:** BINGOAI
 - **Short description:** Install and open a local visual command tower for Claude Code and Codex sessions.
 - **Category:** Developer Tools
 - **Website:** https://github.com/bingo0621/agent-session-canvas
@@ -15,7 +16,7 @@ This file is the source copy for an OpenAI Platform skills-only plugin submissio
 
 ### Long description
 
-AGENT Session Canvas turns local Claude Code and Codex history into one interactive workspace map. It groups sessions by project, filters machine noise, preserves manual layout and notes, and lets users inspect, resume, summarize, or hand off work from the real local application at `http://localhost:4517`.
+AGENT Session Canvas turns local Claude Code and Codex history into one interactive workspace map. It groups sessions by project, filters machine noise, preserves manual layout and notes, shows both where a session started and where it stopped, and lets users inspect, resume, summarize, or hand off work from the real local application at `http://localhost:4517`.
 
 The plugin is a thin, skills-only controller. With an explicit user request, it can install the open-source macOS application, diagnose its local service, start or restart the launchd daemon, and open the existing interface. It does not create a substitute demo page or operate a hosted copy of the user's session map.
 
@@ -87,7 +88,7 @@ The application is local-first and has no publisher-operated account, telemetry,
 
 ## Release notes
 
-Initial public release. Adds the skills-only installer/controller for the existing local AGENT Session Canvas, macOS launchd installation and diagnosis, local privacy boundaries, Claude Code / Codex marketplace manifests, and audited transitive dependency security overrides.
+Version 1.1.0 adds an independent “where the session stopped” tail view, deterministic collision-free incremental canvas layout, drag feedback that makes the local-file boundary explicit, and BINGOAI publisher metadata. It retains the skills-only installer/controller, macOS launchd diagnosis, local privacy boundaries, and audited dependency overrides.
 
 ## Submission fields that require the publisher
 

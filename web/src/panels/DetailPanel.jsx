@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 react、api 的会话详情/动作接口、util 的展示函数、ui 的 Icon/toast/InlineEdit、menus 的 deleteSessionFlow
- * [OUTPUT]: 对外提供 DetailPanel 组件：首屏=标题+一键续开+这会话聊了什么（摘要/原文摘录托底），
+ * [OUTPUT]: 对外提供 DetailPanel 组件：首屏=标题+一键续开+聊了什么+最后停在哪里（尾部独立摘录），
  *           次级=接力/运行实例/元信息，删除收底；错误态可重试
  * [POS]: panels 的右侧行动面板——画布是地图，这里是扳机。信息层次铁律：内容先于按钮，按钮先于元数据
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -47,7 +47,7 @@ function classify(line) {
   return ['assistant', line];
 }
 
-function DigestView({ text, startCollapsed }) {
+function DigestView({ text, startCollapsed, fromEnd = false }) {
   const [open, setOpen] = useState(!startCollapsed);
   const [full, setFull] = useState(false);
   const lines = useMemo(() => (text || '').split('\n').filter(l => l.trim()), [text]);
@@ -60,7 +60,7 @@ function DigestView({ text, startCollapsed }) {
       </button>
     );
   }
-  const shown = full ? lines : lines.slice(0, 14);
+  const shown = full ? lines : (fromEnd ? lines.slice(-14) : lines.slice(0, 14));
   return (
     <div style={{ marginTop: 8 }}>
       <div style={{
@@ -76,7 +76,9 @@ function DigestView({ text, startCollapsed }) {
       <div style={{ display: 'flex', gap: 6, marginTop: 5 }}>
         {lines.length > 14 && (
           <button className="btn ghost" style={{ fontSize: 11 }} onClick={() => setFull(f => !f)}>
-            {full ? <><Icon name="up" size={10} /> 只看开头</> : <><Icon name="down" size={10} /> 展开全部 {lines.length} 行</>}
+            {full
+              ? <><Icon name="up" size={10} /> {fromEnd ? '只看最后 14 行' : '只看开头'}</>
+              : <><Icon name="down" size={10} /> 展开全部 {lines.length} 行</>}
           </button>
         )}
         {startCollapsed && (
@@ -216,6 +218,18 @@ export default function DetailPanel({ width = 400, sessionKey, onClose, onCollap
                 {busy === 'ai-name' ? '✎ 起名中…' : <><Icon name="tag" /> AI 起名</>}
               </button>
             </div>
+          </Section>
+
+          {/* ===== 会话落点：独立读取文件尾，默认从最后 14 行看起，不被开场摘录截断 ===== */}
+          <Section title="STOP · 最后停在哪里">
+            <div style={{ fontSize: 11.5, color: 'var(--ink-faint)', lineHeight: 1.6 }}>
+              最近一次活动于 {relTime(s.updatedAt)}。下面按时间顺序保留会话停止前的对白、工具动作与报错：
+            </div>
+            {s.endingDigest ? (
+              <DigestView text={s.endingDigest} fromEnd />
+            ) : (
+              <div style={{ marginTop: 8, fontSize: 12, color: 'var(--ink-faint)' }}>文件尾没有可展示的会话事件。</div>
+            )}
           </Section>
 
           {/* ===== 接力：交棒给下一个 Agent ===== */}

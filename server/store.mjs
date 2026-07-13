@@ -107,7 +107,7 @@ export function appendJsonlVerified(file, record, identityKey = 'id') {
 //  扫描缓存仓：{ __version, [filePath]: { mtime, size, session } }
 //  解析器升级必须递增版本号——否则 mtime 命中的旧条目永远吃不到新逻辑
 // ============================================================
-const CACHE_VERSION = 4;   // v4: 子智能体 parentThreadId 记录（派生规模统计）
+const CACHE_VERSION = 5;   // v5: 会话尾部解析覆盖 Codex custom_tool_call 事件
 let cacheMemory = null;
 
 export function loadCache() {

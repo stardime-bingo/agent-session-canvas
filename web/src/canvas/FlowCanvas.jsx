@@ -1,18 +1,19 @@
 /**
- * [INPUT]: 依赖 @xyflow/react、五种自定义节点、menus 的菜单构建器与删除流程、ui 的 toast/Icon
+ * [INPUT]: 依赖 @xyflow/react、layout 纯布局内核、五种自定义节点、menus 的菜单构建器与删除流程、ui 的 toast/Icon
  * [OUTPUT]: 对外提供 FlowCanvas 组件：统一容器模型、弹性生长、拖放改归属、三系统边+手动边、
- *           Backspace 删除治理（便签/画板/手动边可删且过确认，其余免疫）、就地改名信号、折叠展开、视口记忆、纯展示层点击穿透
+ *           增量成员防重叠、Backspace 删除治理（便签/画板/手动边可删且过确认，其余免疫）、就地改名信号、折叠展开、视口记忆
  * [POS]: canvas 的画布引擎。归属律：layout.d 手动指定 > 路径推断；容器永远生长包住成员；
  *        每一次点击必有可感知的回应：选中态/菜单/提示三选一
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
-import React, { useMemo, useCallback, useRef, useEffect, useState, lazy, Suspense } from 'react';
+import React, { useMemo, useCallback, useRef, useEffect, useLayoutEffect, useState, lazy, Suspense } from 'react';
 import { ReactFlow, useNodesState, useEdgesState, Controls, MiniMap, Background, BackgroundVariant, Panel, MarkerType, ConnectionMode } from '@xyflow/react';
 import WorkspaceNode from './WorkspaceNode.jsx';
 import SessionNode from './SessionNode.jsx';
 import DistrictNode from './DistrictNode.jsx';
 import BoardNode, { BOARD_COLORS } from './BoardNode.jsx';
 import NoteNode from './NoteNode.jsx';
+import { COL_W, PAD, BREATH, GUTTER, ROW_MAX_W, HEADER_H, CARD_H, CARD_GAP, MAX_SHOW, packWorkspaces, resolveContainerOverlaps } from './layout.js';
 import { sessionMenu, workspaceMenu, districtMenu, boardMenu, noteMenu, paneMenu, edgeMenu, deleteBoardFlow, deleteNoteFlow } from './menus.jsx';
 import { Icon, toast, confirmPop } from '../ui.jsx';
 
@@ -20,20 +21,6 @@ import { Icon, toast, confirmPop } from '../ui.jsx';
 const DrawLayer = lazy(() => import('./DrawLayer.jsx'));
 
 const nodeTypes = { workspace: WorkspaceNode, session: SessionNode, district: DistrictNode, board: BoardNode, note: NoteNode };
-
-// ============================================================
-//  布局常量
-// ============================================================
-const COL_W = 336;
-const GAP_IN = 40;
-const PAD = { t: 62, l: 26, r: 26, b: 26 };
-const BREATH = { w: 200, h: 120 };
-const GUTTER = 170;
-const ROW_MAX_W = 5200;
-const HEADER_H = 66;
-const CARD_H = 62;
-const CARD_GAP = 8;
-const MAX_SHOW = 8;
 
 // ============================================================
 //  街区识别：路径亲缘即城市区域（HOME 下前两段路径）
@@ -85,21 +72,7 @@ function buildGraph(workspaces, sessionsByKey, layout, boards, relEdges, expande
   const blocks = [];
   for (const [key, members] of groups) {
     const isBoard = key.startsWith('board:');
-    const placed = [];
-    const cols = Math.min(Math.max(Math.ceil(Math.sqrt(members.length * 0.75)), 1), 4);
-    const heights = Array(cols).fill(PAD.t);
-
-    for (const ws of members) {
-      const saved = layout?.[ws.path];
-      const h = heightOf(ws);
-      if (saved && saved.d === key) {
-        placed.push({ ws, x: Math.max(PAD.l, saved.x), y: Math.max(PAD.t, saved.y), h });
-      } else {
-        const c = heights.indexOf(Math.min(...heights));
-        placed.push({ ws, x: PAD.l + c * (COL_W + GAP_IN), y: heights[c], h });
-        heights[c] += h + GAP_IN;
-      }
-    }
+    const placed = packWorkspaces(members, layout, key, heightOf);
 
     // 弹性生长：容器包住全部成员；用户手拉的尺寸是"下限"，内容超出照样撑大
     const maxX = Math.max(...placed.map(p => p.x + COL_W), PAD.l + COL_W);
@@ -152,6 +125,8 @@ function buildGraph(workspaces, sessionsByKey, layout, boards, relEdges, expande
     if (b.isBoard) { b.x = b.board.x; b.y = b.board.y; }
     else if (layout?.[`district:${b.key}`]) { b.x = layout[`district:${b.key}`].x; b.y = layout[`district:${b.key}`].y; }
   }
+  // 手工坐标仍是锚点，但容器会随增量内容长大；长大后统一向下避让，不能侵入邻居。
+  resolveContainerOverlaps(blocks);
 
   // ---- 生成节点：父先于子。删除主权：只有便签/画板/手动边可被 Backspace 触达 ----
   const nodes = [];
@@ -343,7 +318,14 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   ], [built, canvas?.notes, onCanvasAction, onRenameSession, onRenameWs, onToggleExpand, renaming]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(allNodes);
-  useEffect(() => { setNodes(allNodes); }, [allNodes, setNodes]);
+  // 图数据在松手后重建时必须在浏览器绘制前接管，且保留 RF 原生选中态；
+  // useEffect 会先画一帧旧父级/旧选中，再画新图，肉眼就是工作区“闪一下”。
+  useLayoutEffect(() => {
+    setNodes(current => {
+      const selected = new Set(current.filter(n => n.selected).map(n => n.id));
+      return allNodes.map(n => selected.has(n.id) ? { ...n, selected: true } : n);
+    });
+  }, [allNodes, setNodes]);
 
   // ---- 边：三种系统边 + 紫色人笔；半受控（选中/删除交 RF），悬空端点直接丢弃 ----
   // 箭头语义：有方向的关系（分支/接力/手动）带箭头，亲缘无先后不带
@@ -604,7 +586,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       ];
       onMoveNode(entries);
       if (dest.id !== node.parentId) {
-        toast(`已划入「${dest.type === 'board' ? dest.data.board.name : dest.data.name}」`, 'ok');
+        toast(`看板中已划入「${dest.type === 'board' ? dest.data.board.name : dest.data.name}」，本地文件未移动`, 'ok');
       }
     } else if (node.type === 'district') {
       onMoveNode([{ path: node.id, x: node.position.x, y: node.position.y }]);

@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 llm 的多后端路由、adapters/shared 的局部读取、store 的增强数据仓
- * [OUTPUT]: 对外提供 summarize(session)、makeHandoff(session)、nameSession(session)、extractDigest(session)
+ * [OUTPUT]: 对外提供 summarize(session)、makeHandoff(session)、nameSession(session)、extractDigest(session)、extractEndingDigest(session)
  * [POS]: server 的认知层——把机器日志蒸馏成人话：标题给一眼扫过的人，摘要给想接手的人
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -48,9 +48,10 @@ function extractEvents(lines) {
       if (p.type === 'message' && (p.role === 'user' || p.role === 'assistant')) {
         const t = (p.content || []).map(c => c.text || '').join('\n');
         if (t.trim()) out.push({ k: p.role, t });
-      } else if (p.type === 'function_call') {
-        out.push({ k: 'tool', t: `${p.name}: ${String(p.arguments || '').slice(0, 140)}` });
-      } else if (p.type === 'function_call_output') {
+      } else if (p.type === 'function_call' || p.type === 'custom_tool_call') {
+        const input = p.type === 'function_call' ? p.arguments : p.input;
+        out.push({ k: 'tool', t: `${p.name}: ${typeof input === 'string' ? input.slice(0, 140) : briefInput(input)}` });
+      } else if (p.type === 'function_call_output' || p.type === 'custom_tool_call_output') {
         const o = String(p.output || '').slice(0, 400);
         if (/error|failed|exception|denied|fatal/i.test(o)) out.push({ k: 'error', t: o.slice(0, 320) });
       }
@@ -59,6 +60,13 @@ function extractEvents(lines) {
   return out
     .map(m => ({ ...m, t: m.t.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '').trim() }))
     .filter(m => m.t && !(m.k !== 'tool' && m.t.startsWith('<')));
+}
+
+function tailEvents(file, maxBytes) {
+  const size = fs.statSync(file).size;
+  const lines = tailText(file, maxBytes).split('\n');
+  if (size > maxBytes) lines.shift();   // 只有截断读取时，第一行才可能是不完整 JSON
+  return extractEvents(lines.filter(Boolean));
 }
 
 const CAPS = { user: 900, assistant: 500, tool: 160, error: 320 };
@@ -75,7 +83,7 @@ export function extractDigest(session, cap = 12000, deep = false) {
   const tailBytes = deep ? 524288 : 262144;
 
   const head = extractEvents(headLines(session.filePath, headBytes));
-  const tail = extractEvents(tailText(session.filePath, tailBytes).split('\n').slice(1).filter(Boolean));
+  const tail = tailEvents(session.filePath, tailBytes);
 
   let middle = '';
   if (deep && size > headBytes + tailBytes) {
@@ -87,6 +95,21 @@ export function extractDigest(session, cap = 12000, deep = false) {
   const opening = fmtEvents(head.slice(0, deep ? 35 : 6));
   const ending = fmtEvents(tail.slice(-(deep ? 90 : 16)));
   return `【开场 · 任务源起】\n${opening}${middle}\n\n【结尾 · 最终状态】\n${ending}`.slice(0, cap);
+}
+
+// 详情面板的“最后停在哪里”不能依赖总 digest 的前向截断：
+// 从文件尾独立取最近事件，并按完整事件从后向前装入预算，最后一条永远保住。
+export function extractEndingDigest(session, cap = 6000) {
+  const events = tailEvents(session.filePath, 262144).slice(-16);
+  const chosen = [];
+  let used = 0;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const line = fmtEvents([events[i]]);
+    if (chosen.length && used + line.length + 1 > cap) break;
+    chosen.unshift(line.slice(-cap));
+    used += line.length + 1;
+  }
+  return chosen.join('\n');
 }
 
 export function jsonOf(text) {
