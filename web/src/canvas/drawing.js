@@ -1,8 +1,8 @@
 /**
  * [INPUT]: Excalidraw 的元素数组与 BinaryFiles 字典
- * [OUTPUT]: 提供绘图资产快照与稳定签名、命中检测 hitDrawingElement、双平面分流 splitDrawingPlanes(customData.below)、
- *           精确包围盒 drawingBounds(含旋转/折线)、容器承载判定 anchoredDrawingIds(中心落内即跟随)
- * [POS]: DrawLayer 的纯数据内核；沉层垫在卡片之下、浮层批注在上，全部可由 node:test 证伪
+ * [OUTPUT]: 提供已提交绘图的过滤/删除/沉浮/平移纯变换、可排空的串行提交队列、编辑器就绪与几何互斥纯门、
+ *           资产快照与稳定签名、命中检测、双平面分流、精确包围盒与容器承载判定
+ * [POS]: 绘图的纯数据内核；静态世界层、临时编辑器与普通态动作共用，全部可由 node:test 证伪
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
 
@@ -11,10 +11,30 @@
 //  存储仍是一份 canvas.drawing，flag 跟着元素走，无 schema 迁移
 // ============================================================
 export const isBelow = el => !!el?.customData?.below;
+export const committedDrawingElements = (elements = []) => elements.filter(el => el && !el.isDeleted);
 export const splitDrawingPlanes = (elements = []) => ({
-  below: elements.filter(isBelow),
-  above: elements.filter(el => !isBelow(el)),
+  below: committedDrawingElements(elements).filter(isBelow),
+  above: committedDrawingElements(elements).filter(el => !isBelow(el)),
 });
+
+// 普通看板态不挂 Excalidraw：所有主权动作都是已提交数组上的不可变变换。
+// 宿主形状与它的绑定文字同生共死、同层移动，不留幽灵标签。
+export function deleteDrawingElement(elements = [], id) {
+  return committedDrawingElements(elements).filter(el => el.id !== id && el.containerId !== id);
+}
+
+export function setDrawingElementPlane(elements = [], id, below) {
+  return committedDrawingElements(elements).map(el => (el.id === id || el.containerId === id)
+    ? { ...el, customData: { ...el.customData, below } }
+    : el);
+}
+
+export function translateDrawingElements(elements = [], ids = [], dx = 0, dy = 0) {
+  const move = new Set(ids);
+  return committedDrawingElements(elements).map(el => move.has(el.id)
+    ? { ...el, x: el.x + dx, y: el.y + dy }
+    : el);
+}
 
 // ============================================================
 //  精确包围盒：静态导出的沉层画布要钉在正确的 flow 坐标上——
@@ -61,18 +81,84 @@ export function anchoredDrawingIds(elements = [], rect) {
 }
 
 export function drawingSnapshot(elements = [], files = {}) {
+  const committed = committedDrawingElements(elements);
   const used = new Set(
-    elements
+    committed
       .filter(element => element?.type === 'image' && typeof element.fileId === 'string')
       .map(element => element.fileId),
   );
   const kept = {};
   for (const id of [...used].sort()) if (files?.[id]) kept[id] = files[id];
-  return { elements, files: kept };
+  return { elements: committed, files: kept };
 }
 
 // Excalidraw 的 fileId 对应不可变图片内容；ID 集变化即可判定资产仓需要更新。
 export const drawingFilesSignature = files => Object.keys(files || {}).sort().join('|');
+
+// 几何副作用只有在开编辑、绘图编辑、布局事务三把锁都空闲时才允许发生。
+export const canvasGeometryAllowed = ({ opening = false, drawing = false, pending = false } = {}) =>
+  !opening && !drawing && !pending;
+
+// 全局几何动作不隐藏：已进入绘图时先提交并退出；opening/pending 窗口则明确让位。
+export const canvasGeometryPreparation = ({ opening = false, drawing = false, pending = false } = {}) =>
+  opening || pending ? 'blocked' : drawing ? 'exit-drawing' : 'ready';
+
+// Excalidraw API 与 initialData 首次 onChange 的先后顺序不稳定。
+// 首次凑齐只宣告 ready；只有进入本步前已经 ready 的后续 change 才是用户工具变化。
+export function drawingEditorReadyStep(state = {}, eventType) {
+  const wasReady = !!state.ready;
+  const apiReady = !!state.apiReady || eventType === 'api';
+  const hydrated = !!state.hydrated || eventType === 'change';
+  const notifyReady = !wasReady && apiReady && hydrated;
+  return {
+    apiReady,
+    hydrated,
+    ready: wasReady || notifyReady,
+    notifyReady,
+    notifyTool: eventType === 'change' && wasReady,
+  };
+}
+
+// ============================================================
+//  committed 串行提交：每个 transform 只在真正轮到队首时，
+//  基于上一个成功快照执行。失败不推进基线，也不毒死后续任务。
+// ============================================================
+export function createDrawingCommitQueue(initialSnapshot = {}, persist) {
+  let lastSuccessful = drawingSnapshot(initialSnapshot.elements, initialSnapshot.files);
+  let tail = Promise.resolve();
+  let pending = 0;
+
+  const submit = transform => {
+    pending++;
+    const run = tail.then(async () => {
+      const base = lastSuccessful;
+      const transformed = transform(base);
+      if (transformed == null) return base;
+      const draft = Array.isArray(transformed)
+        ? { elements: transformed, files: base.files }
+        : transformed;
+      const next = drawingSnapshot(draft.elements, draft.files ?? base.files);
+      await persist(next);
+      lastSuccessful = next;
+      return next;
+    });
+    tail = run.catch(() => {}).finally(() => { pending--; });
+    return run;
+  };
+
+  return {
+    submit,
+    // 排空门返回最后成功的 elements/files 同一快照；单笔失败已在 tail 内隔离，不阻断读取基线。
+    whenIdle: () => tail.then(() => lastSuccessful),
+    // React props 可在落盘回执后同步新快照；队列忙时的外部值可能是中间态，明确拒绝倒灌。
+    sync(snapshot = {}) {
+      if (pending) return false;
+      lastSuccessful = drawingSnapshot(snapshot.elements, snapshot.files);
+      return lastSuccessful;
+    },
+    snapshot: () => lastSuccessful,
+  };
+}
 
 // ============================================================
 //  命中检测：flow 坐标点落在哪个绘图元素上（后画者优先）

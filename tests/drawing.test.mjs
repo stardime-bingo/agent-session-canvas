@@ -3,18 +3,89 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { anchoredDrawingIds, drawingBounds, drawingFilesSignature, drawingSnapshot, hitDrawingElement, splitDrawingPlanes } from '../web/src/canvas/drawing.js';
+import {
+  anchoredDrawingIds, canvasGeometryAllowed, canvasGeometryPreparation, committedDrawingElements, createDrawingCommitQueue, deleteDrawingElement, drawingBounds,
+  drawingEditorReadyStep,
+  drawingFilesSignature, drawingSnapshot, hitDrawingElement, setDrawingElementPlane, splitDrawingPlanes,
+  translateDrawingElements,
+} from '../web/src/canvas/drawing.js';
 import { loadDrawingFiles, normalizeDrawingFiles, saveDrawingFiles } from '../server/drawing-files.mjs';
 
 const image = id => ({ id: `element-${id}`, type: 'image', fileId: id });
 const binary = id => ({ id, mimeType: 'image/png', dataURL: 'data:image/png;base64,c3ludGhldGlj', created: 1 });
 
+const driveEditorHandshake = events => {
+  let state = {};
+  const notifications = [];
+  for (const [eventType, tool] of events) {
+    state = drawingEditorReadyStep(state, eventType);
+    if (state.notifyReady) notifications.push('ready');
+    if (state.notifyTool) notifications.push(`tool:${tool}`);
+  }
+  return { state, notifications };
+};
+
+test('空画布 api→change：首次默认 selection 只完成 ready，后续 freedraw 才回传工具', () => {
+  const { state, notifications } = driveEditorHandshake([
+    ['api'], ['change', 'selection'], ['api'], ['change', 'freedraw'],
+  ]);
+  assert.equal(state.ready, true);
+  assert.deepEqual(notifications, ['ready', 'tool:freedraw']);
+});
+
+test('非空画布 change→api：首次水合 selection 不回灌，重复事件不重发 ready', () => {
+  const { state, notifications } = driveEditorHandshake([
+    ['change', 'selection'], ['api'], ['api'], ['change', 'freedraw'],
+  ]);
+  assert.deepEqual(
+    { apiReady: state.apiReady, hydrated: state.hydrated, ready: state.ready },
+    { apiReady: true, hydrated: true, ready: true },
+  );
+  assert.deepEqual(notifications, ['ready', 'tool:freedraw']);
+});
+
+test('画布几何门：opening/drawing/pending 任一把锁在场都拒绝副作用', () => {
+  assert.equal(canvasGeometryAllowed(), true);
+  assert.equal(canvasGeometryAllowed({ opening: true }), false);
+  assert.equal(canvasGeometryAllowed({ drawing: true }), false);
+  assert.equal(canvasGeometryAllowed({ pending: true }), false);
+  assert.equal(canvasGeometryAllowed({ opening: true, drawing: true, pending: true }), false);
+});
+
+test('全局几何准备：opening/pending 让位，active drawing 先退出，空闲直接继续', () => {
+  assert.equal(canvasGeometryPreparation(), 'ready');
+  assert.equal(canvasGeometryPreparation({ drawing: true }), 'exit-drawing');
+  assert.equal(canvasGeometryPreparation({ opening: true }), 'blocked');
+  assert.equal(canvasGeometryPreparation({ pending: true }), 'blocked');
+  assert.equal(canvasGeometryPreparation({ opening: true, drawing: true }), 'blocked');
+});
+
+test('deferred opening 期间拖动与整理 callback 均为零次，解门后才可执行', async () => {
+  let opening = true;
+  let releaseOpening;
+  const opened = new Promise(resolve => { releaseOpening = resolve; }).then(() => { opening = false; });
+  let geometryEffects = 0;
+  const guardedGeometry = () => {
+    if (canvasGeometryAllowed({ opening })) geometryEffects++;
+  };
+
+  guardedGeometry();   // drag
+  guardedGeometry();   // arrange
+  assert.equal(geometryEffects, 0);
+  releaseOpening();
+  await opened;
+  guardedGeometry();
+  guardedGeometry();
+  assert.equal(geometryEffects, 2);
+});
+
 test('drawing snapshot keeps referenced images and prunes deleted image files', () => {
-  const snapshot = drawingSnapshot([image('used'), { id: 'line', type: 'line' }], {
-    used: binary('used'), stale: binary('stale'),
+  const snapshot = drawingSnapshot([image('used'), { ...image('deleted'), isDeleted: true }, { id: 'line', type: 'line' }], {
+    used: binary('used'), deleted: binary('deleted'), stale: binary('stale'),
   });
 
   assert.deepEqual(Object.keys(snapshot.files), ['used']);
+  assert.deepEqual(snapshot.elements.map(e => e.id), ['element-used', 'line']);
   assert.equal(drawingFilesSignature(snapshot.files), 'used');
   assert.equal(drawingFilesSignature({ stale: binary('stale'), used: binary('used') }), 'stale|used');
 });
@@ -106,6 +177,164 @@ test('双平面分流：customData.below 沉层与浮层各归各，顺序保留
   assert.deepEqual(below.map(e => e.id), ['zone', 'zone2']);
   assert.deepEqual(above.map(e => e.id), ['note1', 'note2']);
   assert.deepEqual(splitDrawingPlanes([]).below, []);
+});
+
+test('已提交快照过滤墓碑，删除宿主时连带绑定文字', () => {
+  const els = [
+    rect('host', 0, 0, 100, 80),
+    { id: 'label', type: 'text', x: 10, y: 10, width: 50, height: 20, containerId: 'host' },
+    rect('keep', 200, 0, 50, 50),
+    rect('dead', 300, 0, 50, 50, { isDeleted: true }),
+  ];
+  assert.deepEqual(committedDrawingElements(els).map(e => e.id), ['host', 'label', 'keep']);
+  assert.deepEqual(deleteDrawingElement(els, 'host').map(e => e.id), ['keep']);
+  assert.deepEqual(splitDrawingPlanes(els).above.map(e => e.id), ['host', 'label', 'keep']);
+});
+
+test('沉浮变换带着绑定文字，批量平移每个元素只移一次', () => {
+  const els = [
+    rect('host', 10, 20, 100, 80),
+    { id: 'label', type: 'text', x: 20, y: 30, width: 50, height: 20, containerId: 'host' },
+    rect('stay', 300, 40, 50, 50),
+  ];
+  const sunk = setDrawingElementPlane(els, 'host', true);
+  assert.equal(sunk.find(e => e.id === 'host').customData.below, true);
+  assert.equal(sunk.find(e => e.id === 'label').customData.below, true);
+  const moved = translateDrawingElements(sunk, ['host', 'host', 'label'], 7, -3);
+  assert.deepEqual(moved.map(e => [e.id, e.x, e.y]), [
+    ['host', 17, 17], ['label', 27, 27], ['stay', 300, 40],
+  ]);
+  assert.deepEqual(els.map(e => [e.id, e.x, e.y]), [
+    ['host', 10, 20], ['label', 20, 30], ['stay', 300, 40],
+  ]);
+});
+
+test('committed 队列等前一笔成功才基于新快照执行，已删图片不复活', async () => {
+  let releaseFirst;
+  const firstGate = new Promise(resolve => { releaseFirst = resolve; });
+  const calls = [];
+  const host = rect('host', 10, 20, 100, 80);
+  const queue = createDrawingCommitQueue({
+    elements: [image('photo'), host],
+    files: { photo: binary('photo') },
+  }, snapshot => {
+    calls.push(snapshot);
+    return calls.length === 1 ? firstGate : Promise.resolve();
+  });
+
+  const first = queue.submit(base => ({
+    elements: deleteDrawingElement(base.elements, 'element-photo'),
+    files: base.files,
+  }));
+  const second = queue.submit(base => ({
+    elements: translateDrawingElements(setDrawingElementPlane(base.elements, 'host', true), ['host'], 7, -3),
+    files: base.files,
+  }));
+
+  await Promise.resolve();
+  assert.equal(calls.length, 1, '第二笔不得在第一笔 resolve 前启动');
+  assert.deepEqual(calls[0].elements.map(e => e.id), ['host']);
+  assert.deepEqual(calls[0].files, {});
+
+  releaseFirst();
+  await first;
+  const final = await second;
+  assert.equal(calls.length, 2);
+  assert.deepEqual(final.elements.map(e => e.id), ['host']);
+  assert.deepEqual(final.files, {});
+  assert.equal(final.elements[0].customData.below, true);
+  assert.deepEqual([final.elements[0].x, final.elements[0].y], [17, 17]);
+});
+
+test('committed 队列单笔 reject 不推进基线也不毒死后续提交', async () => {
+  let attempt = 0;
+  const queue = createDrawingCommitQueue({
+    elements: [rect('host', 10, 20, 100, 80)],
+    files: {},
+  }, () => {
+    attempt++;
+    return attempt === 1 ? Promise.reject(new Error('synthetic failure')) : Promise.resolve();
+  });
+
+  const failed = queue.submit(base => ({
+    elements: deleteDrawingElement(base.elements, 'host'),
+    files: base.files,
+  }));
+  const recovered = queue.submit(base => ({
+    elements: translateDrawingElements(base.elements, ['host'], 5, 6),
+    files: base.files,
+  }));
+
+  await assert.rejects(failed, /synthetic failure/);
+  const final = await recovered;
+  assert.equal(attempt, 2);
+  assert.deepEqual(final.elements.map(e => [e.id, e.x, e.y]), [['host', 15, 26]]);
+});
+
+test('编辑事务门等待 pending 删除落盘，再以无旧图片与文件的同一快照水合', async () => {
+  let releaseDelete;
+  const deleteGate = new Promise(resolve => { releaseDelete = resolve; });
+  const host = rect('host', 10, 20, 100, 80);
+  const queue = createDrawingCommitQueue({
+    elements: [image('photo'), host],
+    files: { photo: binary('photo') },
+  }, () => deleteGate);
+
+  const deleting = queue.submit(base => ({
+    elements: deleteDrawingElement(base.elements, 'element-photo'),
+    files: base.files,
+  }));
+  let opened = false;
+  const seedPromise = queue.whenIdle().then(seed => { opened = true; return seed; });
+
+  await Promise.resolve();
+  assert.equal(opened, false, 'pending 普通态提交结束前不得打开编辑器');
+  releaseDelete();
+  await deleting;
+  const seed = await seedPromise;
+  assert.deepEqual(seed.elements.map(e => e.id), ['host']);
+  assert.deepEqual(seed.files, {});
+
+  const edited = {
+    elements: [...seed.elements, rect('new-ink', 200, 50, 40, 40)],
+    files: seed.files,
+  };
+  assert.notEqual(queue.sync(edited), false, '编辑器 flush 快照应在 idle 时接管基线');
+  const final = await queue.submit(base => ({
+    elements: translateDrawingElements(base.elements, ['host'], 5, 6),
+    files: base.files,
+  }));
+  assert.deepEqual(final.elements.map(e => [e.id, e.x, e.y]), [
+    ['host', 15, 26], ['new-ink', 200, 50],
+  ]);
+  assert.deepEqual(final.files, {});
+});
+
+test('pending 期间拒绝 sync；pending 失败后排空种子仍是上次成功的 elements/files', async () => {
+  let rejectPending;
+  const pendingGate = new Promise((_, reject) => { rejectPending = reject; });
+  const host = rect('host', 10, 20, 100, 80);
+  const initial = {
+    elements: [image('photo'), host],
+    files: { photo: binary('photo') },
+  };
+  const queue = createDrawingCommitQueue(initial, () => pendingGate);
+  const pending = queue.submit(base => ({
+    elements: deleteDrawingElement(base.elements, 'element-photo'),
+    files: base.files,
+  }));
+
+  assert.equal(queue.sync({ elements: [rect('stale', 0, 0, 1, 1)], files: {} }), false);
+  let drained = false;
+  const seedPromise = queue.whenIdle().then(seed => { drained = true; return seed; });
+  await Promise.resolve();
+  assert.equal(drained, false);
+
+  rejectPending(new Error('synthetic pending failure'));
+  await assert.rejects(pending, /synthetic pending failure/);
+  const seed = await seedPromise;
+  assert.deepEqual(seed.elements.map(e => e.id), ['element-photo', 'host']);
+  assert.deepEqual(seed.files, { photo: binary('photo') });
 });
 
 test('精确包围盒：旋转矩形按四角实算，折线按 points 实算，负宽高照常', () => {

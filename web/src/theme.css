@@ -143,6 +143,13 @@ body {
   border: 2px solid var(--accent-soft);
   animation: fade-in 0.25s var(--ease-panel);
 }
+/* 开编辑的 drain/水合窗口：同一个 ::after 临时升到 RF 与 DrawLayer 之上拦几何，仍低于 z:7 工具岛。 */
+.canvas-root.drawing-opening::after {
+  content: ''; position: absolute; inset: 0; z-index: 6; pointer-events: auto;
+  background: transparent; cursor: progress;
+  border: 2px solid var(--accent-soft);
+  animation: fade-in 80ms var(--ease-panel);
+}
 .canvas-root.over-drawing .react-flow__pane,
 .canvas-root.over-drawing .react-flow__node { cursor: pointer; }
 
@@ -533,10 +540,18 @@ input.inline-edit {
 
 /* ============================================================
  *  Excalidraw 绘图层融合律：
- *  绘图编辑未激活 → 它的全部 UI 岛（汉堡菜单/缩放条/帮助钮）彻底消失，
- *  只留画布展示笔迹——pointer-events:all 的幽灵劫持一并根治
+ *  普通态是 React Flow viewport 内的 committed SVG，与节点共用唯一 transform；
+ *  Excalidraw 只在编辑事务中挂载，不再常驻追随相机。
  * ============================================================ */
-.draw-layer:not(.draw-active) .excalidraw .layer-ui__wrapper { display: none !important; }
+.react-flow__viewport-portal { pointer-events: none; }
+.ink-world { position: absolute; inset: 0; pointer-events: none; }
+.ink-world-hidden { display: none; }
+.ink-world-plane {
+  position: absolute; pointer-events: none; transform-origin: 0 0;
+  user-select: none;
+}
+.ink-world-below { z-index: -1; }
+.ink-world-above { z-index: 1000; }
 
 /* 绘图编辑激活：保留原生选择与属性面板；汉堡菜单/帮助钮/杂项工具不进屋。 */
 .draw-active .excalidraw .main-menu-trigger,

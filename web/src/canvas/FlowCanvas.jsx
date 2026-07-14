@@ -3,7 +3,8 @@
  * [OUTPUT]: 对外提供 FlowCanvas 组件：统一容器模型、弹性生长、拖放改归属、三系统边+手动边、
  *           增量成员防重叠、Figma 式框选/平移/触控板手势、滚轮双模（触控板平移/鼠标缩放+模式切换钮）、
  *           容器缩放定桩、全画布落空连线选择（含就地打开会话上下文）、缩放感知连接点、原生绘图选择/画笔、
- *           普通模式绘图命中（pane/容器面同河：点击描边带一键选中、右键选中/删除、悬停指针光标）、Backspace 删除治理
+ *           committed ink 与节点共用 ViewportPortal 唯一相机、普通态串行提交、排空后同快照开启且锁住几何的绘图编辑事务、
+ *           普通模式绘图命中（pane/容器面同河）与 Backspace 删除治理
  * [POS]: canvas 的画布引擎。归属律：layout.d 手动指定 > 路径推断；容器永远生长包住成员；
  *        每一次点击必有可感知的回应：选中态/菜单/提示三选一
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -18,7 +19,11 @@ import NoteNode from './NoteNode.jsx';
 import { COL_W, PAD, BREATH, GUTTER, ROW_MAX_W, HEADER_H, CARD_H, CARD_GAP, MAX_SHOW, packWorkspaces, resizedContainerChildren, resolveContainerOverlaps } from './layout.js';
 import { sessionMenu, workspaceMenu, districtMenu, boardMenu, noteMenu, paneMenu, edgeMenu, deleteBoardFlow, deleteNoteFlow } from './menus.jsx';
 import { connectionDrop, syncHandleHitArea } from './connections.js';
-import { anchoredDrawingIds, hitDrawingElement } from './drawing.js';
+import {
+  anchoredDrawingIds, canvasGeometryAllowed, canvasGeometryPreparation, createDrawingCommitQueue, deleteDrawingElement, hitDrawingElement,
+  setDrawingElementPlane, translateDrawingElements,
+} from './drawing.js';
+import InkWorldLayer from './InkWorldLayer.jsx';
 import MiniMapInk from './MiniMapInk.jsx';
 import { wheelDevice, zoomViewport, WHEEL_MODES, nextWheelMode } from './gestures.js';
 import { Icon, toast, confirmPop } from '../ui.jsx';
@@ -205,21 +210,53 @@ function hitContainer(node, all) {
 
 const EDGE_LABEL = { worktree: 'worktree 分支', family: '同族项目', handoff: '接力血缘', manual: '手动连线' };
 
-export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, canvas, onMoveNode, onCanvasAction, onRenameSession, onRenameWs, selectedKey, onSelect, onChanged, onArrange, focusRef, actionsRef, expanded, searching, onToggleExpand }) {
+export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, canvas, onMoveNode, onCanvasAction, onRenameSession, onRenameWs, selectedKey, onSelect, onChanged, onArrange, focusRef, actionsRef, geometryPendingRef, expanded, searching, onToggleExpand }) {
   const instRef = useRef(null);
   const [menu, setMenu] = useState(null);           // 右键快捷菜单 {x, y, items}
   const [edgeTip, setEdgeTip] = useState(null);     // 边悬浮说明牌 {x, y, text}
   const [renaming, setRenaming] = useState({ id: null, n: 0 });   // 就地改名信号（nonce 驱动）
   const [penActive, setPenActive] = useState(false);
-  const [belowHost, setBelowHost] = useState(null);   // 沉层门户：callback ref 触发重渲染，portal 才能挂上
+  const [drawOpening, setDrawOpening] = useState(false);
   const [drawTool, setDrawTool] = useState('selection');
+  const [editSeed, setEditSeed] = useState(null);
   const drawRef = useRef(null);
   const penActiveRef = useRef(false);
   const drawToolRef = useRef('selection');
-  const syncingFromDraw = useRef(false);
+  const pendingSelectRef = useRef(null);
+  const openingRef = useRef(false);
+  const openingPromiseRef = useRef(null);
+  const openingReadyResolveRef = useRef(null);
+  const exitingDrawRef = useRef(false);
   const dropHiRef = useRef(null);                   // 拖动中的投放目标高亮
   const rootRef = useRef(null);
   const clearSelectionRef = useRef(() => {});       // 进绘图前清 RF 选中——Delete 不许一键双雷（定义在下方，ref 解前向引用）
+  const drawingCommitQueueRef = useRef(null);
+  if (!drawingCommitQueueRef.current) {
+    drawingCommitQueueRef.current = createDrawingCommitQueue(
+      { elements: canvas?.drawing, files: canvas?.drawingFiles },
+      snapshot => onCanvasAction('drawingCommit', snapshot),
+    );
+  }
+  const drawingCommitQueue = drawingCommitQueueRef.current;
+
+  // 普通态外部回读可更新队列基线；开门/编辑事务内只认 drain seed 与 flush snapshot。
+  useEffect(() => {
+    if (!openingRef.current && !penActiveRef.current) {
+      drawingCommitQueue.sync({ elements: canvas?.drawing, files: canvas?.drawingFiles });
+    }
+  }, [drawingCommitQueue, canvas?.drawing, canvas?.drawingFiles]);
+
+  const geometryAllowed = useCallback(() => canvasGeometryAllowed({
+    opening: openingRef.current,
+    drawing: penActiveRef.current,
+    pending: geometryPendingRef?.current,
+  }), [geometryPendingRef]);
+  // App 的全局整理只和 opening/pending 互斥；已进入绘图后的全局动作政策保持不变。
+  const geometryLocked = useCallback(() => !canvasGeometryAllowed({
+    opening: openingRef.current,
+    pending: geometryPendingRef?.current,
+  }), [geometryPendingRef]);
+  const opening = useCallback(() => openingRef.current, []);
 
   const triggerRename = useCallback(id => setRenaming(r => ({ id, n: r.n + 1 })), []);
 
@@ -258,45 +295,123 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   }, []);
 
   // ---- 绘图编辑：选择/画笔各有显式入口；进入对齐视口，退出带回视口并冲刷存盘 ----
-  const exitDrawing = useCallback(() => {
+  const exitDrawing = useCallback(async () => {
+    if (!penActiveRef.current || exitingDrawRef.current) return false;
+    exitingDrawRef.current = true;
     setMenu(null);
     const vp = drawRef.current?.getViewport();
-    if (vp) instRef.current?.setViewport(vp);
-    drawRef.current?.flush();
-    penActiveRef.current = false;
-    setPenActive(false);
-  }, []);
+    try {
+      const snapshot = await drawRef.current?.flush();
+      if (!snapshot) throw new Error('绘图编辑器尚未就绪');
+      if (drawingCommitQueue.sync(snapshot) === false) throw new Error('普通绘图提交尚未排空');
+      if (vp) instRef.current?.setViewport(vp);
+      setEditSeed(null);
+      setDrawOpening(false);
+      openingRef.current = false;
+      openingPromiseRef.current = null;
+      const resolveOpening = openingReadyResolveRef.current;
+      openingReadyResolveRef.current = null;
+      penActiveRef.current = false;
+      pendingSelectRef.current = null;
+      setPenActive(false);
+      resolveOpening?.(false);
+      return true;
+    } catch (err) {
+      // 用户若恰在 Suspense/水合窗口退出，取消未完成开门，不能留下永久几何锁。
+      const cancelledOpening = openingRef.current;
+      if (cancelledOpening) {
+        setDrawOpening(false);
+        setEditSeed(null);
+        openingRef.current = false;
+        const resolveReady = openingReadyResolveRef.current;
+        openingReadyResolveRef.current = null;
+        openingPromiseRef.current = null;
+        penActiveRef.current = false;
+        pendingSelectRef.current = null;
+        setPenActive(false);
+        resolveReady?.(false);
+      }
+      toast(cancelledOpening
+        ? `打开绘图已取消：${err.message}`
+        : `绘图未落盘，已保留编辑现场：${err.message}`, 'error');
+      return false;
+    } finally {
+      exitingDrawRef.current = false;
+    }
+  }, [drawingCommitQueue]);
+
+  const prepareGeometry = useCallback(async () => {
+    const step = canvasGeometryPreparation({
+      opening: openingRef.current,
+      drawing: penActiveRef.current,
+      pending: geometryPendingRef?.current,
+    });
+    if (step === 'blocked') {
+      toast(openingRef.current ? '绘图正在打开，请稍后再整理' : '画布布局正在落定，请稍后再试');
+      return false;
+    }
+    if (step === 'exit-drawing') return exitDrawing();
+    return true;
+  }, [exitDrawing, geometryPendingRef]);
 
   const openDrawing = useCallback((tool, selectId) => {
+    if (!openingRef.current && !penActiveRef.current && geometryPendingRef?.current) {
+      toast('画布布局正在落定，请稍后再打开绘图');
+      return Promise.resolve(false);
+    }
     setMenu(null);
     clearSelectionRef.current();   // 清掉看板选中：绘图里按 Delete 时 RF 不许顺手删掉选中的手动边
-    if (penActiveRef.current && drawToolRef.current === tool && !selectId) {
-      exitDrawing();
-      return;
-    }
-    if (!penActiveRef.current) {
-      const vp = instRef.current?.getViewport();
-      if (vp) drawRef.current?.pushViewport(vp);
-      penActiveRef.current = true;
-      setPenActive(true);
-    }
+    const toggleActiveTool = penActiveRef.current && drawToolRef.current === tool && !selectId;
+    pendingSelectRef.current = selectId || null;
     drawToolRef.current = tool;
     setDrawTool(tool);
-    requestAnimationFrame(() => {
+
+    // drain 尚未完成或编辑器尚未 ready：只更新最终工具/选中意图，复用同一扇门。
+    if (openingRef.current) return openingPromiseRef.current;
+    if (toggleActiveTool) {
+      return exitDrawing();
+    }
+    if (penActiveRef.current) {
       drawRef.current?.activateTool(tool);
-      if (selectId) drawRef.current?.selectElement(selectId);   // 带着目标进门：普通模式点中的绘图直接呈选中态
+      if (selectId) drawRef.current?.selectElement(selectId);
+      return Promise.resolve(true);
+    }
+
+    // 第一条进入请求在任何 await 前封门；其后的普通态提交必须失败，不能越过 drain。
+    openingRef.current = true;
+    setDrawOpening(true);
+    let resolveReady;
+    const ready = new Promise(resolve => { resolveReady = resolve; });
+    openingReadyResolveRef.current = resolveReady;
+    const openingPromise = drawingCommitQueue.whenIdle().then(seed => {
+      setEditSeed(seed);
+      penActiveRef.current = true;
+      setPenActive(true);
+      return ready;
+    }).catch(err => {
+      openingRef.current = false;
+      openingPromiseRef.current = null;
+      openingReadyResolveRef.current = null;
+      setDrawOpening(false);
+      setEditSeed(null);
+      penActiveRef.current = false;
+      setPenActive(false);
+      toast(`打开绘图失败：${err.message}`, 'error');
+      return false;
     });
-  }, [exitDrawing]);
+    openingPromiseRef.current = openingPromise;
+    return openingPromise;
+  }, [drawingCommitQueue, exitDrawing, geometryPendingRef]);
 
   const togglePen = useCallback(() => {
-    if (penActiveRef.current) exitDrawing();
+    if (penActiveRef.current && !openingRef.current) exitDrawing();
     else openDrawing('freedraw');
   }, [exitDrawing, openDrawing]);
 
   // 空点退场：选绘图模式点在空白处 → 放行回看板，并把这次点击转交给底下的卡片/画板
-  const exitToCanvas = useCallback(({ x, y }) => {
-    exitDrawing();
-    setTimeout(() => {   // 等绘图层恢复指针穿透后再转交
+  const exitToCanvas = useCallback(async ({ x, y }) => {
+    if (!await exitDrawing()) return;
+    setTimeout(() => {   // 等绘图编辑器卸载、指针恢复后再转交
       const el = document.elementFromPoint(x, y);
       if (!el) return;
       el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, clientX: x, clientY: y, pointerId: 1, isPrimary: true }));
@@ -307,7 +422,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
 
   // 选绘图入口：空画布也进模式，但先说一句实话——零反馈的模式切换是哑谜
   const openSelectDrawing = useCallback(() => {
-    if (!penActiveRef.current && !(drawRef.current?.getElements?.()?.length ?? canvas?.drawing?.length)) {
+    if (!penActiveRef.current && !canvas?.drawing?.length) {
       toast('画布还没有绘图——先用画笔（D）画一笔，再来选中编辑');
     }
     openDrawing('selection');
@@ -319,11 +434,10 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     setDrawTool(tool);
   }, []);
 
-  // 绘图编辑时 Excalidraw 平移缩放 → 实时回写看板视口（回声由 syncingFromDraw 掐断）
+  // 绘图编辑时 Excalidraw 平移缩放 → 实时回写看板视口；
+  // 普通态 InkWorldLayer 直接继承 RF transform，不存在反向直喂回路。
   const onScrollToFlow = useCallback(vp => {
-    syncingFromDraw.current = true;
     instRef.current?.setViewport(vp);
-    requestAnimationFrame(() => { syncingFromDraw.current = false; });
   }, []);
 
   useEffect(() => {
@@ -617,7 +731,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   // 平面感知命中：卡片/容器上只认浮层（沉层垫在它们下面，视觉都被盖住了）；
   // 纯空地(pane)先浮后沉——看得见谁就点得到谁
   const hitDrawingAt = (fx, fy, planes = 'above') => {
-    const els = drawRef.current?.getElements?.() || canvas?.drawing || [];
+    const els = penActiveRef.current ? (drawRef.current?.getElements?.() || []) : (canvas?.drawing || []);
     const tol = 8 / (instRef.current?.getZoom() || 1);
     const above = hitDrawingElement(els.filter(el => !el.customData?.below), fx, fy, tol);
     if (above || planes === 'above') return above;
@@ -625,23 +739,34 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   };
 
   const drawingHitFromEvent = (e, planes) => {
-    if (penActiveRef.current || !drawRef.current) return null;
+    if (penActiveRef.current) return null;
     if (e.target?.closest?.(HIT_BLOCK)) return null;
     const p = instRef.current?.screenToFlowPosition({ x: e.clientX, y: e.clientY });
     return p ? hitDrawingAt(p.x, p.y, planes) : null;
   };
 
   const enterDrawingSelection = hit => {
-    openDrawing('selection', hit.id);
-    toast('已选中绘图——Delete 删除，Esc 返回看板');
+    openDrawing('selection', hit.id)
+      .then(opened => { if (opened) toast('已选中绘图——Delete 删除，Esc 返回看板'); })
+      .catch(err => toast(`打开绘图失败：${err.message}`, 'error'));
   };
+
+  const commitDrawing = useCallback(transform => {
+    if (openingRef.current || penActiveRef.current) {
+      return Promise.reject(new Error('绘图编辑事务进行中'));
+    }
+    return drawingCommitQueue.submit(transform);
+  }, [drawingCommitQueue]);
 
   const drawingMenuItems = hit => [
     // 层级主权：区域底板沉到卡片下面当背景（不再挡点击），批注浮到上面
     { label: hit.customData?.below
         ? <><Icon name="up" /> 浮到卡片上面</>
         : <><Icon name="down" /> 沉到卡片下面</>,
-      fn: () => drawRef.current?.setElementPlane(hit.id, !hit.customData?.below)
+      fn: () => commitDrawing(base => ({
+        elements: setDrawingElementPlane(base.elements, hit.id, !hit.customData?.below),
+        files: base.files,
+      }))
         .then(() => toast(hit.customData?.below ? '已浮到卡片上面' : '已沉为背景底板——不再遮挡卡片点击', 'ok'))
         .catch(err => toast(`层级调整失败：${err.message}`, 'error')) },
     { label: <><Icon name="cursor" /> 选中编辑此绘图</>, fn: () => openDrawing('selection', hit.id) },
@@ -652,7 +777,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       });
       if (ok) {
         // 回执跟真实落盘结果走：daemon 恰好重启时不许拿绿色回执骗人
-        drawRef.current?.deleteElement(hit.id)
+        commitDrawing(base => ({ elements: deleteDrawingElement(base.elements, hit.id), files: base.files }))
           .then(() => toast('绘图已删除', 'ok'))
           .catch(err => toast(`删除未落盘：${err.message}`, 'error'));
       }
@@ -672,7 +797,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   const moveEndT = useRef(null);
   useEffect(() => () => clearTimeout(moveEndT.current), []);
   const onPaneMouseMove = useCallback(e => {
-    if (penActiveRef.current || !drawRef.current) return;
+    if (penActiveRef.current) return;
     if (rootRef.current?.classList.contains('canvas-moving')) return;   // 平移/缩放中内容扫过光标，悬停态不许进出闪烁
     const { clientX, clientY } = e;
     const blocked = !!e.target?.closest?.(HIT_BLOCK);
@@ -725,24 +850,28 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   // ============================================================
   const dragStartRef = useRef(new Map());
   const onNodeDragStart = useCallback((_, node) => {
+    if (!geometryAllowed()) return;
     if (node.type === 'district' || node.type === 'board') {
       dragStartRef.current.set(node.id, { x: node.position.x, y: node.position.y });
     }
-  }, []);
+  }, [geometryAllowed]);
 
   const followAnchoredDrawings = useCallback(moves => {
-    const els = drawRef.current?.getElements?.() || [];
-    if (!els.length) return;
-    const claimed = new Set();
-    for (const m of [...moves].sort((a, b) => a.rect.w * a.rect.h - b.rect.w * b.rect.h)) {
-      if (!m.dx && !m.dy) continue;
-      const ids = anchoredDrawingIds(els, m.rect).filter(id => !claimed.has(id));
-      if (!ids.length) continue;
-      ids.forEach(id => claimed.add(id));
-      drawRef.current.translateElements(ids, m.dx, m.dy)
-        .catch(err => toast(`批注跟随失败：${err.message}`, 'error'));
-    }
-  }, []);
+    return commitDrawing(base => {
+      const els = base.elements;
+      if (!els.length) return null;
+      const claimed = new Set();
+      let next = els;
+      for (const m of [...moves].sort((a, b) => a.rect.w * a.rect.h - b.rect.w * b.rect.h)) {
+        if (!m.dx && !m.dy) continue;
+        const ids = anchoredDrawingIds(els, m.rect).filter(id => !claimed.has(id));
+        if (!ids.length) continue;
+        ids.forEach(id => claimed.add(id));
+        next = translateDrawingElements(next, ids, m.dx, m.dy);
+      }
+      return next === els ? null : { elements: next, files: base.files };
+    });
+  }, [commitDrawing]);
 
   const containerRects = useCallback(() => {
     const out = {};
@@ -774,9 +903,10 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     };
     if (actionsRef) actionsRef.current = {
       addNote, addBoard, fit: () => focusRef.current(null), toggleDraw: togglePen, clearSelection,
+      geometryLocked, opening, prepareGeometry,
       containerRects, followDrawings: followAnchoredDrawings,   // 容器承载律：整理/撤销的墨迹跟随出口
     };
-  }, [built, focusRef, actionsRef, addNote, addBoard, togglePen, exitDrawing, clearSelection, containerRects, followAnchoredDrawings]);
+  }, [built, focusRef, actionsRef, addNote, addBoard, togglePen, exitDrawing, clearSelection, geometryLocked, opening, prepareGeometry, containerRects, followAnchoredDrawings]);
 
   const onNodeClick = useCallback((e, node) => {
     const hit = drawingHitFromEvent(e);   // 视觉最上层者赢：描边带上的点击优先归绘图，空心区照常穿透给卡片
@@ -803,13 +933,18 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   };
 
   const onNodeDrag = useCallback((_, node) => {
+    if (!geometryAllowed()) return;
     if (node.type !== 'workspace') return;
     const { oldParent, hit } = hitContainer(node, instRef.current?.getNodes() || []);
     setDropHi(hit && oldParent && hit.id !== oldParent.id ? hit.id : null);
-  }, []);
+  }, [geometryAllowed]);
 
   const onNodeDragStop = useCallback((_, node) => {
     setDropHi(null);
+    if (!geometryAllowed()) {
+      dragStartRef.current.delete(node.id);
+      return;
+    }
     const all = instRef.current?.getNodes() || [];
     if (node.type === 'workspace') {
       const { oldParent, hit, abs } = hitContainer(node, all);
@@ -840,12 +975,12 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
         followAnchoredDrawings([{
           rect: { x: start.x, y: start.y, w: node.width ?? node.data._w, h: node.height ?? node.data._h },
           dx: node.position.x - start.x, dy: node.position.y - start.y,
-        }]);
+        }]).catch(err => toast(`批注跟随失败：${err.message}`, 'error'));
       }
     } else if (node.type === 'note') {
       onCanvasAction('setNote', { id: node.id, x: Math.round(node.position.x), y: Math.round(node.position.y) });
     }
-  }, [onMoveNode, onCanvasAction, followAnchoredDrawings]);
+  }, [onMoveNode, onCanvasAction, followAnchoredDrawings, geometryAllowed]);
 
   // 视口记忆：刷新回到上次看的地方，不再被甩回原点
   const initVp = useRef(undefined);
@@ -854,13 +989,12 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   }
 
   return (
-    <div ref={rootRef} className={`canvas-root${penActive ? ' drawing-on' : ''}`} style={{ position: 'relative', width: '100%', height: '100%' }}>
-    {/* 沉层门户：DOM 首位 = 画在 React Flow 之下——区域底板垫在点阵与卡片后面 */}
-    <div ref={setBelowHost} style={{ position: 'absolute', inset: 0, overflow: 'hidden', pointerEvents: 'none' }} />
+    <div ref={rootRef} className={`canvas-root${penActive ? ' drawing-on' : ''}${drawOpening ? ' drawing-opening' : ''}`} style={{ position: 'relative', width: '100%', height: '100%' }}>
     <ReactFlow
       nodes={nodes}
       edges={rfEdges}
       nodeTypes={nodeTypes}
+      nodesDraggable={!drawOpening}
       onNodesChange={onNodesChange}
       onEdgesChange={onEdgesChange}
       onMoveStart={() => {
@@ -871,8 +1005,6 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       }}
       onMove={(_, vp) => {
         syncHandleHitArea(rootRef.current, vp.zoom);
-        if (syncingFromDraw.current || penActive) return;
-        drawRef.current?.pushViewport(vp);   // 相机主权唯一：同步同相位喂浮沉两层
       }}
       onMoveEnd={(_, vp) => {
         // onMove 已逐帧喂到位；这里只收尾状态类与视口记忆（滚轮缩放每格发一次 end，收敛到手势尾部）
@@ -886,7 +1018,6 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       onInit={inst => {
         instRef.current = inst;
         syncHandleHitArea(rootRef.current, inst.getZoom());
-        drawRef.current?.pushViewport(inst.getViewport());
       }}
       onNodeClick={onNodeClick}
       onNodeDoubleClick={onNodeDoubleClick}
@@ -926,6 +1057,12 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       maxZoom={MAX_ZOOM}
       proOptions={{ hideAttribution: true }}
     >
+      {/* committed ink 与节点共享 React Flow 的同一 viewport transform；视口手势不触发重导出。 */}
+      <InkWorldLayer
+        elements={canvas?.drawing}
+        files={canvas?.drawingFiles}
+        hidden={penActive}
+      />
       {/* ===== 关系图例：四种线各是什么，一眼即懂（绘图编辑时为工具层让位） ===== */}
       {!penActive && <Panel position="bottom-center" style={{ pointerEvents: 'none' }}>
         <div className="mono" style={{
@@ -980,21 +1117,29 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     </ReactFlow>
     {/* ===== 边悬浮说明牌 ===== */}
     {edgeTip && <div className="edge-tip" style={{ left: edgeTip.x, top: edgeTip.y }}>{edgeTip.text}</div>}
-    {(penActive || (canvas?.drawing?.length > 0)) && (
+    {penActive && editSeed && (
       <Suspense fallback={null}>
         <DrawLayer
           ref={drawRef} active={penActive}
-          belowHost={belowHost}
-          initialElements={canvas?.drawing}
-          initialFiles={canvas?.drawingFiles}
+          initialElements={editSeed.elements}
+          initialFiles={editSeed.files}
           onScrollToFlow={onScrollToFlow}
           onToolChange={onDrawToolChange}
           onExitToCanvas={exitToCanvas}
-          onPersisted={els => onCanvasAction('drawingPersisted', els)}
-          onReady={() => {
+          onPersisted={(els, files) => onCanvasAction('drawingPersisted', { elements: els, files })}
+          onReady={controller => {
             const vp = instRef.current?.getViewport();
-            if (vp) drawRef.current?.pushViewport(vp);
-            if (penActive) drawRef.current?.activateTool(drawToolRef.current);
+            if (vp) controller.pushViewport(vp);
+            controller.activateTool(drawToolRef.current);
+            const selectId = pendingSelectRef.current;
+            const selected = !selectId || controller.getElements()?.some(el => el.id === selectId);
+            if (selectId && selected) controller.selectElement(selectId);
+            if (selectId && !selected) toast('目标绘图刚刚发生变化，请重新选择', 'error');
+            openingRef.current = false;
+            setDrawOpening(false);
+            const resolveReady = openingReadyResolveRef.current;
+            openingReadyResolveRef.current = null;
+            resolveReady?.(!!selected);
           }}
         />
       </Suspense>
