@@ -16,10 +16,20 @@ const clampPos = (x, y) => ({
   y: Math.max(12, Math.min(y ?? 80, window.innerHeight - 320)),
 });
 
+// 工具行语法高亮：▸ 工具名(青) : 参数(暗)——像 shell 里命令与参数的份量差
+const toolLine = t => {
+  const m = t.match(/^▸\s*([^:：]{1,40}?)\s*[:：]\s*([\s\S]*)$/);
+  return m
+    ? <>▸ <span className="tn">{m[1]}</span> <span className="ta">{m[2]}</span></>
+    : t;
+};
+
 // 页级 memo：翻页只挂新页，已渲染的旧页一行都不重算
 const Page = memo(function Page({ text }) {
   const lines = useMemo(() => text.split('\n').filter(l => l.trim()).map(classifyDigestLine), [text]);
-  return lines.map(([kind, t], i) => <div key={i} className={`tl ${kind}`}>{t}</div>);
+  return lines.map(([kind, t], i) => (
+    <div key={i} className={`tl ${kind}`}>{kind === 'tool' ? toolLine(t) : t}</div>
+  ));
 });
 
 export default function ContextFrame({ frame, onClose, onOpenDetail }) {
@@ -176,6 +186,7 @@ export default function ContextFrame({ frame, onClose, onOpenDetail }) {
               : <div className="tl head term-more" onClick={loadOlder}>↑ 上滑或点击加载更早</div>}
             {pages.map(p => <Page key={p.off} text={p.text} />)}
             {partial && <div className="tl head">【节选】daemon 重启后升级为可上滑翻页的完整历史</div>}
+            <div className="tl"><span className="term-cursor">▊</span></div>
           </>
         )}
       </div>

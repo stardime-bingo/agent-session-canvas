@@ -434,57 +434,77 @@ input.inline-edit {
 }
 
 /* ============================================================
- *  会话上下文终端框：拉线落空的第三条路——就地看完整现场
- *  白岛壳 + 深色终端体，角色分色与详情面板同一套语义
+ *  会话上下文终端窗：拉线落空的第三条路——就地看完整现场
+ *  Ghostty 基因：Tokyo Night 系调色板一处定调，整窗深色融为一体
  * ============================================================ */
 .term-frame {
+  --t-bg: #16161e; --t-bg2: #1a1b26; --t-raise: #1f2335;
+  --t-fg: #c0caf5; --t-bright: #e2e8ff; --t-dim: #565f89;
+  --t-green: #9ece6a; --t-cyan: #7dcfff; --t-blue: #7aa2f7; --t-red: #f7768e;
+  --t-line: #24283b;
   position: absolute; z-index: 100;
   display: flex; flex-direction: column; overflow: hidden;
   max-height: min(68vh, 640px);
-  box-shadow: var(--shadow-drag);
+  border-color: var(--t-line);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.42);
   animation: toast-in 0.18s var(--ease-panel);
 }
 .term-head {
   display: flex; align-items: center; gap: 7px; flex-shrink: 0;
   padding: 8px 12px; cursor: grab; user-select: none;
-  border-bottom: 1px solid var(--line); background: var(--bg-panel);
+  border-bottom: 1px solid var(--t-line); background: var(--t-bg2);
+  color: var(--t-fg);
 }
 .term-head:active { cursor: grabbing; }
+.term-head .btn { color: #a9b1d6; }
+.term-head .btn:hover { color: #fff; background: var(--t-raise); border-color: transparent; }
 .term-light { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
 .term-body {
   flex: 1; min-height: 130px; overflow-y: auto; overscroll-behavior: contain;
-  background: #0c1222; color: #cbd5e1;
-  font-family: var(--mono); font-size: 11.5px; line-height: 1.65;
-  padding: 10px 14px;
-  scrollbar-color: #334155 transparent;   /* 深色终端体配深色滚梯，不用全局浅色的 */
+  background: var(--t-bg); color: var(--t-fg);
+  font-family: var(--mono); font-size: 11.5px; line-height: 1.7;
+  padding: 12px 14px;
 }
-.term-body::-webkit-scrollbar-thumb { background-color: #334155; }
+.term-body ::selection { background: rgba(122, 162, 247, 0.28); }
 /* 终端体性能核心：视口外的行不排版不绘制（浏览器原生虚拟化），万行 DOM 照样 60fps */
 .term-body .tl {
   margin: 4px 0; white-space: pre-wrap; word-break: break-word;
   content-visibility: auto; contain-intrinsic-block-size: auto 22px;
 }
-.term-body { scrollbar-color: #334155 transparent; }
-.term-body::-webkit-scrollbar-thumb { background-color: #334155; }
+.term-body { scrollbar-color: #2a2e42 transparent; }
+.term-body::-webkit-scrollbar-thumb { background-color: #2a2e42; }
 .term-body .term-more { cursor: pointer; text-align: center; }
-.term-body .term-more:hover { color: #93c5fd; }
+.term-body .term-more:hover { color: var(--t-blue); }
 /* 回到最新：滚离底部才现身的深色小药丸，与终端体同族 */
 .term-jump {
   position: absolute; right: 16px; bottom: 58px; z-index: 2;
-  background: #1e293b; color: #cbd5e1; border: 1px solid #334155;
+  background: var(--t-raise, #1f2335); color: #a9b1d6; border: 1px solid #2a2e42;
   font-size: 11px; padding: 5px 12px; border-radius: 99px; cursor: pointer;
   box-shadow: var(--shadow); animation: toast-in 0.16s var(--ease-panel);
 }
-.term-jump:hover { color: #fff; border-color: #475569; }
-.term-body .tl.head { color: #64748b; letter-spacing: 0.08em; font-size: 10px; margin: 12px 0 4px; }
-.term-body .tl.user { color: #93c5fd; border-left: 2px solid #3b82f6; padding-left: 8px; }
-.term-body .tl.assistant { color: #cbd5e1; border-left: 2px solid #334155; padding-left: 8px; }
-.term-body .tl.tool { color: #64748b; font-size: 10.5px; margin-left: 10px; }
-.term-body .tl.error { color: #fda29b; font-size: 10.5px; margin-left: 10px; }
+.term-jump:hover { color: #fff; border-color: #3b4261; }
+/* 角色即语法高亮：用户=绿提示符行，助手=正文前景，工具=青名+暗参，报错=珊瑚红，段头=注释灰 */
+.term-body .tl.head { color: var(--t-dim); letter-spacing: 0.08em; font-size: 10px; margin: 12px 0 4px; }
+.term-body .tl.user { color: var(--t-bright); padding-left: 16px; text-indent: -16px; }
+.term-body .tl.user::before { content: '❯ '; color: var(--t-green); font-weight: 700; }
+.term-body .tl.assistant { color: var(--t-fg); }
+.term-body .tl.tool { color: var(--t-dim); font-size: 10.5px; margin-left: 10px; }
+.term-body .tl.tool .tn { color: var(--t-cyan); }
+.term-body .tl.tool .ta { color: var(--t-dim); }
+.term-body .tl.error { color: var(--t-red); font-size: 10.5px; margin-left: 10px; }
+/* 底部呼吸块光标：这扇窗是活的 */
+.term-cursor { color: var(--t-fg); opacity: 0.75; animation: term-blink 1.06s steps(1) infinite; }
+@keyframes term-blink { 50% { opacity: 0; } }
+.canvas-moving .term-cursor { animation-play-state: paused; }
 .term-foot {
   display: flex; gap: 8px; align-items: center; flex-shrink: 0;
-  padding: 8px 12px; border-top: 1px solid var(--line); background: var(--bg-panel);
+  padding: 8px 12px; border-top: 1px solid var(--t-line); background: var(--t-bg2);
 }
+.term-foot .btn { background: var(--t-raise); border-color: #2a2e42; color: #a9b1d6; box-shadow: none; }
+.term-foot .btn:hover { color: #fff; border-color: #3b4261; background: #24283b; }
+.term-foot .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.term-foot .btn.ghost { background: transparent; }
+.term-foot .mono { color: var(--t-dim) !important; }
 
 /* ============================================================
  *  空态卡：世界被筛空时的指路牌
