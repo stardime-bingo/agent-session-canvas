@@ -1,9 +1,47 @@
 /**
  * [INPUT]: Excalidraw 的元素数组与 BinaryFiles 字典
- * [OUTPUT]: 提供只保留仍被图片元素引用的绘图资产快照与稳定签名、普通模式绘图命中检测 hitDrawingElement
- * [POS]: DrawLayer 的纯数据内核；避免已删除图片继续占盘，也避免每一笔都重复上传大图
+ * [OUTPUT]: 提供绘图资产快照与稳定签名、命中检测 hitDrawingElement、
+ *           双平面分流 splitDrawingPlanes(customData.below)、精确包围盒 drawingBounds(含旋转/折线)
+ * [POS]: DrawLayer 的纯数据内核；沉层垫在卡片之下、浮层批注在上，全部可由 node:test 证伪
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
+
+// ============================================================
+//  双平面分流：customData.below = 沉到卡片下面的区域底板；其余为浮层批注
+//  存储仍是一份 canvas.drawing，flag 跟着元素走，无 schema 迁移
+// ============================================================
+export const isBelow = el => !!el?.customData?.below;
+export const splitDrawingPlanes = (elements = []) => ({
+  below: elements.filter(isBelow),
+  above: elements.filter(el => !isBelow(el)),
+});
+
+// ============================================================
+//  精确包围盒：静态导出的沉层画布要钉在正确的 flow 坐标上——
+//  旋转元素按四角实算，线/手绘按 points 实算，近似即错位
+// ============================================================
+export function drawingBounds(elements = []) {
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  const eat = (x, y) => {
+    if (x < minX) minX = x; if (x > maxX) maxX = x;
+    if (y < minY) minY = y; if (y > maxY) maxY = y;
+  };
+  for (const el of elements) {
+    if (!el || el.isDeleted) continue;
+    const pts = (el.type === 'line' || el.type === 'arrow' || el.type === 'freedraw') && el.points?.length
+      ? el.points
+      : [[0, 0], [el.width || 0, 0], [0, el.height || 0], [el.width || 0, el.height || 0]];
+    const cx = el.x + (el.width || 0) / 2, cy = el.y + (el.height || 0) / 2;
+    const cos = Math.cos(el.angle || 0), sin = Math.sin(el.angle || 0);
+    for (const [px, py] of pts) {
+      const ax = el.x + px, ay = el.y + py;
+      if (!el.angle) { eat(ax, ay); continue; }
+      const dx = ax - cx, dy = ay - cy;
+      eat(cx + dx * cos - dy * sin, cy + dx * sin + dy * cos);
+    }
+  }
+  return minX === Infinity ? null : { minX, minY, maxX, maxY };
+}
 
 export function drawingSnapshot(elements = [], files = {}) {
   const used = new Set(

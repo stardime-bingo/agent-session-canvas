@@ -210,6 +210,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   const [edgeTip, setEdgeTip] = useState(null);     // 边悬浮说明牌 {x, y, text}
   const [renaming, setRenaming] = useState({ id: null, n: 0 });   // 就地改名信号（nonce 驱动）
   const [penActive, setPenActive] = useState(false);
+  const [belowHost, setBelowHost] = useState(null);   // 沉层门户：callback ref 触发重渲染，portal 才能挂上
   const [drawTool, setDrawTool] = useState('selection');
   const drawRef = useRef(null);
   const penActiveRef = useRef(false);
@@ -290,6 +291,18 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     if (penActiveRef.current) exitDrawing();
     else openDrawing('freedraw');
   }, [exitDrawing, openDrawing]);
+
+  // 空点退场：选绘图模式点在空白处 → 放行回看板，并把这次点击转交给底下的卡片/画板
+  const exitToCanvas = useCallback(({ x, y }) => {
+    exitDrawing();
+    setTimeout(() => {   // 等绘图层恢复指针穿透后再转交
+      const el = document.elementFromPoint(x, y);
+      if (!el) return;
+      el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, clientX: x, clientY: y, pointerId: 1, isPrimary: true }));
+      el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, clientX: x, clientY: y, pointerId: 1, isPrimary: true }));
+      el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+    }, 0);
+  }, [exitDrawing]);
 
   // 选绘图入口：空画布也进模式，但先说一句实话——零反馈的模式切换是哑谜
   const openSelectDrawing = useCallback(() => {
@@ -600,16 +613,21 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   // 功能件排除清单唯一真相：点击/悬停两条路径共用，永不分叉
   const HIT_BLOCK = '.container-drag-handle, .react-flow__resize-control, button, input, textarea, [contenteditable]';
 
-  const hitDrawingAt = (fx, fy) => {
+  // 平面感知命中：卡片/容器上只认浮层（沉层垫在它们下面，视觉都被盖住了）；
+  // 纯空地(pane)先浮后沉——看得见谁就点得到谁
+  const hitDrawingAt = (fx, fy, planes = 'above') => {
     const els = drawRef.current?.getElements?.() || canvas?.drawing || [];
-    return hitDrawingElement(els, fx, fy, 8 / (instRef.current?.getZoom() || 1));
+    const tol = 8 / (instRef.current?.getZoom() || 1);
+    const above = hitDrawingElement(els.filter(el => !el.customData?.below), fx, fy, tol);
+    if (above || planes === 'above') return above;
+    return hitDrawingElement(els.filter(el => el.customData?.below), fx, fy, tol);
   };
 
-  const drawingHitFromEvent = e => {
+  const drawingHitFromEvent = (e, planes) => {
     if (penActiveRef.current || !drawRef.current) return null;
     if (e.target?.closest?.(HIT_BLOCK)) return null;
     const p = instRef.current?.screenToFlowPosition({ x: e.clientX, y: e.clientY });
-    return p ? hitDrawingAt(p.x, p.y) : null;
+    return p ? hitDrawingAt(p.x, p.y, planes) : null;
   };
 
   const enterDrawingSelection = hit => {
@@ -618,6 +636,13 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   };
 
   const drawingMenuItems = hit => [
+    // 层级主权：区域底板沉到卡片下面当背景（不再挡点击），批注浮到上面
+    { label: hit.customData?.below
+        ? <><Icon name="up" /> 浮到卡片上面</>
+        : <><Icon name="down" /> 沉到卡片下面</>,
+      fn: () => drawRef.current?.setElementPlane(hit.id, !hit.customData?.below)
+        .then(() => toast(hit.customData?.below ? '已浮到卡片上面' : '已沉为背景底板——不再遮挡卡片点击', 'ok'))
+        .catch(err => toast(`层级调整失败：${err.message}`, 'error')) },
     { label: <><Icon name="cursor" /> 选中编辑此绘图</>, fn: () => openDrawing('selection', hit.id) },
     { label: <><Icon name="trash" /> 删除此绘图</>, danger: true, fn: async mpos => {
       const ok = await confirmPop({
@@ -635,7 +660,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   ];
 
   const onPaneClick = useCallback(e => {
-    const hit = drawingHitFromEvent(e);
+    const hit = drawingHitFromEvent(e, 'all');   // 纯空地：浮层批注优先，其次沉层底板
     if (hit) return enterDrawingSelection(hit);
     onSelect(null);
     setMenu(null);
@@ -647,10 +672,11 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     if (penActiveRef.current || !drawRef.current) return;
     const { clientX, clientY } = e;
     const blocked = !!e.target?.closest?.(HIT_BLOCK);
+    const planes = e.target?.classList?.contains('react-flow__pane') ? 'all' : 'above';
     cancelAnimationFrame(overDrawRaf.current);
     overDrawRaf.current = requestAnimationFrame(() => {
       const p = blocked ? null : instRef.current?.screenToFlowPosition({ x: clientX, y: clientY });
-      rootRef.current?.classList.toggle('over-drawing', !!(p && hitDrawingAt(p.x, p.y)));
+      rootRef.current?.classList.toggle('over-drawing', !!(p && hitDrawingAt(p.x, p.y, planes)));
     });
   }, [canvas?.drawing]);
   useEffect(() => () => cancelAnimationFrame(overDrawRaf.current), []);
@@ -661,7 +687,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   const onPaneContextMenu = useCallback(e => {
     const pos = instRef.current.screenToFlowPosition({ x: e.clientX, y: e.clientY });
     const at = { x: Math.round(pos.x), y: Math.round(pos.y) };
-    const hit = drawingHitFromEvent(e);
+    const hit = drawingHitFromEvent(e, 'all');
     openMenu(e, [...(hit ? drawingMenuItems(hit) : []), ...paneMenu(at, menuCtx())]);
   }, [onCanvasAction, onArrange, openDrawing, canvas?.drawing]);
 
@@ -779,6 +805,8 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
 
   return (
     <div ref={rootRef} className={`canvas-root${penActive ? ' drawing-on' : ''}`} style={{ position: 'relative', width: '100%', height: '100%' }}>
+    {/* 沉层门户：DOM 首位 = 画在 React Flow 之下——区域底板垫在点阵与卡片后面 */}
+    <div ref={setBelowHost} style={{ position: 'absolute', inset: 0, overflow: 'hidden', pointerEvents: 'none' }} />
     <ReactFlow
       nodes={nodes}
       edges={rfEdges}
@@ -894,10 +922,12 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       <Suspense fallback={null}>
         <DrawLayer
           ref={drawRef} active={penActive}
+          belowHost={belowHost}
           initialElements={canvas?.drawing}
           initialFiles={canvas?.drawingFiles}
           onScrollToFlow={onScrollToFlow}
           onToolChange={onDrawToolChange}
+          onExitToCanvas={exitToCanvas}
           onPersisted={els => onCanvasAction('drawingPersisted', els)}
           onReady={() => {
             const vp = instRef.current?.getViewport();
