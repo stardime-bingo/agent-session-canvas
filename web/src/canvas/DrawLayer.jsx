@@ -1,7 +1,8 @@
 /**
  * [INPUT]: 依赖 @excalidraw/excalidraw 组件/样式/exportToCanvas、api 的 setDrawing、drawing 的快照/分流/包围盒/命中内核
- * [OUTPUT]: 对外提供 DrawLayer 组件（ref 暴露 syncViewport/getViewport/activateTool/getElements/selectElement/
- *           deleteElement/setElementPlane/flush）——双平面绘图：沉层(customData.below)静态垫在卡片之下，浮层批注在上
+ * [OUTPUT]: 对外提供 DrawLayer 组件（ref 暴露 pushViewport/getViewport/activateTool/getElements/selectElement/
+ *           deleteElement/setElementPlane/flush）——双平面绘图：沉层(customData.below)静态垫在卡片之下，浮层批注在上；
+ *           相机主权唯一：pushViewport 领先沿同步喂浮沉两层，rAF 只做风暴合并阀
  * [POS]: canvas 的 Excalidraw 绘图覆盖层——闲置时浮层展示指针穿透、沉层经 belowHost 门户垫底；
  *        激活后全量合流进活实例编辑，退出再分流。坐标契约: excalidraw.scroll = rfViewport.xy / zoom
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -57,7 +58,8 @@ export default forwardRef(function DrawLayer({ active, initialElements, initialF
       return;
     }
     const bounds = drawingBounds(els);
-    const scale = Math.min(1, EXPORT_CAP / Math.max(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY, 1));
+    // retina 锐度：导出按 dpr 栅格化（帽内），同一支笔沉下去不许发虚
+    const scale = Math.min(window.devicePixelRatio || 1, EXPORT_CAP / Math.max(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY, 1));
     exportToCanvas({
       elements: els,
       files: latestFiles.current,
@@ -87,6 +89,8 @@ export default forwardRef(function DrawLayer({ active, initialElements, initialF
         belowRef.current = [...belowRef.current, ...below];
         inst.updateScene({ elements: above });
       }
+      // 一个模式一个主权：退出编辑清掉 Excalidraw 选中——旧选中残留会让下次进门的 Delete 误杀
+      inst.updateScene({ appState: { selectedElementIds: {} } });
     }
     exportBelow();
   };
@@ -130,28 +134,32 @@ export default forwardRef(function DrawLayer({ active, initialElements, initialF
   }, []);
 
   // ============================================================
-  //  单一真相律：浮层笔迹只有一个位置真相——Excalidraw 自己的 scroll。
-  //  旧 CSS 桥（纹理 + transform 双表征）在快速平移时暴露纹理外空白=残影；
-  //  现在每帧 rAF 合并直喂 scroll，Excalidraw 画的永远就是当前视口。
+  //  相机主权唯一：视口值一次采样、同一相位、同步喂给浮沉两层——
+  //  谁私藏第二份位置真相，谁就是下一个残影（CSS 桥双表征已废）。
+  //  领先沿同步直喂（onMove 本身在帧相位内，rAF 推迟反欠一帧）；
+  //  rAF 只做风暴合并阀：同帧多余事件合并到帧门开启时补喂。
   // ============================================================
+  const applyVp = v => {
+    lastPushed.current = { x: v.x / v.zoom, y: v.y / v.zoom, z: v.zoom };
+    apiRef.current?.updateScene({
+      appState: { scrollX: v.x / v.zoom, scrollY: v.y / v.zoom, zoom: { value: v.zoom } },
+    });
+    positionBelow(v);
+  };
   const pushViewport = vp => {
     lastVp.current = vp;
-    pendingVp.current = vp;
-    if (raf.current) return;   // 每帧最多推一次：滚轮风暴合并到下一帧
+    if (raf.current) { pendingVp.current = vp; return; }   // 本帧已喂过：存起来等帧门
+    applyVp(vp);
     raf.current = requestAnimationFrame(() => {
       raf.current = 0;
-      const v = pendingVp.current;
-      lastPushed.current = { x: v.x / v.zoom, y: v.y / v.zoom, z: v.zoom };
-      apiRef.current?.updateScene({
-        appState: { scrollX: v.x / v.zoom, scrollY: v.y / v.zoom, zoom: { value: v.zoom } },
-      });
-      positionBelow(v);
+      const p = pendingVp.current;
+      pendingVp.current = null;
+      if (p) applyVp(p);
     });
   };
 
   useImperativeHandle(ref, () => ({
-    syncViewport: pushViewport,
-    previewViewport: pushViewport,
+    pushViewport,
     // 退出绘图编辑时读回：用户可能在 Excalidraw 里平移过
     getViewport() {
       const s = apiRef.current?.getAppState();

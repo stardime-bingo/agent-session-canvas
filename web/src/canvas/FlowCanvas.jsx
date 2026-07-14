@@ -275,7 +275,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     }
     if (!penActiveRef.current) {
       const vp = instRef.current?.getViewport();
-      if (vp) drawRef.current?.syncViewport(vp);
+      if (vp) drawRef.current?.pushViewport(vp);
       penActiveRef.current = true;
       setPenActive(true);
     }
@@ -825,7 +825,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       onMove={(_, vp) => {
         syncHandleHitArea(rootRef.current, vp.zoom);
         if (syncingFromDraw.current || penActive) return;
-        drawRef.current?.previewViewport(vp);   // 单一真相：每帧直喂 Excalidraw scroll，浮沉两层同步跟车
+        drawRef.current?.pushViewport(vp);   // 相机主权唯一：同步同相位喂浮沉两层
       }}
       onMoveEnd={(_, vp) => {
         // onMove 已逐帧喂到位；这里只收尾状态类与视口记忆（滚轮缩放每格发一次 end，收敛到手势尾部）
@@ -839,7 +839,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       onInit={inst => {
         instRef.current = inst;
         syncHandleHitArea(rootRef.current, inst.getZoom());
-        drawRef.current?.syncViewport(inst.getViewport());
+        drawRef.current?.pushViewport(inst.getViewport());
       }}
       onNodeClick={onNodeClick}
       onNodeDoubleClick={onNodeDoubleClick}
@@ -943,7 +943,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
           onPersisted={els => onCanvasAction('drawingPersisted', els)}
           onReady={() => {
             const vp = instRef.current?.getViewport();
-            if (vp) drawRef.current?.syncViewport(vp);
+            if (vp) drawRef.current?.pushViewport(vp);
             if (penActive) drawRef.current?.activateTool(drawToolRef.current);
           }}
         />
