@@ -1,12 +1,12 @@
 /**
- * [INPUT]: 已提交的 Excalidraw elements/BinaryFiles，依赖 React Flow ViewportPortal 与 Excalidraw SVG 导出器
- * [OUTPUT]: 对外提供 InkWorldLayer；沉层/浮层两张静态 SVG 与 React Flow 节点共用唯一 viewport transform
- * [POS]: 普通看板态的 committed ink compositor；只因绘图数据变化导出，视口/悬停/选中不会触发重绘
+ * [INPUT]: 已提交的 Excalidraw elements/BinaryFiles、事务 originalIds 与帧 revision，依赖 ViewportPortal/SVG 导出器
+ * [OUTPUT]: 对外提供 InkWorldLayer；沉/浮静态 SVG 共用 RF 相机，并在新 SVG 已进入 DOM 后回报 snapshot ready
+ * [POS]: committed ink compositor；编辑时只 hole-punch 事务原件，旧帧保留到完整新帧同次交接
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useState } from 'react';
 import { ViewportPortal } from '@xyflow/react';
-import { splitDrawingPlanes } from './drawing.js';
+import { drawingTransactionVisibleElements, splitDrawingPlanes } from './drawing.js';
 
 const EXPORT_PADDING = 8;
 const EMPTY_ELEMENTS = Object.freeze([]);
@@ -29,16 +29,22 @@ function SvgPlane({ name, snapshot }) {
   );
 }
 
-export default function InkWorldLayer({ elements, files, hidden = false }) {
-  const [snapshot, setSnapshot] = useState({ below: null, above: null });
+export default function InkWorldLayer({ elements, files, excludedIds = EMPTY_ELEMENTS, revision = 0, onSnapshotReady, onSnapshotError }) {
+  const [snapshot, setSnapshot] = useState({ below: null, above: null, revision: -1 });
   const committedElements = elements || EMPTY_ELEMENTS;
   const committedFiles = files || EMPTY_FILES;
 
+  // ref callback 已把两张 SVG 放进 DOM；layout effect 再通知父层同步显隐 live draft，首 paint 前闭合交接。
+  useLayoutEffect(() => {
+    if (snapshot.revision === revision) onSnapshotReady?.(revision);
+  }, [snapshot, revision, onSnapshotReady]);
+
   useEffect(() => {
     let current = true;
-    const { below, above } = splitDrawingPlanes(committedElements);
+    const visible = drawingTransactionVisibleElements(committedElements, excludedIds);
+    const { below, above } = splitDrawingPlanes(visible);
     if (!below.length && !above.length) {
-      setSnapshot({ below: null, above: null });
+      setSnapshot({ below: null, above: null, revision });
       return () => { current = false; };
     }
 
@@ -65,16 +71,18 @@ export default function InkWorldLayer({ elements, files, hidden = false }) {
     import('@excalidraw/excalidraw')
       .then(mod => Promise.all([renderPlane(below, mod), renderPlane(above, mod)]))
       .then(([nextBelow, nextAbove]) => {
-        if (current) setSnapshot({ below: nextBelow, above: nextAbove });
+        if (current) setSnapshot({ below: nextBelow, above: nextAbove, revision });
       })
-      .catch(() => { /* 导出失败时保留上一份已提交快照，不用半份新图覆盖 */ });
+      .catch(error => {
+        if (current) onSnapshotError?.(revision, error);   // 保留上一帧，不用半份新图覆盖
+      });
 
     return () => { current = false; };
-  }, [committedElements, committedFiles]);
+  }, [committedElements, committedFiles, excludedIds]);
 
   return (
     <ViewportPortal>
-      <div className={`ink-world${hidden ? ' ink-world-hidden' : ''}`}>
+      <div className="ink-world">
         <SvgPlane name="below" snapshot={snapshot.below} />
         <SvgPlane name="above" snapshot={snapshot.above} />
       </div>

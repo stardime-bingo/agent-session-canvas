@@ -5,9 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import {
   anchoredDrawingIds, canvasGeometryAllowed, canvasGeometryPreparation, committedDrawingElements, createDrawingCommitQueue, deleteDrawingElement, drawingBounds,
-  drawingEditorReadyStep,
-  drawingFilesSignature, drawingSnapshot, hitDrawingElement, setDrawingElementPlane, splitDrawingPlanes,
-  translateDrawingElements,
+  advanceDrawingTransaction, createDrawingTransaction, drawingEditorReadyStep, drawingTransactionClosure, drawingTransactionVisibleElements,
+  drawingClosingHandoffStep, drawingExitAction, drawingExitFailureNotice, drawingFilesSignature, drawingOpeningRequestCurrent, drawingSnapshot, hitDrawingElement, setDrawingElementPlane, splitDrawingPlanes,
+  mergeDrawingTransaction, translateDrawingElements,
 } from '../web/src/canvas/drawing.js';
 import { loadDrawingFiles, normalizeDrawingFiles, saveDrawingFiles } from '../server/drawing-files.mjs';
 
@@ -88,6 +88,249 @@ test('drawing snapshot keeps referenced images and prunes deleted image files', 
   assert.deepEqual(snapshot.elements.map(e => e.id), ['element-used', 'line']);
   assert.equal(drawingFilesSignature(snapshot.files), 'used');
   assert.equal(drawingFilesSignature({ stale: binary('stale'), used: binary('used') }), 'stale|used');
+});
+
+test('选择事务闭包递归覆盖容器、绑定、箭头、画框与嵌套分组，顺序仍跟完整世界一致', () => {
+  const els = [
+    rect('unrelated', -100, -100, 10, 10),
+    { ...rect('host', 0, 0, 100, 80), boundElements: [{ id: 'label', type: 'text' }, { id: 'arrow', type: 'arrow' }] },
+    { id: 'label', type: 'text', x: 10, y: 10, width: 40, height: 20, containerId: 'host' },
+    { id: 'arrow', type: 'arrow', x: 100, y: 40, width: 100, height: 0, points: [[0, 0], [100, 0]], startBinding: { elementId: 'host' }, endBinding: { elementId: 'peer' } },
+    { ...rect('peer', 200, 0, 80, 80), frameId: 'frame', groupIds: ['inner', 'outer'] },
+    { ...rect('group-mate', 300, 0, 40, 40), groupIds: ['outer'] },
+    { id: 'frame', type: 'frame', x: 180, y: -20, width: 180, height: 140 },
+  ];
+
+  assert.deepEqual(
+    drawingTransactionClosure(els, 'label').map(el => el.id),
+    ['host', 'label', 'arrow', 'peer', 'group-mate', 'frame'],
+  );
+  assert.deepEqual(drawingTransactionClosure(els, 'missing'), []);
+});
+
+test('selection/new 事务只携带局部副本；committed 世界只排除 originalIds', () => {
+  const base = {
+    elements: [
+      rect('before', -100, 0, 20, 20),
+      { ...image('photo'), x: 0, y: 0, width: 100, height: 80, boundElements: [{ id: 'caption', type: 'text' }] },
+      { id: 'caption', type: 'text', x: 10, y: 10, width: 60, height: 20, containerId: 'element-photo' },
+      rect('after', 200, 0, 20, 20),
+    ],
+    files: { photo: binary('photo'), stale: binary('stale') },
+  };
+  const selection = createDrawingTransaction(base, 'element-photo');
+  assert.equal(selection.kind, 'selection');
+  assert.deepEqual(selection.originalIds, ['element-photo', 'caption']);
+  assert.deepEqual(selection.elements.map(el => el.id), ['element-photo', 'caption']);
+  assert.deepEqual(Object.keys(selection.files), ['photo']);
+  assert.equal(selection.anchorIndex, 1);
+  const visible = drawingTransactionVisibleElements(base.elements, selection.originalIds);
+  assert.deepEqual(visible.map(el => el.id), ['before', 'after']);
+  assert.equal(visible[0], base.elements[0]);
+  assert.equal(visible[1], base.elements[3]);
+
+  const fresh = createDrawingTransaction(base);
+  assert.deepEqual(fresh, {
+    kind: 'new', targetId: null, originalIds: [], anchorIndex: 4, elements: [], files: {},
+  });
+  assert.equal(createDrawingTransaction(base, 'missing'), null);
+});
+
+test('selection merge 在原槽替换/删除局部元素，新增元素随事务插入且不改无关对象引用与顺序', () => {
+  const before = rect('before', -100, 0, 20, 20);
+  const host = { ...rect('host', 0, 0, 100, 80), boundElements: [{ id: 'label', type: 'text' }] };
+  const between = rect('between', 130, 0, 20, 20);
+  const label = { id: 'label', type: 'text', x: 10, y: 10, width: 40, height: 20, containerId: 'host' };
+  const after = rect('after', 200, 0, 20, 20);
+  const base = { elements: [before, host, between, label, after], files: {} };
+  const tx = createDrawingTransaction(base, 'host');
+  const editedHost = { ...host, x: 25 };
+  const added = rect('added-in-edit', 70, 100, 30, 30);
+
+  const merged = mergeDrawingTransaction(base, tx, { elements: [editedHost, added], files: {} });
+  assert.deepEqual(merged.elements.map(el => el.id), ['before', 'host', 'added-in-edit', 'between', 'after']);
+  assert.equal(merged.elements[0], before);
+  assert.equal(merged.elements[3], between);
+  assert.equal(merged.elements[4], after);
+  assert.equal(merged.elements[1].x, 25);
+  assert.equal(merged.elements.some(el => el.id === 'label'), false, 'draft 中消失的 original 元素就是删除');
+
+  const retried = mergeDrawingTransaction(merged, tx, { elements: [editedHost, added], files: {} });
+  assert.deepEqual(retried.elements.map(el => el.id), ['before', 'host', 'added-in-edit', 'between', 'after'], '交接失败重试不重复插入 draft 新元素');
+});
+
+test('new merge 追加到世界末尾；base+draft 文件只合并一次并由最终全量快照裁剪', () => {
+  const base = {
+    elements: [image('kept'), rect('base', 0, 0, 20, 20)],
+    files: { kept: binary('kept'), stale: binary('stale') },
+  };
+  const tx = createDrawingTransaction(base);
+  const merged = mergeDrawingTransaction(base, tx, {
+    elements: [image('new'), rect('ink', 30, 0, 20, 20)],
+    files: { new: binary('new'), orphan: binary('orphan') },
+  });
+
+  assert.deepEqual(merged.elements.map(el => el.id), ['element-kept', 'base', 'element-new', 'ink']);
+  assert.deepEqual(Object.keys(merged.files), ['kept', 'new']);
+});
+
+test('new 事务首次持久化后 rebase 所有新生 ID；帧失败后删掉一笔再 merge 不得幽灵复活', () => {
+  const base = { elements: [rect('base', 0, 0, 20, 20)], files: {} };
+  const tx = createDrawingTransaction(base);
+  const firstDraft = { elements: [rect('new-a', 30, 0, 20, 20), rect('new-b', 60, 0, 20, 20)], files: {} };
+  const firstMerged = mergeDrawingTransaction(base, tx, firstDraft);
+  const rebased = advanceDrawingTransaction(tx, firstDraft);
+
+  assert.deepEqual(rebased.originalIds, ['new-a', 'new-b']);
+  assert.equal(rebased.anchorIndex, tx.anchorIndex);
+  const retried = mergeDrawingTransaction(firstMerged, rebased, {
+    elements: [rect('new-a', 35, 0, 20, 20)], files: {},
+  });
+  assert.deepEqual(retried.elements.map(el => el.id), ['base', 'new-a']);
+});
+
+test('selection 事务 rebase 保留旧闭包并接管新生 ID；帧失败后删除新生元素不会从 merged base 复活', () => {
+  const host = { ...rect('host', 0, 0, 100, 80), boundElements: [{ id: 'label', type: 'text' }] };
+  const label = { id: 'label', type: 'text', x: 10, y: 10, width: 40, height: 20, containerId: 'host' };
+  const after = rect('after', 200, 0, 20, 20);
+  const base = { elements: [host, label, after], files: {} };
+  const tx = createDrawingTransaction(base, 'host');
+  const firstDraft = { elements: [{ ...host, x: 10 }, rect('new-a', 40, 100, 20, 20), rect('new-b', 70, 100, 20, 20)], files: {} };
+  const firstMerged = mergeDrawingTransaction(base, tx, firstDraft);
+  const rebased = advanceDrawingTransaction(tx, firstDraft);
+
+  assert.deepEqual(rebased.originalIds, ['host', 'label', 'new-a', 'new-b']);
+  const retried = mergeDrawingTransaction(firstMerged, rebased, {
+    elements: [{ ...host, x: 20 }, rect('new-a', 45, 100, 20, 20)], files: {},
+  });
+  assert.deepEqual(retried.elements.map(el => el.id), ['host', 'new-a', 'after']);
+  assert.equal(retried.elements[0].x, 20);
+});
+
+test('退出失败回执区分提交前失败与已保存后的画面交接失败', () => {
+  const beforePersist = drawingExitFailureNotice({ persisted: false, errorMessage: 'synthetic commit reject' });
+  assert.equal(beforePersist.stage, 'before-persist');
+  assert.match(beforePersist.message, /未落盘/);
+  assert.doesNotMatch(beforePersist.message, /已保存/);
+
+  const afterPersist = drawingExitFailureNotice({ persisted: true, errorMessage: 'synthetic svg reject' });
+  assert.equal(afterPersist.stage, 'after-persist');
+  assert.match(afterPersist.message, /已保存/);
+  assert.match(afterPersist.message, /画面交接失败/);
+  assert.match(afterPersist.message, /可重试退出/);
+  assert.doesNotMatch(afterPersist.message, /未落盘/);
+});
+
+test('隐藏 opening draft 直接取消：持久化与 closing 均为零并收口 opening resolver', () => {
+  const cancel = drawingExitAction({ opening: true, visible: false, hasOpeningResolver: true });
+  assert.deepEqual(cancel, {
+    type: 'cancel-opening',
+    opening: false,
+    openingPromise: null,
+    openingResolver: null,
+    resolveOpeningWith: false,
+  });
+  assert.deepEqual(drawingExitAction({ opening: true, visible: true }), { type: 'commit' });
+  assert.deepEqual(drawingExitAction({ opening: false, visible: false }), { type: 'commit' });
+
+  let persistenceCalls = 0;
+  let closingCalls = 0;
+  const openingResults = [];
+  const state = { opening: true, openingPromise: Promise.resolve(), openingResolver: value => openingResults.push(value) };
+  const action = drawingExitAction({
+    opening: state.opening, visible: false, hasOpeningResolver: !!state.openingResolver,
+  });
+  if (action.type === 'cancel-opening') {
+    const resolveOpening = state.openingResolver;
+    state.opening = action.opening;
+    state.openingPromise = action.openingPromise;
+    state.openingResolver = action.openingResolver;
+    if (action.resolveOpeningWith !== null) resolveOpening?.(action.resolveOpeningWith);
+  } else {
+    persistenceCalls++;
+    closingCalls++;
+  }
+
+  assert.equal(persistenceCalls, 0);
+  assert.equal(closingCalls, 0);
+  assert.deepEqual(state, { opening: false, openingPromise: null, openingResolver: null });
+  assert.deepEqual(openingResults, [false]);
+});
+
+test('pending A 取消后 opening B：A 的迟到 then/catch 必须静默且只有 B ready', async () => {
+  const files = { A: binary('A'), B: binary('B') };
+  let releasePersist;
+  let markPersistStarted;
+  const persistGate = new Promise(resolve => { releasePersist = resolve; });
+  const persistStarted = new Promise(resolve => { markPersistStarted = resolve; });
+  const queue = createDrawingCommitQueue({ elements: [image('A'), image('B')], files }, async () => {
+    markPersistStarted();
+    await persistGate;
+  });
+  const deleteA = queue.submit(base => ({
+    elements: deleteDrawingElement(base.elements, 'element-A'), files: base.files,
+  }));
+  await persistStarted;
+
+  const requestA = {};
+  const requestB = {};
+  let currentRequest = requestA;
+  const createCalls = [];
+  const ready = [];
+  const toasts = [];
+
+  const openAfterIdle = (request, target) => queue.whenIdle().then(seed => {
+    if (!drawingOpeningRequestCurrent(currentRequest, request)) return false;
+    const transaction = createDrawingTransaction(seed, target);
+    createCalls.push(target);
+    if (!transaction) throw new Error(`missing ${target}`);
+    ready.push(target);
+    currentRequest = null;
+    return transaction;
+  });
+  const failAfterIdle = (request, target) => queue.whenIdle()
+    .then(() => { throw new Error(`stale ${target}`); })
+    .catch(error => {
+      if (!drawingOpeningRequestCurrent(currentRequest, request)) return false;
+      currentRequest = null;
+      toasts.push(error.message);
+      return false;
+    });
+
+  const staleThen = openAfterIdle(requestA, 'element-A');
+  const staleCatch = failAfterIdle(requestA, 'A');
+  currentRequest = null; // cancel opening1(A)
+  currentRequest = requestB; // opening2(B)
+  const currentThen = openAfterIdle(requestB, 'element-B');
+  releasePersist();
+
+  const [staleResult, staleCatchResult, transactionB] = await Promise.all([staleThen, staleCatch, currentThen]);
+  await deleteA;
+  assert.equal(staleResult, false);
+  assert.equal(staleCatchResult, false);
+  assert.deepEqual(createCalls, ['element-B']);
+  assert.deepEqual(transactionB.elements.map(element => element.id), ['element-B']);
+  assert.deepEqual(Object.keys(transactionB.files), ['B']);
+  assert.deepEqual(ready, ['element-B']);
+  assert.deepEqual(toasts, []);
+  assert.equal(currentRequest, null);
+  assert.deepEqual(queue.snapshot().elements.map(element => element.id), ['element-B']);
+  assert.equal(queue.snapshot().files.B, files.B);
+});
+
+test('opening 尚未 ready 就 early exit：closing success 必须收口 opening 门并 resolve(false)', () => {
+  assert.deepEqual(drawingClosingHandoffStep({ hasOpeningResolver: true }), {
+    opening: false,
+    openingPromise: null,
+    openingResolver: null,
+    resolveOpeningWith: false,
+  });
+  assert.deepEqual(drawingClosingHandoffStep(), {
+    opening: false,
+    openingPromise: null,
+    openingResolver: null,
+    resolveOpeningWith: null,
+  });
 });
 
 test('drawing image store round-trips valid files and rejects malformed entries', t => {
