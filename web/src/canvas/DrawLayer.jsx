@@ -23,9 +23,9 @@ export default forwardRef(function DrawLayer({ active, initialElements, initialF
   const belowMetaRef = useRef(null);                  // { bounds, scale } 供视口桥定位
   const timer = useRef(null);
   const raf = useRef(0);
+  const pendingVp = useRef(null);                     // 每帧合并推送的目标视口
   const exportN = useRef(0);                          // 导出竞态票号：慢返的旧导出不许覆盖新的
   const lastPushed = useRef({ x: 0, y: 0, z: 1 });    // 回声守卫：程序写入不触发反向同步
-  const base = useRef(null);                          // 已落定的看板视口——CSS 桥的锚点
   const lastVp = useRef(null);
   const downRef = useRef(null);                       // 空点退场：pointerdown 快照
   const hydratedRef = useRef(false);                  // initialData 水合旗：API 就绪时场景可能还是空的
@@ -129,32 +129,29 @@ export default forwardRef(function DrawLayer({ active, initialElements, initialF
     return () => window.removeEventListener('pagehide', onHide);
   }, []);
 
-  useImperativeHandle(ref, () => ({
-    // 落定：真正把视口写进 Excalidraw（重绘一次），并复位 CSS 桥；沉层同步钉位
-    syncViewport(vp) {
-      cancelAnimationFrame(raf.current);
-      raf.current = requestAnimationFrame(() => {
-        base.current = vp;
-        lastVp.current = vp;
-        if (wrapRef.current) wrapRef.current.style.transform = 'none';
-        lastPushed.current = { x: vp.x / vp.zoom, y: vp.y / vp.zoom, z: vp.zoom };
-        apiRef.current?.updateScene({
-          appState: { scrollX: vp.x / vp.zoom, scrollY: vp.y / vp.zoom, zoom: { value: vp.zoom } },
-        });
-        positionBelow(vp);
+  // ============================================================
+  //  单一真相律：浮层笔迹只有一个位置真相——Excalidraw 自己的 scroll。
+  //  旧 CSS 桥（纹理 + transform 双表征）在快速平移时暴露纹理外空白=残影；
+  //  现在每帧 rAF 合并直喂 scroll，Excalidraw 画的永远就是当前视口。
+  // ============================================================
+  const pushViewport = vp => {
+    lastVp.current = vp;
+    pendingVp.current = vp;
+    if (raf.current) return;   // 每帧最多推一次：滚轮风暴合并到下一帧
+    raf.current = requestAnimationFrame(() => {
+      raf.current = 0;
+      const v = pendingVp.current;
+      lastPushed.current = { x: v.x / v.zoom, y: v.y / v.zoom, z: v.zoom };
+      apiRef.current?.updateScene({
+        appState: { scrollX: v.x / v.zoom, scrollY: v.y / v.zoom, zoom: { value: v.zoom } },
       });
-    },
+      positionBelow(v);
+    });
+  };
 
-    // 预览：平移/缩放进行中只动 CSS transform——纯合成器，浮沉两层零重绘
-    previewViewport(vp) {
-      const b = base.current;
-      lastVp.current = vp;
-      if (b && wrapRef.current) {
-        const s = vp.zoom / b.zoom;
-        wrapRef.current.style.transform = `translate(${vp.x - b.x * s}px, ${vp.y - b.y * s}px) scale(${s})`;
-      }
-      positionBelow(vp);
-    },
+  useImperativeHandle(ref, () => ({
+    syncViewport: pushViewport,
+    previewViewport: pushViewport,
     // 退出绘图编辑时读回：用户可能在 Excalidraw 里平移过
     getViewport() {
       const s = apiRef.current?.getAppState();

@@ -825,16 +825,14 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       onMove={(_, vp) => {
         syncHandleHitArea(rootRef.current, vp.zoom);
         if (syncingFromDraw.current || penActive) return;
-        drawRef.current?.previewViewport(vp);   // 平移中只动 CSS 桥，零重绘
+        drawRef.current?.previewViewport(vp);   // 单一真相：每帧直喂 Excalidraw scroll，浮沉两层同步跟车
       }}
       onMoveEnd={(_, vp) => {
-        // 滚轮缩放每一格都发一次 end——落定提交（Excalidraw 整场重绘+视口记忆）若逐格执行就是闪烁风暴。
-        // 收敛到手势尾部一次；期间 preview 双桥继续钉住浮沉两层，视觉无缝。
+        // onMove 已逐帧喂到位；这里只收尾状态类与视口记忆（滚轮缩放每格发一次 end，收敛到手势尾部）
         clearTimeout(moveEndT.current);
         moveEndT.current = setTimeout(() => {
           moveEndT.current = null;
           rootRef.current?.classList.remove('canvas-moving');
-          if (!penActive) drawRef.current?.syncViewport(vp);   // 手势尾部落定
           try { localStorage.vp = JSON.stringify(vp); } catch { /* 隐私模式等存不进就算了 */ }
         }, 180);
       }}
