@@ -1,238 +1,116 @@
 /**
- * [INPUT]: 依赖 @excalidraw/excalidraw 组件/样式/exportToCanvas、api 的 setDrawing、drawing 的快照/分流/包围盒/命中内核
- * [OUTPUT]: 对外提供 DrawLayer 组件（ref 暴露 pushViewport/getViewport/activateTool/getElements/selectElement/
- *           deleteElement/setElementPlane/translateElements/flush）——双平面绘图：沉层静态垫在卡片之下，浮层批注在上；
- *           相机主权唯一：pushViewport 领先沿同步喂浮沉两层，rAF 只做风暴合并阀
- * [POS]: canvas 的 Excalidraw 绘图覆盖层——闲置时浮层展示指针穿透、沉层经 belowHost 门户垫底；
- *        激活后全量合流进活实例编辑，退出再分流。坐标契约: excalidraw.scroll = rfViewport.xy / zoom
+ * [INPUT]: 依赖 @excalidraw/excalidraw 组件、api.setDrawing 与 drawing 的纯变换/快照/命中内核
+ * [OUTPUT]: 对外提供仅在编辑态挂载的 DrawLayer；单握手区分首次水合与后续工具变化，仅一次回传稳定 controller
+ * [POS]: 临时绘图编辑事务；普通态由 InkWorldLayer 展示已提交 SVG，本组件不再充当常驻渲染器
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
-import React, { forwardRef, useImperativeHandle, useRef, useEffect } from 'react';
-import { createPortal } from 'react-dom';
-import { Excalidraw, exportToCanvas } from '@excalidraw/excalidraw';
+import React, { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
+import { Excalidraw } from '@excalidraw/excalidraw';
 import '@excalidraw/excalidraw/index.css';
 import { api } from '../api.js';
-import { drawingBounds, drawingFilesSignature, drawingSnapshot, hitDrawingElement, splitDrawingPlanes } from './drawing.js';
+import {
+  deleteDrawingElement, drawingEditorReadyStep, drawingFilesSignature, drawingSnapshot, hitDrawingElement,
+  setDrawingElementPlane, translateDrawingElements,
+} from './drawing.js';
 
-const EXPORT_CAP = 4096;   // 沉层静态画布最长边像素帽：巨型区域底板降采样导出，内存不许爆
-
-export default forwardRef(function DrawLayer({ active, initialElements, initialFiles, belowHost, onScrollToFlow, onToolChange, onReady, onPersisted, onExitToCanvas }, ref) {
+export default forwardRef(function DrawLayer({ active, initialElements, initialFiles, onScrollToFlow, onToolChange, onReady, onPersisted, onExitToCanvas }, ref) {
   const apiRef = useRef(null);
-  const wrapRef = useRef(null);
-  const belowWrapRef = useRef(null);                  // 沉层门户内衬：绝对定位 + transform 钉在 flow 坐标
-  const belowRef = useRef([]);                        // 闲置时的沉层元素（激活时清空——全量都在活实例里）
-  const belowMetaRef = useRef(null);                  // { bounds, scale } 供视口桥定位
-  const timer = useRef(null);
   const raf = useRef(0);
-  const pendingVp = useRef(null);                     // 每帧合并推送的目标视口
-  const exportN = useRef(0);                          // 导出竞态票号：慢返的旧导出不许覆盖新的
-  const lastPushed = useRef({ x: 0, y: 0, z: 1 });    // 回声守卫：程序写入不触发反向同步
-  const lastVp = useRef(null);
-  const downRef = useRef(null);                       // 空点退场：pointerdown 快照
-  const hydratedRef = useRef(false);                  // initialData 水合旗：API 就绪时场景可能还是空的
-  const activeRef = useRef(active);
-  activeRef.current = active;
+  const pendingVp = useRef(null);
+  const lastPushed = useRef({ x: 0, y: 0, z: 1 });
+  const downRef = useRef(null);
+  const handshakeRef = useRef({ apiReady: false, hydrated: false, ready: false });
   const latestFiles = useRef(initialFiles || {});
   const savedFileSig = useRef(drawingFilesSignature(initialFiles));
 
-  // ---- 全量场景 = 沉层 + 活实例：闲置时二分，激活时活实例即全量 ----
-  const fullScene = () => [...belowRef.current, ...(apiRef.current?.getSceneElements() || [])];
-
-  // ---- 沉层静态导出：只在场景变化时发生，平移缩放全程零重绘 ----
-  const positionBelow = vp => {
-    const el = belowWrapRef.current, meta = belowMetaRef.current;
-    if (!el) return;
-    if (!meta || !vp) { el.style.display = 'none'; return; }
-    el.style.display = activeRef.current ? 'none' : 'block';   // 编辑态全量在活实例里，垫底画布休眠
-    el.style.transform = `translate(${vp.x + meta.bounds.minX * vp.zoom}px, ${vp.y + meta.bounds.minY * vp.zoom}px) scale(${vp.zoom / meta.scale})`;
+  // excalidrawAPI 回调可能早于 initialData 水合；这个窗口内 flush 不许把已有绘图误写成空。
+  const scene = () => {
+    const current = apiRef.current?.getSceneElements() || [];
+    return handshakeRef.current.hydrated || current.length ? current : (initialElements || []);
   };
 
-  const exportBelow = () => {
-    const ticket = ++exportN.current;
-    const els = belowRef.current;
-    const host = belowWrapRef.current;
-    if (!els.length || !host) {
-      belowMetaRef.current = null;
-      if (host) host.replaceChildren();
-      positionBelow(lastVp.current);
-      return;
-    }
-    const bounds = drawingBounds(els);
-    // retina 锐度：导出按 dpr 栅格化（帽内），同一支笔沉下去不许发虚
-    const scale = Math.min(window.devicePixelRatio || 1, EXPORT_CAP / Math.max(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY, 1));
-    exportToCanvas({
-      elements: els,
-      files: latestFiles.current,
-      exportPadding: 0,
-      appState: { viewBackgroundColor: 'transparent' },
-      getDimensions: (w, h) => ({ width: Math.ceil(w * scale), height: Math.ceil(h * scale), scale }),
-    }).then(canvas => {
-      if (ticket !== exportN.current || !belowWrapRef.current) return;
-      belowMetaRef.current = { bounds, scale };
-      belowWrapRef.current.replaceChildren(canvas);
-      positionBelow(lastVp.current);
-    }).catch(() => { /* 导出失败只影响垫底展示，编辑态数据无恙 */ });
-  };
-
-  // ---- 合流/分流：active 翻转即平面生命周期 ----
-  const syncPlanes = () => {
-    const inst = apiRef.current;
-    if (!inst) return;
-    if (activeRef.current) {
-      if (belowRef.current.length) {
-        inst.updateScene({ elements: [...belowRef.current, ...inst.getSceneElements()] });
-        belowRef.current = [];
-      }
-    } else {
-      const { below, above } = splitDrawingPlanes(inst.getSceneElements());
-      if (below.length) {
-        belowRef.current = [...belowRef.current, ...below];
-        inst.updateScene({ elements: above });
-      }
-      // 一个模式一个主权：退出编辑清掉 Excalidraw 选中——旧选中残留会让下次进门的 Delete 误杀
-      inst.updateScene({ appState: { selectedElementIds: {} } });
-    }
-    exportBelow();
-  };
-  useEffect(() => { syncPlanes(); }, [active]);
-
-  // 图片资产仅在 ID 集变化时随请求发送；普通笔画只传轻量元素，避免反复上传大图。
-  // 永远持久化全量（沉层+浮层）；成功后经 onPersisted 回写 App 状态。
+  // flush 是退出编辑的事务门：真正落盘并回写 App 后才 resolve。
   const persist = () => {
-    const snapshot = drawingSnapshot(fullScene(), apiRef.current?.getFiles?.() || latestFiles.current);
+    const snapshot = drawingSnapshot(scene(), latestFiles.current);
     const fileSig = drawingFilesSignature(snapshot.files);
-    const files = fileSig === savedFileSig.current ? undefined : snapshot.files;
-    return api.setDrawing(snapshot.elements, files).then(() => {
-      if (files !== undefined) savedFileSig.current = fileSig;
-      onPersisted?.(snapshot.elements);
+    const changedFiles = fileSig === savedFileSig.current ? undefined : snapshot.files;
+    return api.setDrawing(snapshot.elements, changedFiles).then(() => {
+      if (changedFiles !== undefined) savedFileSig.current = fileSig;
+      onPersisted?.(snapshot.elements, snapshot.files);
+      return snapshot;
     });
   };
 
-  // ---- 防抖落盘：停笔 800ms 才写后端，卸载前冲刷（后台路径静默，主权路径各自跟回执） ----
-  const save = () => {
-    clearTimeout(timer.current);
-    timer.current = setTimeout(() => { timer.current = null; persist().catch(() => {}); }, 800);
-  };
+  useEffect(() => () => cancelAnimationFrame(raf.current), []);
 
-  // 卸载前冲刷：懒卸载时最后一笔不许丢
-  useEffect(() => () => {
-    clearTimeout(timer.current);
-    cancelAnimationFrame(raf.current);
-    if (apiRef.current) persist().catch(() => {});
-  }, []);
-
-  // 关标签页/刷新落在防抖窗口内：尽力同步冲刷，删除/笔迹不许静默丢失
+  // 关标签页/刷新时尽力保存工作副本；正常退出走可等待 flush。
   useEffect(() => {
-    const onHide = () => {
-      if (!timer.current) return;
-      clearTimeout(timer.current);
-      timer.current = null;
-      persist().catch(() => {});
-    };
+    const onHide = () => persist().catch(() => {});
     window.addEventListener('pagehide', onHide);
     return () => window.removeEventListener('pagehide', onHide);
   }, []);
 
-  // ============================================================
-  //  相机主权唯一：视口值一次采样、同一相位、同步喂给浮沉两层——
-  //  谁私藏第二份位置真相，谁就是下一个残影（CSS 桥双表征已废）。
-  //  领先沿同步直喂（onMove 本身在帧相位内，rAF 推迟反欠一帧）；
-  //  rAF 只做风暴合并阀：同帧多余事件合并到帧门开启时补喂。
-  // ============================================================
   const applyVp = v => {
     lastPushed.current = { x: v.x / v.zoom, y: v.y / v.zoom, z: v.zoom };
     apiRef.current?.updateScene({
       appState: { scrollX: v.x / v.zoom, scrollY: v.y / v.zoom, zoom: { value: v.zoom } },
     });
-    positionBelow(v);
   };
   const pushViewport = vp => {
-    lastVp.current = vp;
-    if (raf.current) { pendingVp.current = vp; return; }   // 本帧已喂过：存起来等帧门
+    if (raf.current) { pendingVp.current = vp; return; }
     applyVp(vp);
     raf.current = requestAnimationFrame(() => {
       raf.current = 0;
-      const p = pendingVp.current;
+      const pending = pendingVp.current;
       pendingVp.current = null;
-      if (p) applyVp(p);
+      if (pending) applyVp(pending);
     });
   };
 
-  useImperativeHandle(ref, () => ({
+  const controllerRef = useRef(null);
+  if (!controllerRef.current) controllerRef.current = {
     pushViewport,
-    // 退出绘图编辑时读回：用户可能在 Excalidraw 里平移过
     getViewport() {
       const s = apiRef.current?.getAppState();
       if (!s) return null;
       return { x: s.scrollX * s.zoom.value, y: s.scrollY * s.zoom.value, zoom: s.zoom.value };
     },
-    activateTool(type) {
-      apiRef.current?.setActiveTool({ type });
-    },
-    // 普通看板模式的命中/删除通路：全量场景（沉层在前，浮层在后——后画者优先天然让浮层赢）
-    getElements() {
-      return apiRef.current ? fullScene() : null;
+    activateTool(type) { apiRef.current?.setActiveTool({ type }); },
+    getElements() { return apiRef.current ? scene() : null; },
+    getSnapshot() {
+      return drawingSnapshot(scene(), latestFiles.current);
     },
     selectElement(id) {
       apiRef.current?.updateScene({ appState: { selectedElementIds: { [id]: true } } });
     },
     deleteElement(id) {
-      const inst = apiRef.current;
-      if (!inst) return Promise.reject(new Error('绘图层未就绪'));
-      // 连带删除绑定在此形状上的标签文字，不留幽灵文本；沉浮两层各删各的
-      const keep = e => e.id !== id && e.containerId !== id;
-      if (belowRef.current.some(e => !keep(e))) {
-        belowRef.current = belowRef.current.filter(keep);
-        exportBelow();
-      } else {
-        inst.updateScene({ elements: inst.getSceneElements().filter(keep) });
-      }
-      clearTimeout(timer.current);
-      timer.current = null;
-      return persist();   // 删除是主权动作，不等防抖，立即落盘；回执由调用方跟结果走
+      if (!apiRef.current) return Promise.reject(new Error('绘图编辑器未就绪'));
+      apiRef.current.updateScene({ elements: deleteDrawingElement(scene(), id) });
+      return persist();
     },
-    // 容器承载律：容器搬家/整理时，锚定其内的墨迹整体平移（浮沉两层各平各的）
     translateElements(ids, dx, dy) {
-      const inst = apiRef.current;
-      if (!inst) return Promise.reject(new Error('绘图层未就绪'));
-      const idSet = new Set(ids);
-      const shift = e => idSet.has(e.id) ? { ...e, x: e.x + dx, y: e.y + dy } : e;
-      if (belowRef.current.some(e => idSet.has(e.id))) {
-        belowRef.current = belowRef.current.map(shift);
-        exportBelow();
-      }
-      if (inst.getSceneElements().some(e => idSet.has(e.id))) {
-        inst.updateScene({ elements: inst.getSceneElements().map(shift) });
-      }
-      clearTimeout(timer.current);
-      timer.current = null;
+      if (!apiRef.current) return Promise.reject(new Error('绘图编辑器未就绪'));
+      apiRef.current.updateScene({ elements: translateDrawingElements(scene(), ids, dx, dy) });
       return persist();
     },
-    // 沉浮切换：区域底板沉到卡片下面当背景，批注浮到上面——层级从此可调
     setElementPlane(id, below) {
-      const inst = apiRef.current;
-      if (!inst) return Promise.reject(new Error('绘图层未就绪'));
-      const flip = e => (e.id === id || e.containerId === id)
-        ? { ...e, customData: { ...e.customData, below } } : e;
-      const full = fullScene().map(flip);
-      const { below: b, above: a } = splitDrawingPlanes(full);
-      belowRef.current = activeRef.current ? [] : b;
-      inst.updateScene({ elements: activeRef.current ? full : a });
-      exportBelow();
-      clearTimeout(timer.current);
-      timer.current = null;
+      if (!apiRef.current) return Promise.reject(new Error('绘图编辑器未就绪'));
+      apiRef.current.updateScene({ elements: setDrawingElementPlane(scene(), id, below) });
       return persist();
     },
-    flush() {
-      clearTimeout(timer.current);
-      timer.current = null;
-      persist().catch(() => {});
-    },
-  }), []);
+    flush() { return persist(); },
+  };
+  useImperativeHandle(ref, () => controllerRef.current, []);
 
-  // ---- 空点退场：选择工具下点击空白（未命中任何笔迹、无既有选中、非框选拖动）→ 放行回看板 ----
+  const advanceHandshake = (eventType, toolType) => {
+    const step = drawingEditorReadyStep(handshakeRef.current, eventType);
+    handshakeRef.current = step;
+    if (step.notifyReady) onReady?.(controllerRef.current);
+    if (step.notifyTool) onToolChange?.(toolType);
+  };
+
   const onDown = e => {
-    if (!activeRef.current) return;
+    if (!active) return;
     const s = apiRef.current?.getAppState();
     downRef.current = {
       x: e.clientX, y: e.clientY,
@@ -241,70 +119,52 @@ export default forwardRef(function DrawLayer({ active, initialElements, initialF
     };
   };
   const onUp = e => {
-    const d = downRef.current;
+    const down = downRef.current;
     downRef.current = null;
-    if (!activeRef.current || !d || d.tool !== 'selection' || d.hadSel) return;
-    if (Math.hypot(e.clientX - d.x, e.clientY - d.y) > 5) return;   // 框选拖动不是点击
+    if (!active || !down || down.tool !== 'selection' || down.hadSel) return;
+    if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5) return;
     const s = apiRef.current?.getAppState();
     if (!s) return;
-    const z = s.zoom.value;
-    const fx = e.clientX / z - s.scrollX, fy = e.clientY / z - s.scrollY;
-    if (hitDrawingElement(fullScene(), fx, fy, 8 / z)) return;      // 点在笔迹上：归 Excalidraw
+    const zoom = s.zoom.value;
+    const fx = e.clientX / zoom - s.scrollX, fy = e.clientY / zoom - s.scrollY;
+    if (hitDrawingElement(scene(), fx, fy, 8 / zoom)) return;
     onExitToCanvas?.({ x: e.clientX, y: e.clientY });
   };
 
   return (
-    <>
-      {belowHost && createPortal(
-        <div ref={el => { belowWrapRef.current = el; if (el) exportBelow(); }}
-          style={{ position: 'absolute', left: 0, top: 0, transformOrigin: '0 0', pointerEvents: 'none' }} />,
-        belowHost,
-      )}
-      <div ref={wrapRef} className={`draw-layer ${active ? 'draw-active' : ''}`}
-        onPointerDownCapture={onDown} onPointerUpCapture={onUp}
-        style={{
-          position: 'absolute', inset: 0, zIndex: 6,
-          transformOrigin: '0 0',
-          pointerEvents: active ? 'auto' : 'none',   // 绘图编辑未激活：只展示，指针全穿透
-        }}>
-        <Excalidraw
-          excalidrawAPI={a => { apiRef.current = a; syncPlanes(); onReady?.(); }}
-          langCode="zh-CN"
-          initialData={{
-            elements: initialElements || [],
-            files: initialFiles || {},
-            appState: { viewBackgroundColor: 'transparent' },
-            scrollToContent: false,
-          }}
-          onChange={(_, appState, files) => {
-            latestFiles.current = files || {};
-            onToolChange?.(appState?.activeTool?.type);
-            // 水合完成的第一声 onChange 再分流一次——excalidrawAPI 回调时 initialData 往往尚未落场
-            if (!hydratedRef.current && (apiRef.current?.getSceneElements()?.length || 0) > 0) {
-              hydratedRef.current = true;
-              if (!activeRef.current) syncPlanes();
-            }
-            if (active) save();
-          }}
-          onScrollChange={(sx, sy, zoom) => {
-            // 绘图编辑时平移缩放 → 实时带着底下的看板一起走，笔迹与卡片永不分家
-            if (!active) return;
-            const z = zoom?.value ?? zoom;
-            const lp = lastPushed.current;
-            if (Math.abs(sx - lp.x) < 0.5 && Math.abs(sy - lp.y) < 0.5 && Math.abs(z - lp.z) < 0.001) return;
-            onScrollToFlow?.({ x: sx * z, y: sy * z, zoom: z });
-          }}
-          viewModeEnabled={!active}
-          UIOptions={{
-            canvasActions: {
-              changeViewBackgroundColor: false, export: false, loadScene: false,
-              saveToActiveFile: false, saveAsImage: false, toggleTheme: false,
-              clearCanvas: false,   // Reset canvas 能一键毁掉全部笔迹，不进屋
-            },
-            tools: { image: true },
-          }}
-        />
-      </div>
-    </>
+    <div className="draw-layer draw-active"
+      onPointerDownCapture={onDown} onPointerUpCapture={onUp}
+      style={{ position: 'absolute', inset: 0, zIndex: 6, transformOrigin: '0 0', pointerEvents: 'auto' }}>
+      <Excalidraw
+        excalidrawAPI={instance => {
+          apiRef.current = instance;
+          advanceHandshake('api');
+        }}
+        langCode="zh-CN"
+        initialData={{
+          elements: initialElements || [],
+          files: initialFiles || {},
+          appState: { viewBackgroundColor: 'transparent' },
+          scrollToContent: false,
+        }}
+        onChange={(_, appState, files) => {
+          latestFiles.current = files || {};
+          advanceHandshake('change', appState?.activeTool?.type);
+        }}
+        onScrollChange={(sx, sy, zoom) => {
+          const value = zoom?.value ?? zoom;
+          const last = lastPushed.current;
+          if (Math.abs(sx - last.x) < 0.5 && Math.abs(sy - last.y) < 0.5 && Math.abs(value - last.z) < 0.001) return;
+          onScrollToFlow?.({ x: sx * value, y: sy * value, zoom: value });
+        }}
+        UIOptions={{
+          canvasActions: {
+            changeViewBackgroundColor: false, export: false, loadScene: false,
+            saveToActiveFile: false, saveAsImage: false, toggleTheme: false, clearCanvas: false,
+          },
+          tools: { image: true },
+        }}
+      />
+    </div>
   );
 });

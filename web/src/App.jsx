@@ -1,7 +1,7 @@
 /**
  * [INPUT]: 依赖 api 的数据通道、canvas/FlowCanvas 画布、panels 三件套、ui 的 UIHost/toast
  * [OUTPUT]: 对外提供 App 根组件：全局状态、过滤管道、SSE 订阅、岛屿布局（含绘图属性面板动态让位）、
- *           可撤销整理与落空连线原子动作分发、画布终端框（会话上下文）开合
+ *           可等待且互斥的整理/撤销事务、落空连线原子动作分发、committed 绘图 elements/files 原子回写、画布终端框开合
  * [POS]: web 的总装线——数据如河流单向流动：graph → 过滤 → 画布/面板
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -33,6 +33,7 @@ export default function App() {
   const focusRef = useRef(() => {});
   const actionsRef = useRef({});
   const layoutUndoRef = useRef(null);
+  const geometryPendingRef = useRef(false);
 
   // ---- 双侧边栏：宽度可拖、可收回，记进 localStorage ----
   const [leftW, setLeftW] = useState(+localStorage.leftW || 250);
@@ -69,22 +70,30 @@ export default function App() {
       toast('已有新的手工调整，不能再撤销上次整理');
       return;
     }
+    const prepared = await actionsRef.current.prepareGeometry?.();
+    if (prepared === false) return;
+    geometryPendingRef.current = true;
     layoutUndoRef.current = null;
     try {
       await api.layoutBatch(Object.entries(undo.snapshot).map(([path, pos]) => ({ path, ...pos })), true);
       // 容器承载律：撤销整理时，跟着容器走过的墨迹按逆差回家
-      if (undo.undoMoves?.length) actionsRef.current.followDrawings?.(undo.undoMoves);
+      if (undo.undoMoves?.length) await actionsRef.current.followDrawings?.(undo.undoMoves);
       await reload();
       focusRef.current(null);
       toast('已撤销整理', 'ok');
     } catch (e) {
       layoutUndoRef.current = undo;
       toast(`撤销失败：${e.message}`, 'error');
+    } finally {
+      geometryPendingRef.current = false;
     }
   }, [reload]);
 
   // ---- 自动整理只清几何、不清人工归属；原子替换后可由按钮或 Cmd/Ctrl+Z 撤销 ----
   const arrange = useCallback(async () => {
+    const prepared = await actionsRef.current.prepareGeometry?.();
+    if (prepared === false) return;
+    geometryPendingRef.current = true;
     const snapshot = graph?.layout || {};
     const rectsBefore = actionsRef.current.containerRects?.() || {};
     try {
@@ -93,25 +102,27 @@ export default function App() {
       await reload();
       focusRef.current(null);
       // 容器承载律：新布局由瀑布算法在渲染时定型——等落定后量差，锚定墨迹随容器走
-      setTimeout(() => {
-        const after = actionsRef.current.containerRects?.() || {};
-        const moves = [];
-        for (const [id, r] of Object.entries(rectsBefore)) {
-          const n = after[id];
-          if (n && (Math.abs(n.x - r.x) > 0.5 || Math.abs(n.y - r.y) > 0.5)) {
-            moves.push({ rect: r, dx: n.x - r.x, dy: n.y - r.y });
-          }
+      await new Promise(resolve => setTimeout(resolve, 120));
+      const after = actionsRef.current.containerRects?.() || {};
+      const moves = [];
+      for (const [id, r] of Object.entries(rectsBefore)) {
+        const n = after[id];
+        if (n && (Math.abs(n.x - r.x) > 0.5 || Math.abs(n.y - r.y) > 0.5)) {
+          moves.push({ rect: r, dx: n.x - r.x, dy: n.y - r.y });
         }
-        if (!moves.length) return;
-        actionsRef.current.followDrawings?.(moves);
+      }
+      if (moves.length) {
+        await actionsRef.current.followDrawings?.(moves);
         layoutUndoRef.current?.undoMoves?.push(...moves.map(m => ({
           rect: { x: m.rect.x + m.dx, y: m.rect.y + m.dy, w: m.rect.w, h: m.rect.h },
           dx: -m.dx, dy: -m.dy,
         })));
-      }, 120);
+      }
       toast('已整理位置，人工归属保持不变', 'ok', { label: '撤销', onClick: undoArrange });
     } catch (e) {
       toast(`整理失败：${e.message}`, 'error');
+    } finally {
+      geometryPendingRef.current = false;
     }
   }, [graph?.layout, reload, undoArrange]);
 
@@ -121,9 +132,17 @@ export default function App() {
     const recover = e => { toast(`操作失败：${e.message}`, 'error'); api.graph().then(setGraph).catch(() => {}); };
     if (action === 'openContext') {
       setCtxFrame(payload);   // 纯视图动作：画布就地弹终端框，不碰盘
+    } else if (action === 'drawingCommit') {
+      // 普通看板态的沉浮/删除/承载动作：后端落盘成功才原子换本地 committed 快照。
+      return api.setDrawing(payload.elements, payload.files).then(() => {
+        patch(c => ({ ...c, drawing: payload.elements, drawingFiles: payload.files }));
+        return payload;
+      });
     } else if (action === 'drawingPersisted') {
-      // 绘图层直连落盘后的本地回写：首笔退出画笔时挂载条件不再拿陈旧空数组说事
-      patch(c => ({ ...c, drawing: payload }));
+      // 临时编辑器 flush 成功后回写；兼容旧的纯 elements 回调。
+      const drawing = Array.isArray(payload) ? payload : payload.elements;
+      const files = Array.isArray(payload) ? undefined : payload.files;
+      patch(c => ({ ...c, drawing, ...(files === undefined ? {} : { drawingFiles: files }) }));
     } else if (action === 'addEdge') {
       api.addEdge(payload.from, payload.to)
         .then(edge => patch(c => ({ ...c, edges: [...c.edges.filter(e => e.id !== edge.id), edge] })))
@@ -263,6 +282,7 @@ export default function App() {
             api.wsRename(path, name).then(reload).catch(e => toast(`改名失败：${e.message}`, 'error'))}
           selectedKey={selectedKey}
           actionsRef={actionsRef}
+          geometryPendingRef={geometryPendingRef}
           expanded={expandedWs}
           searching={!!deferredQ.trim()}
           onToggleExpand={path => setExpandedWs(s => {
