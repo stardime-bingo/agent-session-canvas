@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 独立样式文件，依赖系统 Inter/PingFang 字体栈
- * [OUTPUT]: 对外提供全局 CSS 变量（Dify 浅色画布基因）、基础排版、面板/按钮/徽章与可操作 toast 通用类
+ * [OUTPUT]: 对外提供全局 CSS 变量（Dify 浅色画布基因）、基础排版、面板/按钮/徽章、缩放感知连接点、会话上下文终端框皮肤与可操作 toast 通用类
  * [POS]: web 的视觉唯一真相源——浅灰画布 + 纯白卡片 + Dify 蓝锚点 + 柔和阴影，动画只走合成器
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -95,10 +95,11 @@ body {
   border: 1px solid var(--line-strong); border-radius: 8px;
   padding: 6px 13px; cursor: pointer;
   box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05);
-  transition: background 140ms var(--ease-panel), border-color 140ms, color 140ms, transform 100ms;
+  transition: background 140ms var(--ease-panel), border-color 140ms, color 140ms,
+    transform 160ms cubic-bezier(0.34, 1.56, 0.64, 1);   /* 微弹簧：抬起有生命，回落有分量 */
 }
-.btn:hover { background: var(--bg-hover); border-color: var(--accent-soft); color: var(--ink); }
-.btn:active { transform: translateY(1px); }
+.btn:hover { background: var(--bg-hover); border-color: var(--accent-soft); color: var(--ink); transform: translateY(-1px); }
+.btn:active { transform: translateY(0) scale(0.97); }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
 .btn.primary:hover { filter: brightness(1.08); }
 .btn.danger { color: var(--danger); border-color: var(--danger-soft); background: var(--danger-wash); }
@@ -112,8 +113,9 @@ body {
   height: 26px; display: inline-flex; align-items: center;
   padding: 0 11px; border-radius: 99px; cursor: pointer;
   border: 1px solid var(--line); color: var(--ink-dim); background: var(--bg-panel);
-  transition: color 140ms, border-color 140ms, background 140ms;
+  transition: color 140ms, border-color 140ms, background 140ms, transform 120ms var(--ease-panel);
 }
+.chip:active { transform: scale(0.95); }
 .chip.on { color: var(--accent); border-color: var(--accent-soft); background: var(--accent-glow); }
 
 /* ============================================================
@@ -131,24 +133,87 @@ body {
 .canvas-moving .react-flow__edge-path { animation-play-state: paused !important; }
 .canvas-moving .dot.active { animation-play-state: paused; }
 
+/* ============================================================
+ *  绘图编辑态指示：全画布内描边一圈蓝——一眼知道自己在改画不在看板
+ *  普通模式悬停绘图描边带：可点的东西长得像可点的
+ * ============================================================ */
+@keyframes fade-in { from { opacity: 0; } }
+.canvas-root.drawing-on::after {
+  content: ''; position: absolute; inset: 0; z-index: 5; pointer-events: none;
+  border: 2px solid var(--accent-soft);
+  animation: fade-in 0.25s var(--ease-panel);
+}
+.canvas-root.over-drawing .react-flow__pane,
+.canvas-root.over-drawing .react-flow__node { cursor: pointer; }
+
+/* 悬停绘图笔迹：底部升起提示 chip——可点的东西自己开口说明怎么点。
+   120ms 出场宽限（backwards 填充）：光标快速扫过不闪 */
+.canvas-root.over-drawing::before {
+  content: '绘图：点击选中 · 右键删除'; position: absolute;
+  left: 50%; bottom: 68px; z-index: 6; pointer-events: none;
+  transform: translateX(-50%);
+  background: var(--ink); color: #fff; font-size: 11px; line-height: 1;
+  padding: 7px 14px; border-radius: 99px; white-space: nowrap;
+  box-shadow: var(--shadow);
+  animation: hint-rise 0.18s var(--ease-panel) 0.12s backwards;
+}
+@keyframes hint-rise { from { opacity: 0; transform: translate(-50%, 6px); } }
+
 /* 顶栏分组分隔线 */
 .topbar-sep { width: 1px; height: 22px; background: var(--line); flex-shrink: 0; }
 
-/* 右键快捷菜单 */
+/* ============================================================
+ *  顶部画布工具岛：创建 | 绘图 | 导航 三组；绘图激活时滑移让位
+ *  给 Excalidraw 工具栏——位移走 transform，模式切换有物理感不瞬移
+ * ============================================================ */
+.tool-island {
+  position: absolute; top: 12px; left: 50%;
+  transform: translate(-50%, 0);
+  z-index: 7; display: flex; gap: 4px; align-items: center; padding: 5px;
+  transition: transform 240ms var(--ease-panel);
+}
+.canvas-root.drawing-on .tool-island { transform: translate(-50%, 64px); }
+
+/* 图标先于按钮回应你：悬停轻胀、按下回缩——只动 transform */
+.tool-island .btn { position: relative; }
+.tool-island .btn svg { transition: transform 180ms var(--ease-panel); }
+.tool-island .btn:hover svg { transform: scale(1.15); }
+.tool-island .btn:active svg { transform: scale(0.9); }
+
+/* 激活中的绘图工具：一圈呼吸光环宣告"模式在场"——opacity 动画合成器友好，平移中屏息 */
+.tool-island .btn.primary::after {
+  content: ''; position: absolute; inset: -3px; border-radius: 11px;
+  border: 1.5px solid var(--accent-soft); pointer-events: none;
+  animation: ring-breathe 2.4s ease-in-out infinite;
+}
+@keyframes ring-breathe { 0%, 100% { opacity: 1; } 50% { opacity: 0.2; } }
+.canvas-moving .tool-island .btn.primary::after { animation-play-state: paused; }
+
+/* 右键快捷菜单：从触点轻弹出场，条目悬停微滑——ReactBits 神韵，合成器动画 */
+@keyframes menu-pop { from { opacity: 0; transform: scale(0.96) translateY(-4px); } }
 .ctx-menu {
   position: fixed; z-index: 1000; min-width: 180px;
   background: var(--bg-panel); border: 1px solid var(--line);
   border-radius: 10px; box-shadow: var(--shadow-drag); padding: 5px;
+  transform-origin: top left;
+  animation: menu-pop 0.16s var(--ease-panel);
 }
 .ctx-menu .item {
   display: flex; align-items: center; gap: 8px;
   font-size: 12.5px; color: var(--ink); padding: 7px 12px;
   border-radius: 6px; cursor: pointer; white-space: nowrap;
+  transition: background 120ms, transform 140ms var(--ease-panel);
 }
-.ctx-menu .item:hover { background: var(--bg-hover); }
+.ctx-menu .item:hover { background: var(--bg-hover); transform: translateX(2px); }
+.ctx-menu .item:active { transform: translateX(2px) scale(0.97); }
+.ctx-menu .item svg { transition: color 120ms; }
+.ctx-menu .item:not(.danger):hover svg { color: var(--accent); }
 .ctx-menu .item.danger { color: var(--danger); }
 .ctx-menu .item.danger:hover { background: var(--danger-wash); }
-.ctx-menu .sep { height: 1px; background: var(--line); margin: 4px 8px; }
+.ctx-menu .sep {
+  height: 1px; margin: 4px 8px;
+  background: linear-gradient(90deg, transparent, var(--line) 18%, var(--line) 82%, transparent);
+}
 
 /* 侧栏拖宽把手 */
 .resize-strip {
@@ -226,17 +291,31 @@ input.search:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--ac
   stroke-width: 4; opacity: 1;
 }
 
-/* 连接点：常显淡紫（不闪），悬停提亮放大——出现/消失才是"闪"的根源 */
+/* 连接点：工作缩放 28px 命中区、全景 12px 底线，靠近节点再扩满；绝不覆盖 RF 的定位 transform。 */
 .react-flow__handle {
-  width: 14px; height: 14px;
-  background: #7c3aed; border: 2.5px solid #fff;
-  opacity: 0.3; transition: opacity 120ms, transform 120ms;
-  box-shadow: 0 1px 3px rgba(16, 24, 40, 0.2);
+  width: var(--handle-hit, 28px); height: var(--handle-hit, 28px);
+  background: transparent; border: 0; opacity: 1;
 }
-.react-flow__node:hover .react-flow__handle { opacity: 1; }
-.react-flow__handle:hover { opacity: 1 !important; transform: scale(1.3); }
+.react-flow__handle::after {
+  content: ''; position: absolute; left: 50%; top: 50%;
+  width: 14px; height: 14px;
+  transform: translate(-50%, -50%); pointer-events: none;
+  border-radius: 50%; background: #7c3aed;
+  border: 2px solid #fff; opacity: 0.3;
+  box-shadow: 0 1px 3px rgba(16, 24, 40, 0.2);
+  transition: width 100ms, height 100ms, opacity 100ms, box-shadow 100ms;
+}
+.react-flow__node:hover .react-flow__handle {
+  width: var(--handle-hit-hover, 28px); height: var(--handle-hit-hover, 28px);
+}
+.react-flow__node:hover .react-flow__handle::after,
+.react-flow__handle:hover::after {
+  width: var(--handle-dot-hover, 14px); height: var(--handle-dot-hover, 14px);
+  border-width: var(--handle-border-hover, 2px);
+  opacity: 1; box-shadow: 0 0 0 var(--handle-border-hover, 2px) rgba(124, 58, 237, 0.2);
+}
 /* 拉线进行中：全场连接点点亮（类由 onConnectStart/End 挂在画布根上） */
-.canvas-root.connecting .react-flow__handle { opacity: 0.85; }
+.canvas-root.connecting .react-flow__handle::after { opacity: 0.85; }
 
 /* ============================================================
  *  选中与悬停：每一次点击都有可感知的回应
@@ -355,6 +434,59 @@ input.inline-edit {
 }
 
 /* ============================================================
+ *  会话上下文终端框：拉线落空的第三条路——就地看完整现场
+ *  白岛壳 + 深色终端体，角色分色与详情面板同一套语义
+ * ============================================================ */
+.term-frame {
+  position: absolute; z-index: 100;
+  display: flex; flex-direction: column; overflow: hidden;
+  max-height: min(68vh, 640px);
+  box-shadow: var(--shadow-drag);
+  animation: toast-in 0.18s var(--ease-panel);
+}
+.term-head {
+  display: flex; align-items: center; gap: 7px; flex-shrink: 0;
+  padding: 8px 12px; cursor: grab; user-select: none;
+  border-bottom: 1px solid var(--line); background: var(--bg-panel);
+}
+.term-head:active { cursor: grabbing; }
+.term-light { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+.term-body {
+  flex: 1; min-height: 130px; overflow-y: auto; overscroll-behavior: contain;
+  background: #0c1222; color: #cbd5e1;
+  font-family: var(--mono); font-size: 11.5px; line-height: 1.65;
+  padding: 10px 14px;
+  scrollbar-color: #334155 transparent;   /* 深色终端体配深色滚梯，不用全局浅色的 */
+}
+.term-body::-webkit-scrollbar-thumb { background-color: #334155; }
+/* 终端体性能核心：视口外的行不排版不绘制（浏览器原生虚拟化），万行 DOM 照样 60fps */
+.term-body .tl {
+  margin: 4px 0; white-space: pre-wrap; word-break: break-word;
+  content-visibility: auto; contain-intrinsic-block-size: auto 22px;
+}
+.term-body { scrollbar-color: #334155 transparent; }
+.term-body::-webkit-scrollbar-thumb { background-color: #334155; }
+.term-body .term-more { cursor: pointer; text-align: center; }
+.term-body .term-more:hover { color: #93c5fd; }
+/* 回到最新：滚离底部才现身的深色小药丸，与终端体同族 */
+.term-jump {
+  position: absolute; right: 16px; bottom: 58px; z-index: 2;
+  background: #1e293b; color: #cbd5e1; border: 1px solid #334155;
+  font-size: 11px; padding: 5px 12px; border-radius: 99px; cursor: pointer;
+  box-shadow: var(--shadow); animation: toast-in 0.16s var(--ease-panel);
+}
+.term-jump:hover { color: #fff; border-color: #475569; }
+.term-body .tl.head { color: #64748b; letter-spacing: 0.08em; font-size: 10px; margin: 12px 0 4px; }
+.term-body .tl.user { color: #93c5fd; border-left: 2px solid #3b82f6; padding-left: 8px; }
+.term-body .tl.assistant { color: #cbd5e1; border-left: 2px solid #334155; padding-left: 8px; }
+.term-body .tl.tool { color: #64748b; font-size: 10.5px; margin-left: 10px; }
+.term-body .tl.error { color: #fda29b; font-size: 10.5px; margin-left: 10px; }
+.term-foot {
+  display: flex; gap: 8px; align-items: center; flex-shrink: 0;
+  padding: 8px 12px; border-top: 1px solid var(--line); background: var(--bg-panel);
+}
+
+/* ============================================================
  *  空态卡：世界被筛空时的指路牌
  * ============================================================ */
 .empty-state {
@@ -375,15 +507,21 @@ input.inline-edit {
 
 /* ============================================================
  *  Excalidraw 绘图层融合律：
- *  非绘图模式 → 它的全部 UI 岛（汉堡菜单/缩放条/帮助钮）彻底消失，
+ *  绘图编辑未激活 → 它的全部 UI 岛（汉堡菜单/缩放条/帮助钮）彻底消失，
  *  只留画布展示笔迹——pointer-events:all 的幽灵劫持一并根治
  * ============================================================ */
 .draw-layer:not(.draw-active) .excalidraw .layer-ui__wrapper { display: none !important; }
 
-/* 绘图模式：汉堡菜单/帮助钮/杂项工具不进屋——它们是"外来 app"浓度最高的入口 */
+/* 绘图编辑激活：保留原生选择与属性面板；汉堡菜单/帮助钮/杂项工具不进屋。 */
 .draw-active .excalidraw .main-menu-trigger,
 .draw-active .excalidraw .help-icon,
 .draw-active .excalidraw .App-toolbar__extra-tools-trigger { display: none !important; }
+
+/* 原生属性岛默认贴左，会整块躲进导航岛下面；按导航实时宽度让位，收起导航即自动归位。 */
+.draw-active .excalidraw .App-menu__left {
+  transform: translateX(var(--draw-panel-shift, 0px));
+  transition: transform 160ms var(--ease-panel);
+}
 
 /* ===== Excalidraw 融合层：一家人的皮肤 =====
    特异性 div.draw-layer .excalidraw (0,2,1) 必须压过它自己的
@@ -429,10 +567,15 @@ div.draw-layer .excalidraw {
 }
 .react-flow__controls-button {
   background: transparent; border-bottom: 1px solid var(--line); fill: var(--ink-dim);
+  transition: background 120ms, transform 120ms var(--ease-panel);
 }
-.react-flow__controls-button:hover { background: var(--bg-hover); }
+/* 可交互者悬停必染蓝：RF 原生钮走 fill，自绘滚轮钮走 currentColor，一条规则双通吃 */
+.react-flow__controls-button:hover { background: var(--bg-hover); fill: var(--accent); color: var(--accent); }
+.react-flow__controls-button:active { transform: scale(0.9); }
 
 .react-flow__minimap {
   background: var(--bg-panel) !important;
   border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow);
+  transition: border-color 140ms;
 }
+.react-flow__minimap:hover { border-color: var(--accent-soft); }

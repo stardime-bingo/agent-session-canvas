@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CARD_GAP, COL_W, GAP_IN, GUTTER, HEADER_H, PAD, packWorkspaces, resolveContainerOverlaps, tidyLayoutEntries } from '../web/src/canvas/layout.js';
+import { CARD_GAP, COL_W, GAP_IN, GUTTER, HEADER_H, PAD, packWorkspaces, resizedContainerChildren, resolveContainerOverlaps, tidyLayoutEntries } from '../web/src/canvas/layout.js';
 
 const ws = (path, count = 1) => ({ path, visibleKeys: Array.from({ length: count }, (_, i) => `${path}:${i}`) });
 const heightOf = item => HEADER_H + item.visibleKeys.length * (62 + CARD_GAP) + 8;
@@ -72,4 +72,17 @@ test('tidy resets geometry but preserves manual district and board membership', 
     { path: '/district-member', d: 'BINGO-Space / Claude_Code' },
     { path: '/board-member', d: 'board:demo' },
   ]);
+});
+
+test('container resize persists React Flow child compensation so absolute positions stay fixed', () => {
+  const afterResize = [
+    { id: 'board:demo', type: 'board', position: { x: 80, y: 70 } },
+    { id: '/alpha', type: 'workspace', parentId: 'board:demo', position: { x: 40, y: 60 } },
+    { id: '/outside', type: 'workspace', parentId: 'district:elsewhere', position: { x: 10, y: 20 } },
+  ];
+
+  assert.deepEqual(resizedContainerChildren(afterResize, 'board:demo'), [
+    { path: '/alpha', x: 40, y: 60, d: 'board:demo' },
+  ]);
+  assert.equal(80 + 40, 120); // resize 前 parent.x=100, child.x=20，绝对 x 同为 120
 });

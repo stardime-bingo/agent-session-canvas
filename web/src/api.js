@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖浏览器 fetch / EventSource，对接 server/index.mjs 的 API 契约
- * [OUTPUT]: 对外提供 api.graph/session/launch/summarize/handoff/rename/reveal/rescan/layoutBatch（可原子替换）与 subscribeEvents
+ * [OUTPUT]: 对外提供 graph/session/contextPage(终端框倒序分页)/AI/布局/画布对象/绘图图片/落空连线原子创建 API 与 subscribeEvents
  * [POS]: web 的数据访问唯一通道，组件不直接碰 fetch
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -23,6 +23,7 @@ const post = (path, body) => call(path, {
 export const api = {
   graph: () => call('/api/graph'),
   session: key => call(`/api/session?key=${encodeURIComponent(key)}`),
+  contextPage: (key, before) => call(`/api/context-page?key=${encodeURIComponent(key)}${before ? `&before=${before}` : ''}`),
   rescan: () => post('/api/scan', {}),
   launch: p => post('/api/launch', p),
   summarize: key => post('/api/summarize', { key }),
@@ -39,7 +40,10 @@ export const api = {
   delNote: id => post('/api/note-del', { id }),
   setBoard: board => post('/api/board-set', board),
   delBoard: id => post('/api/board-del', { id }),
-  setDrawing: elements => post('/api/drawing-set', { elements }),
+  setDrawing: (elements, files) => post('/api/drawing-set', {
+    elements, ...(files === undefined ? {} : { files }),
+  }),
+  createFromEdge: payload => post('/api/node-from-edge', payload),
   del: (key, force) => post('/api/delete', { key, force }),
   backfill: () => post('/api/backfill', {}),
   backfillStatus: () => call('/api/backfill-status'),

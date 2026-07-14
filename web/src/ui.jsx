@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 react
- * [OUTPUT]: 对外提供 Icon 单色图标集、支持撤销动作的 toast()、confirmPop()、<UIHost/>、<InlineEdit/> 就地改名
+ * [OUTPUT]: 对外提供 Icon 单色图标集（含绘图选择/画笔/终端/滚轮模式三态）、支持撤销动作的 toast()、confirmPop()、<UIHost/>、<InlineEdit/> 就地改名
  * [POS]: web 的 UI 原子库——自绘轻提示/确认弹层/行内编辑，全面取代原生 alert/confirm/prompt 与 emoji 图标
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -12,6 +12,7 @@ import React, { useEffect, useRef, useState } from 'react';
 const PATHS = {
   note:    <><rect x="4" y="4" width="16" height="16" rx="2"/><path d="M14 20v-4a2 2 0 0 1 2-2h4"/></>,
   board:   <><rect x="3" y="5" width="18" height="14" rx="3" strokeDasharray="4 3"/></>,
+  cursor:  <path d="M5 3l14 9-6 1.5L9.5 20 5 3z"/>,
   pen:     <><path d="M12 19l7-7 3 3-7 7-3-3z"/><path d="M18 13l-1.5-7.5L2 2l3.5 14.5L13 18l5-5z"/><path d="M2 2l7.586 7.586"/><circle cx="11" cy="11" r="2"/></>,
   fit:     <><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M16 3h3a2 2 0 0 1 2 2v3"/><path d="M8 21H5a2 2 0 0 1-2-2v-3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></>,
   tidy:    <><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></>,
@@ -33,6 +34,10 @@ const PATHS = {
   down:    <path d="M6 9l6 6 6-6"/>,
   up:      <path d="M6 15l6-6 6 6"/>,
   link:    <><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></>,
+  terminal:<><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3"/><path d="M13 15h4"/></>,
+  mouse:   <><rect x="6" y="3" width="12" height="18" rx="6"/><path d="M12 7v3"/></>,
+  trackpad:<><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 14h18"/><path d="M12 14v5"/></>,
+  wheelAuto:<><circle cx="12" cy="12" r="8" strokeDasharray="4 3.2"/><circle cx="12" cy="12" r="2"/></>,
 };
 
 export const Icon = ({ name, size = 13, style }) => (

@@ -7,7 +7,7 @@
  */
 import React, { useEffect, useMemo, useState } from 'react';
 import { api } from '../api.js';
-import { TOOL_META, STATUS_META, relTime, fmtSize } from '../util.js';
+import { TOOL_META, STATUS_META, relTime, fmtSize, classifyDigestLine } from '../util.js';
 import { Icon, toast, InlineEdit } from '../ui.jsx';
 import { deleteSessionFlow } from '../canvas/menus.jsx';
 
@@ -37,16 +37,6 @@ const LINE_STYLE = {
   error: { color: 'var(--danger)', fontFamily: 'var(--mono)', fontSize: 10.5, margin: '3px 0 3px 10px' },
 };
 
-function classify(line) {
-  if (line.startsWith('【')) return ['head', line];
-  if (line.startsWith('[用户]')) return ['user', line.slice(4).trim()];
-  if (line.startsWith('[助手]')) return ['assistant', line.slice(4).trim()];
-  const t = line.trim();
-  if (t.startsWith('▸')) return ['tool', t];
-  if (t.startsWith('✗')) return ['error', t];
-  return ['assistant', line];
-}
-
 function DigestView({ text, startCollapsed, fromEnd = false }) {
   const [open, setOpen] = useState(!startCollapsed);
   const [full, setFull] = useState(false);
@@ -69,7 +59,7 @@ function DigestView({ text, startCollapsed, fromEnd = false }) {
         maxHeight: full ? 420 : undefined, overflowY: full ? 'auto' : 'hidden',
       }}>
         {shown.map((l, i) => {
-          const [kind, t] = classify(l);
+          const [kind, t] = classifyDigestLine(l);
           return <div key={i} style={LINE_STYLE[kind]}>{t}</div>;
         })}
       </div>

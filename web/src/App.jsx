@@ -1,6 +1,7 @@
 /**
  * [INPUT]: 依赖 api 的数据通道、canvas/FlowCanvas 画布、panels 三件套、ui 的 UIHost/toast
- * [OUTPUT]: 对外提供 App 根组件：全局状态、过滤管道、SSE 订阅、岛屿布局、保留归属且可撤销的自动整理
+ * [OUTPUT]: 对外提供 App 根组件：全局状态、过滤管道、SSE 订阅、岛屿布局（含绘图属性面板动态让位）、
+ *           可撤销整理与落空连线原子动作分发、画布终端框（会话上下文）开合
  * [POS]: web 的总装线——数据如河流单向流动：graph → 过滤 → 画布/面板
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -11,6 +12,7 @@ import { tidyLayoutEntries } from './canvas/layout.js';
 import TopBar from './panels/TopBar.jsx';
 import Sidebar from './panels/Sidebar.jsx';
 import DetailPanel from './panels/DetailPanel.jsx';
+import ContextFrame from './panels/ContextFrame.jsx';
 import { UIHost, toast, Icon } from './ui.jsx';
 
 const RANGE_MS = { '7d': 7 * 864e5, '30d': 30 * 864e5, all: Infinity };
@@ -25,9 +27,9 @@ export default function App() {
   const [live, setLive] = useState(false);
   const [pending, setPending] = useState(false);   // 有新活动但不打断用户：举旗，不抢方向盘
   const [selectedKey, setSelectedKey] = useState(null);
+  const [ctxFrame, setCtxFrame] = useState(null);   // 画布终端框 {key, x, y}
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
   const [expandedWs, setExpandedWs] = useState(() => new Set());   // 会话级展开记忆，刷新即收
-  const [drawing, setDrawing] = useState(false);                   // 绘图模式：动作岛让位
   const focusRef = useRef(() => {});
   const actionsRef = useRef({});
   const layoutUndoRef = useRef(null);
@@ -97,7 +99,12 @@ export default function App() {
   const handleCanvas = useCallback((action, payload) => {
     const patch = fn => setGraph(g => ({ ...g, canvas: fn(g.canvas || { edges: [], notes: [], boards: [] }) }));
     const recover = e => { toast(`操作失败：${e.message}`, 'error'); api.graph().then(setGraph).catch(() => {}); };
-    if (action === 'addEdge') {
+    if (action === 'openContext') {
+      setCtxFrame(payload);   // 纯视图动作：画布就地弹终端框，不碰盘
+    } else if (action === 'drawingPersisted') {
+      // 绘图层直连落盘后的本地回写：首笔退出画笔时挂载条件不再拿陈旧空数组说事
+      patch(c => ({ ...c, drawing: payload }));
+    } else if (action === 'addEdge') {
       api.addEdge(payload.from, payload.to)
         .then(edge => patch(c => ({ ...c, edges: [...c.edges.filter(e => e.id !== edge.id), edge] })))
         .catch(recover);
@@ -121,11 +128,14 @@ export default function App() {
         .then(() => toast('画板已删除，成员回到原街区'))
         .catch(recover);
       patch(c => ({ ...c, boards: (c.boards || []).filter(b => b.id !== payload) }));
-    } else if (action === 'noteFromEdge') {
-      // 拉线落空 = 生便签并自动连上：思路飘到哪，批注就落到哪
-      api.setNote({ x: payload.x, y: payload.y, text: '', color: 'yellow' })
-        .then(note => api.addEdge(payload.from, note.id)
-          .then(edge => patch(c => ({ ...c, notes: [...c.notes, note], edges: [...c.edges, edge] }))))
+    } else if (action === 'nodeFromEdge') {
+      api.createFromEdge(payload)
+        .then(({ kind, node, edge }) => patch(c => ({
+          ...c,
+          notes: kind === 'note' ? [...c.notes, node] : c.notes,
+          boards: kind === 'board' ? [...(c.boards || []), node] : (c.boards || []),
+          edges: [...c.edges, edge],
+        })))
         .catch(recover);
     }
   }, []);
@@ -143,7 +153,7 @@ export default function App() {
         if (e.key === 'Escape') t.blur();
         return;
       }
-      // 绘图模式下让位：n/b/f/d 是 Excalidraw 自己的工具快捷键
+      // 绘图编辑激活时快捷键交给 Excalidraw（含选择、形状、文字与图片）
       if (document.querySelector('.draw-active')) return;
       if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'z' && layoutUndoRef.current) {
         e.preventDefault();
@@ -213,7 +223,10 @@ export default function App() {
   //  岛屿律：画布即世界铺满全屏，导航/动作/详情皆为漂浮岛
   // ============================================================
   return (
-    <div style={{ position: 'relative', height: '100%', overflow: 'hidden' }}>
+    <div style={{
+      position: 'relative', height: '100%', overflow: 'hidden',
+      '--draw-panel-shift': leftOpen ? `${leftW + 12}px` : '0px',
+    }}>
       {/* ===== 世界：无限画布满屏铺底 ===== */}
       <div style={{ position: 'absolute', inset: 0 }}>
         <FlowCanvas
@@ -235,7 +248,6 @@ export default function App() {
           onToggleExpand={path => setExpandedWs(s => {
             const n = new Set(s); n.has(path) ? n.delete(path) : n.add(path); return n;
           })}
-          onDrawMode={setDrawing}
           onMoveNode={entries => {
             layoutUndoRef.current = null;   // 整理后又手动摆过，旧快照不再有资格覆盖新意图
             api.layoutBatch(entries).catch(() => api.graph().then(setGraph).catch(() => {}));
@@ -297,20 +309,18 @@ export default function App() {
           style={{ position: 'absolute', left: 12, top: 12, zIndex: 8 }}><Icon name="chevR" /> 指挥塔</button>
       )}
 
-      {/* ===== 右上：动作岛（绘图时让位，避免重排布局把笔迹甩脱） ===== */}
-      {!drawing && (
-        <div style={{
-          position: 'absolute', top: 12, zIndex: 8,
-          right: (selectedKey && rightOpen) ? rightW + 24 : 12,
-          transition: 'right 0.2s var(--ease-panel)',
-        }}>
-          <TopBar
-            pending={pending} onRefresh={reload}
-            onRescan={() => api.rescan().then(() => { reload(); toast('已全量重扫', 'ok'); })}
-            onArrange={e => arrange({ x: e.clientX - 250, y: e.clientY + 14 })}
-          />
-        </div>
-      )}
+      {/* ===== 右上：动作岛。画笔是并列工具，不再令全局动作退场 ===== */}
+      <div style={{
+        position: 'absolute', top: 12, zIndex: 8,
+        right: (selectedKey && rightOpen) ? rightW + 24 : 12,
+        transition: 'right 0.2s var(--ease-panel)',
+      }}>
+        <TopBar
+          pending={pending} onRefresh={reload}
+          onRescan={() => api.rescan().then(() => { reload(); toast('已全量重扫', 'ok'); })}
+          onArrange={e => arrange({ x: e.clientX - 250, y: e.clientY + 14 })}
+        />
+      </div>
 
       {/* ===== 右：详情岛 ===== */}
       {selectedKey && (rightOpen ? (
@@ -331,6 +341,15 @@ export default function App() {
         <button className="btn island" onClick={() => setRightOpen(true)} title="展开详情岛"
           style={{ position: 'absolute', right: 12, top: 64, zIndex: 8 }}><Icon name="chevL" /> 详情</button>
       ))}
+
+      {/* ===== 画布终端框：拉线落空/右键就地查看会话完整上下文 ===== */}
+      {ctxFrame && (
+        <ContextFrame
+          frame={ctxFrame}
+          onClose={() => setCtxFrame(null)}
+          onOpenDetail={key => { setSelectedKey(key); setRightOpen(true); setCtxFrame(null); }}
+        />
+      )}
 
       {/* ===== 自绘弹层宿主：toast 与确认层 ===== */}
       <UIHost />

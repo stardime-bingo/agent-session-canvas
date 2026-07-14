@@ -1,6 +1,7 @@
 /**
  * [INPUT]: 依赖 llm 的多后端路由、adapters/shared 的局部读取、store 的增强数据仓
- * [OUTPUT]: 对外提供 summarize(session)、makeHandoff(session)、nameSession(session)、extractDigest(session)、extractEndingDigest(session)
+ * [OUTPUT]: 对外提供 summarize(session)、makeHandoff(session)、nameSession(session)、extractDigest(session)、
+ *           extractEndingDigest(session)、extractContextPage(session, before, bytes) 终端框倒序分页
  * [POS]: server 的认知层——把机器日志蒸馏成人话：标题给一眼扫过的人，摘要给想接手的人
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -95,6 +96,21 @@ export function extractDigest(session, cap = 12000, deep = false) {
   const opening = fmtEvents(head.slice(0, deep ? 35 : 6));
   const ending = fmtEvents(tail.slice(-(deep ? 90 : 16)));
   return `【开场 · 任务源起】\n${opening}${middle}\n\n【结尾 · 最终状态】\n${ending}`.slice(0, cap);
+}
+
+// ============================================================
+//  终端框倒序分页：从 before 字节向前读一窗，行对齐后抽事件——
+//  不管会话多大，每页只碰 O(窗口) 字节；历史由前端按需向上翻
+// ============================================================
+export function extractContextPage(session, before, bytes = 524288) {
+  const size = fs.statSync(session.filePath).size;
+  const end = Math.min(Number.isFinite(before) && before > 0 ? before : size, size);
+  const start = Math.max(0, end - bytes);
+  const raw = sliceText(session.filePath, start, end - start);
+  // 行对齐：窗口开头可能是半行，丢到首个换行——那半行属于更早一页的末行
+  const cut = start > 0 ? raw.indexOf('\n') + 1 : 0;
+  const text = fmtEvents(extractEvents(raw.slice(cut).split('\n').filter(Boolean)));
+  return { text, prevOffset: start + cut, atStart: start === 0 };
 }
 
 // 详情面板的“最后停在哪里”不能依赖总 digest 的前向截断：

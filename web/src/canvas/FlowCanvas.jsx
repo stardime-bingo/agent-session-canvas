@@ -1,26 +1,33 @@
 /**
  * [INPUT]: 依赖 @xyflow/react、layout 纯布局内核、五种自定义节点、menus 的菜单构建器与删除流程、ui 的 toast/Icon
  * [OUTPUT]: 对外提供 FlowCanvas 组件：统一容器模型、弹性生长、拖放改归属、三系统边+手动边、
- *           增量成员防重叠、Figma 式框选/平移/触控板手势、容器标题栏拖动、Backspace 删除治理、折叠展开与视口记忆
+ *           增量成员防重叠、Figma 式框选/平移/触控板手势、滚轮双模（触控板平移/鼠标缩放+模式切换钮）、
+ *           容器缩放定桩、全画布落空连线选择（含就地打开会话上下文）、缩放感知连接点、原生绘图选择/画笔、
+ *           普通模式绘图命中（pane/容器面同河：点击描边带一键选中、右键选中/删除、悬停指针光标）、Backspace 删除治理
  * [POS]: canvas 的画布引擎。归属律：layout.d 手动指定 > 路径推断；容器永远生长包住成员；
  *        每一次点击必有可感知的回应：选中态/菜单/提示三选一
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
 import React, { useMemo, useCallback, useRef, useEffect, useLayoutEffect, useState, lazy, Suspense } from 'react';
-import { ReactFlow, useNodesState, useEdgesState, Controls, MiniMap, Background, BackgroundVariant, Panel, MarkerType, ConnectionMode } from '@xyflow/react';
+import { ReactFlow, useNodesState, useEdgesState, Controls, ControlButton, MiniMap, Background, BackgroundVariant, Panel, MarkerType, ConnectionMode } from '@xyflow/react';
 import WorkspaceNode from './WorkspaceNode.jsx';
 import SessionNode from './SessionNode.jsx';
 import DistrictNode from './DistrictNode.jsx';
 import BoardNode, { BOARD_COLORS } from './BoardNode.jsx';
 import NoteNode from './NoteNode.jsx';
-import { COL_W, PAD, BREATH, GUTTER, ROW_MAX_W, HEADER_H, CARD_H, CARD_GAP, MAX_SHOW, packWorkspaces, resolveContainerOverlaps } from './layout.js';
+import { COL_W, PAD, BREATH, GUTTER, ROW_MAX_W, HEADER_H, CARD_H, CARD_GAP, MAX_SHOW, packWorkspaces, resizedContainerChildren, resolveContainerOverlaps } from './layout.js';
 import { sessionMenu, workspaceMenu, districtMenu, boardMenu, noteMenu, paneMenu, edgeMenu, deleteBoardFlow, deleteNoteFlow } from './menus.jsx';
+import { connectionDrop, syncHandleHitArea } from './connections.js';
+import { hitDrawingElement } from './drawing.js';
+import { wheelDevice, zoomViewport, WHEEL_MODES, nextWheelMode } from './gestures.js';
 import { Icon, toast, confirmPop } from '../ui.jsx';
 
-// Excalidraw 体量大（~1MB gz 半壁江山），懒加载拆包：无笔迹且未进绘图模式时根本不挂载
+// Excalidraw 体量大（~1MB gz 半壁江山），懒加载拆包：无笔迹且未拿起画笔时根本不挂载
 const DrawLayer = lazy(() => import('./DrawLayer.jsx'));
 
 const nodeTypes = { workspace: WorkspaceNode, session: SessionNode, district: DistrictNode, board: BoardNode, note: NoteNode };
+
+const MIN_ZOOM = 0.1, MAX_ZOOM = 1.8;   // 缩放界限唯一真相：RF props 与滚轮内核共用
 
 // ============================================================
 //  街区识别：路径亲缘即城市区域（HOME 下前两段路径）
@@ -197,40 +204,108 @@ function hitContainer(node, all) {
 
 const EDGE_LABEL = { worktree: 'worktree 分支', family: '同族项目', handoff: '接力血缘', manual: '手动连线' };
 
-export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, canvas, onMoveNode, onCanvasAction, onRenameSession, onRenameWs, selectedKey, onSelect, onChanged, onArrange, focusRef, actionsRef, expanded, searching, onToggleExpand, onDrawMode }) {
+export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, canvas, onMoveNode, onCanvasAction, onRenameSession, onRenameWs, selectedKey, onSelect, onChanged, onArrange, focusRef, actionsRef, expanded, searching, onToggleExpand }) {
   const instRef = useRef(null);
   const [menu, setMenu] = useState(null);           // 右键快捷菜单 {x, y, items}
   const [edgeTip, setEdgeTip] = useState(null);     // 边悬浮说明牌 {x, y, text}
   const [renaming, setRenaming] = useState({ id: null, n: 0 });   // 就地改名信号（nonce 驱动）
-  const [drawMode, setDrawMode] = useState(false);
+  const [penActive, setPenActive] = useState(false);
+  const [drawTool, setDrawTool] = useState('selection');
   const drawRef = useRef(null);
-  const drawModeRef = useRef(false);
+  const penActiveRef = useRef(false);
+  const drawToolRef = useRef('selection');
   const syncingFromDraw = useRef(false);
   const dropHiRef = useRef(null);                   // 拖动中的投放目标高亮
   const rootRef = useRef(null);
+  const clearSelectionRef = useRef(() => {});       // 进绘图前清 RF 选中——Delete 不许一键双雷（定义在下方，ref 解前向引用）
 
   const triggerRename = useCallback(id => setRenaming(r => ({ id, n: r.n + 1 })), []);
 
-  // ---- 绘图模式开关：进门对齐视口并收菜单，出门带回视口并冲刷存盘 ----
-  const toggleDraw = useCallback(() => {
-    setMenu(null);
-    setDrawMode(d => {
-      if (!d) {
-        const vp = instRef.current?.getViewport();
-        if (vp) drawRef.current?.syncViewport(vp);
-      } else {
-        const vp = drawRef.current?.getViewport();
-        if (vp) instRef.current?.setViewport(vp);
-        drawRef.current?.flush();
-      }
-      return !d;
-    });
+  // ---- 滚轮双模：触控板=平移（RF panOnScroll 原生），鼠标滚轮=光标锚定缩放（此处接管）；
+  //      捏合/Ctrl/Meta 缩放与 Shift 横移一律交还 React Flow 原生手势，绝不重造 ----
+  const [wheelMode, setWheelMode] = useState(() =>
+    ['trackpad', 'mouse'].includes(localStorage.wheelMode) ? localStorage.wheelMode : 'auto');
+  const wheelModeRef = useRef(wheelMode);
+
+  const cycleWheel = useCallback(() => {
+    const next = nextWheelMode(wheelModeRef.current);
+    wheelModeRef.current = next;
+    setWheelMode(next);
+    try { localStorage.wheelMode = next; } catch { /* 隐私模式存不进就算了 */ }
+    toast(`${WHEEL_MODES[next].label}：${WHEEL_MODES[next].hint}`);
   }, []);
 
-  // 镜像到 ref（focusRef 闭包用）并通知 App（绘图时动作岛让位）
-  useEffect(() => { drawModeRef.current = drawMode; onDrawMode?.(drawMode); }, [drawMode, onDrawMode]);
+  useEffect(() => {
+    const el = rootRef.current?.querySelector('.react-flow');
+    if (!el) return;
+    let streak = null;
+    const onWheel = e => {
+      if (e.ctrlKey || e.metaKey || e.shiftKey) return;
+      if (e.target.closest?.('.nowheel, .react-flow__minimap, .react-flow__controls, .ctx-menu, .island')) return;
+      const now = Date.now();
+      const device = wheelModeRef.current === 'auto' ? wheelDevice(e, streak, now) : wheelModeRef.current;
+      streak = { device, t: now };
+      if (device !== 'mouse') return;   // 触控板滚动放行，d3 原生平移接手
+      e.preventDefault();
+      e.stopPropagation();              // 同一事件不许再被 d3 当平移消费一遍
+      const inst = instRef.current;
+      if (inst) inst.setViewport(zoomViewport(inst.getViewport(), e, el.getBoundingClientRect(), { min: MIN_ZOOM, max: MAX_ZOOM }));
+    };
+    el.addEventListener('wheel', onWheel, { capture: true, passive: false });
+    return () => el.removeEventListener('wheel', onWheel, { capture: true });
+  }, []);
 
-  // 绘图模式里 Excalidraw 平移缩放 → 实时回写看板视口（回声由 syncingFromDraw 掐断）
+  // ---- 绘图编辑：选择/画笔各有显式入口；进入对齐视口，退出带回视口并冲刷存盘 ----
+  const exitDrawing = useCallback(() => {
+    setMenu(null);
+    const vp = drawRef.current?.getViewport();
+    if (vp) instRef.current?.setViewport(vp);
+    drawRef.current?.flush();
+    penActiveRef.current = false;
+    setPenActive(false);
+  }, []);
+
+  const openDrawing = useCallback((tool, selectId) => {
+    setMenu(null);
+    clearSelectionRef.current();   // 清掉看板选中：绘图里按 Delete 时 RF 不许顺手删掉选中的手动边
+    if (penActiveRef.current && drawToolRef.current === tool && !selectId) {
+      exitDrawing();
+      return;
+    }
+    if (!penActiveRef.current) {
+      const vp = instRef.current?.getViewport();
+      if (vp) drawRef.current?.syncViewport(vp);
+      penActiveRef.current = true;
+      setPenActive(true);
+    }
+    drawToolRef.current = tool;
+    setDrawTool(tool);
+    requestAnimationFrame(() => {
+      drawRef.current?.activateTool(tool);
+      if (selectId) drawRef.current?.selectElement(selectId);   // 带着目标进门：普通模式点中的绘图直接呈选中态
+    });
+  }, [exitDrawing]);
+
+  const togglePen = useCallback(() => {
+    if (penActiveRef.current) exitDrawing();
+    else openDrawing('freedraw');
+  }, [exitDrawing, openDrawing]);
+
+  // 选绘图入口：空画布也进模式，但先说一句实话——零反馈的模式切换是哑谜
+  const openSelectDrawing = useCallback(() => {
+    if (!penActiveRef.current && !(drawRef.current?.getElements?.()?.length ?? canvas?.drawing?.length)) {
+      toast('画布还没有绘图——先用画笔（D）画一笔，再来选中编辑');
+    }
+    openDrawing('selection');
+  }, [openDrawing, canvas?.drawing]);
+
+  const onDrawToolChange = useCallback(tool => {
+    if (!tool || tool === drawToolRef.current) return;
+    drawToolRef.current = tool;
+    setDrawTool(tool);
+  }, []);
+
+  // 绘图编辑时 Excalidraw 平移缩放 → 实时回写看板视口（回声由 syncingFromDraw 掐断）
   const onScrollToFlow = useCallback(vp => {
     syncingFromDraw.current = true;
     instRef.current?.setViewport(vp);
@@ -238,17 +313,17 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   }, []);
 
   useEffect(() => {
-    if (!drawMode) return;
+    if (!penActive) return;
     const onKey = e => {
       if (e.key !== 'Escape') return;
       // Excalidraw 文字编辑中的 Esc 归它自己（结束输入），不许连坐退出绘图
       const t = e.target;
       if (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable) return;
-      toggleDraw();
+      exitDrawing();
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [drawMode, toggleDraw]);
+  }, [penActive, exitDrawing]);
 
   // Esc 分层：菜单在 capture 阶段拦截并阻断传播——面板与选中不许连坐
   useEffect(() => {
@@ -273,6 +348,15 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
           editSignal: renaming.id === n.id ? renaming.n : 0,
           onSetBoard: b => onCanvasAction('setBoard', b),
           onDelBoard: (board, pos) => deleteBoardFlow(board, pos, onCanvasAction),
+          onResize: p => {
+            const current = instRef.current?.getNodes() || [];
+            const childEntries = resizedContainerChildren(current, n.id);
+            if (childEntries.length) onMoveNode(childEntries);
+            onCanvasAction('setBoard', {
+              id: n.data.board.id, x: Math.round(p.x), y: Math.round(p.y),
+              w: Math.round(p.width), h: Math.round(p.height),
+            });
+          },
         },
       };
       if (n.type === 'district') return {
@@ -280,10 +364,13 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
         data: {
           ...n.data,
           // 拉角/拉边松手：位置与尺寸一并写入街区布局记忆
-          onResize: p => onMoveNode([{
-            path: n.id, x: Math.round(p.x), y: Math.round(p.y),
-            w: Math.round(p.width), h: Math.round(p.height),
-          }]),
+          onResize: p => {
+            const current = instRef.current?.getNodes() || [];
+            onMoveNode([{
+              path: n.id, x: Math.round(p.x), y: Math.round(p.y),
+              w: Math.round(p.width), h: Math.round(p.height),
+            }, ...resizedContainerChildren(current, n.id)]);
+          },
         },
       };
       if (n.type === 'workspace') return {
@@ -430,20 +517,30 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     for (const e of deleted) if (e.className === 'manual') onCanvasAction('delEdge', e.id);
   }, [onCanvasAction]);
 
-  // ---- 拉线落空 = 生便签并自动连上 ----
+  // ---- 拉线落空 = 在松手处选择“便签 / 画板”，选中后对象与线原子落盘 ----
   const onConnectEnd = useCallback((event, connectionState) => {
     rootRef.current?.classList.remove('connecting');
-    if (!connectionState || connectionState.isValid || !connectionState.fromNode) return;
-    const t = event.target;
-    if (!t?.classList?.contains('react-flow__pane')) return;
-    const x = event.clientX ?? event.changedTouches?.[0]?.clientX;
-    const y = event.clientY ?? event.changedTouches?.[0]?.clientY;
+    const drop = connectionDrop(event, connectionState);
+    if (!drop) return;
+    const { x, y, from } = drop;
     const pos = instRef.current.screenToFlowPosition({ x, y });
-    onCanvasAction('noteFromEdge', {
-      from: connectionState.fromNode.id,
-      x: Math.round(pos.x), y: Math.round(pos.y - 40),
+    const items = [
+      // 从会话卡拉出的线：第一去处是就地打开它的完整上下文终端框
+      ...(sessionsByKey[from] ? [{ label: <><Icon name="terminal" /> 打开会话上下文</>, fn: () =>
+        onCanvasAction('openContext', { key: from, x, y }) }] : []),
+      { label: <><Icon name="note" /> 新建便签并连接</>, fn: () => onCanvasAction('nodeFromEdge', {
+        kind: 'note', from, x: Math.round(pos.x), y: Math.round(pos.y),
+      }) },
+      { label: <><Icon name="board" /> 新建画板并连接</>, fn: () => onCanvasAction('nodeFromEdge', {
+        kind: 'board', from, x: Math.round(pos.x), y: Math.round(pos.y),
+      }) },
+    ];
+    setMenu({
+      x: Math.max(10, Math.min(x, window.innerWidth - 210)),
+      y: Math.max(10, Math.min(y, window.innerHeight - items.length * 34 - 16)),
+      items,
     });
-  }, [onCanvasAction]);
+  }, [onCanvasAction, sessionsByKey]);
 
   // ============================================================
   //  右键快捷菜单：七套（含街区与手动边），构建器在 menus.jsx
@@ -477,22 +574,96 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       const p = instRef.current.screenToFlowPosition(pos);
       onCanvasAction('setBoard', { x: Math.round(p.x), y: Math.round(p.y), w: 520, h: 360, name: '新画板' });
     },
+    openContext: (key, pos) => onCanvasAction('openContext', {
+      key, x: pos?.x ?? window.innerWidth / 2 - 290, y: pos?.y ?? 90,
+    }),
   });
 
   const onNodeContextMenu = useCallback((e, node) => {
     const ctx = menuCtx();
-    if (node.type === 'session') openMenu(e, sessionMenu(node.data.session, ctx));
-    else if (node.type === 'workspace') openMenu(e, workspaceMenu(node.data.workspace, ctx));
-    else if (node.type === 'district') openMenu(e, districtMenu(node, ctx));
-    else if (node.type === 'board') openMenu(e, boardMenu(node.data.board, ctx));
-    else if (node.type === 'note') openMenu(e, noteMenu(node.data.note, ctx));
-  }, [onSelect, onChanged, onCanvasAction, onArrange, triggerRename, focusDistrict]);
+    // 视觉最上层者赢：绘图叠在任何对象上（含会话卡/工作区），删除/编辑入口一律排在对象动作之前
+    const hit = drawingHitFromEvent(e);
+    const base =
+      node.type === 'session' ? sessionMenu(node.data.session, ctx)
+      : node.type === 'workspace' ? workspaceMenu(node.data.workspace, ctx)
+      : node.type === 'district' ? districtMenu(node, ctx)
+      : node.type === 'board' ? boardMenu(node.data.board, ctx)
+      : node.type === 'note' ? noteMenu(node.data.note, ctx)
+      : [];
+    openMenu(e, [...(hit ? drawingMenuItems(hit) : []), ...base]);
+  }, [onSelect, onChanged, onCanvasAction, onArrange, triggerRename, focusDistrict, openDrawing, canvas?.drawing]);
+
+  // ============================================================
+  //  普通模式的绘图命中：pane 与容器空白面都是"画布空地"，视觉最上层者赢——
+  //  绘图层画在一切之上，点得到看得到的东西才叫融合。标题栏/按钮等功能件除外。
+  // ============================================================
+  // 功能件排除清单唯一真相：点击/悬停两条路径共用，永不分叉
+  const HIT_BLOCK = '.container-drag-handle, .react-flow__resize-control, button, input, textarea, [contenteditable]';
+
+  const hitDrawingAt = (fx, fy) => {
+    const els = drawRef.current?.getElements?.() || canvas?.drawing || [];
+    return hitDrawingElement(els, fx, fy, 8 / (instRef.current?.getZoom() || 1));
+  };
+
+  const drawingHitFromEvent = e => {
+    if (penActiveRef.current || !drawRef.current) return null;
+    if (e.target?.closest?.(HIT_BLOCK)) return null;
+    const p = instRef.current?.screenToFlowPosition({ x: e.clientX, y: e.clientY });
+    return p ? hitDrawingAt(p.x, p.y) : null;
+  };
+
+  const enterDrawingSelection = hit => {
+    openDrawing('selection', hit.id);
+    toast('已选中绘图——Delete 删除，Esc 返回看板');
+  };
+
+  const drawingMenuItems = hit => [
+    { label: <><Icon name="cursor" /> 选中编辑此绘图</>, fn: () => openDrawing('selection', hit.id) },
+    { label: <><Icon name="trash" /> 删除此绘图</>, danger: true, fn: async mpos => {
+      const ok = await confirmPop({
+        x: mpos?.x, y: mpos?.y, danger: true, yesLabel: '删除',
+        text: '删除这段绘图？', detail: '仅删除这一个绘图元素，画布其余笔迹不受影响。',
+      });
+      if (ok) {
+        // 回执跟真实落盘结果走：daemon 恰好重启时不许拿绿色回执骗人
+        drawRef.current?.deleteElement(hit.id)
+          .then(() => toast('绘图已删除', 'ok'))
+          .catch(err => toast(`删除未落盘：${err.message}`, 'error'));
+      }
+    } },
+    { sep: true },
+  ];
+
+  const onPaneClick = useCallback(e => {
+    const hit = drawingHitFromEvent(e);
+    if (hit) return enterDrawingSelection(hit);
+    onSelect(null);
+    setMenu(null);
+  }, [onSelect, openDrawing, canvas?.drawing]);
+
+  // 悬停绘图描边带 → 指针光标（rAF 节流，元素只有几个，成本可忽略）
+  const overDrawRaf = useRef(0);
+  const onPaneMouseMove = useCallback(e => {
+    if (penActiveRef.current || !drawRef.current) return;
+    const { clientX, clientY } = e;
+    const blocked = !!e.target?.closest?.(HIT_BLOCK);
+    cancelAnimationFrame(overDrawRaf.current);
+    overDrawRaf.current = requestAnimationFrame(() => {
+      const p = blocked ? null : instRef.current?.screenToFlowPosition({ x: clientX, y: clientY });
+      rootRef.current?.classList.toggle('over-drawing', !!(p && hitDrawingAt(p.x, p.y)));
+    });
+  }, [canvas?.drawing]);
+  useEffect(() => () => cancelAnimationFrame(overDrawRaf.current), []);
+
+  // 一切节点与 pane 同一条河：描边带悬停指示处处点亮（空心区/功能件由命中检测自己排除）
+  const onNodeMouseMove = useCallback(e => onPaneMouseMove(e), [onPaneMouseMove]);
 
   const onPaneContextMenu = useCallback(e => {
     const pos = instRef.current.screenToFlowPosition({ x: e.clientX, y: e.clientY });
     const at = { x: Math.round(pos.x), y: Math.round(pos.y) };
-    openMenu(e, paneMenu(at, menuCtx()));
-  }, [onCanvasAction, onArrange]);
+    const hit = drawingHitFromEvent(e);
+    openMenu(e, [...(hit ? drawingMenuItems(hit) : []), ...paneMenu(at, menuCtx())]);
+  }, [onCanvasAction, onArrange, openDrawing, canvas?.drawing]);
 
   const onEdgeContextMenu = useCallback((e, edge) => {
     e.preventDefault();
@@ -523,25 +694,28 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     setNodes(ns => ns.some(n => n.selected) ? ns.map(n => n.selected ? { ...n, selected: false } : n) : ns);
     setRfEdges(es => es.some(e => e.selected) ? es.map(e => e.selected ? { ...e, selected: false } : e) : es);
   }, [setNodes, setRfEdges]);
+  clearSelectionRef.current = clearSelection;
 
   useEffect(() => { if (!selectedKey) clearSelection(); }, [selectedKey, clearSelection]);
 
   useEffect(() => {
     focusRef.current = path => {
-      if (drawModeRef.current) toggleDraw();   // 绘图中定位：收笔跟人走，视口不分家
+      if (penActiveRef.current) exitDrawing();   // 绘图激活时定位：退出编辑跟人走，视口不分家
       const inst = instRef.current;
       if (!inst) return;
       if (!path) return inst.fitView({ padding: 0.1, duration: 700, maxZoom: 0.8 });
       const p = built.positions[path];
       if (p) inst.setCenter(p.x + p.w / 2, p.y + Math.min(p.h / 2, 280), { zoom: 0.9, duration: 650 });
     };
-    if (actionsRef) actionsRef.current = { addNote, addBoard, fit: () => focusRef.current(null), toggleDraw, clearSelection };
-  }, [built, focusRef, actionsRef, addNote, addBoard, toggleDraw, clearSelection]);
+    if (actionsRef) actionsRef.current = { addNote, addBoard, fit: () => focusRef.current(null), toggleDraw: togglePen, clearSelection };
+  }, [built, focusRef, actionsRef, addNote, addBoard, togglePen, exitDrawing, clearSelection]);
 
-  const onNodeClick = useCallback((_, node) => {
+  const onNodeClick = useCallback((e, node) => {
+    const hit = drawingHitFromEvent(e);   // 视觉最上层者赢：描边带上的点击优先归绘图，空心区照常穿透给卡片
+    if (hit) return enterDrawingSelection(hit);
     if (node.type === 'session') onSelect(node.id);
     // 其余类型：RF 原生选中态即回应（描边+手柄亮起）
-  }, [onSelect]);
+  }, [onSelect, openDrawing, canvas?.drawing]);
 
   // ---- 双击就地改名：会话卡/画板/工作区同一条信号线 ----
   const onNodeDoubleClick = useCallback((_, node) => {
@@ -604,7 +778,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   }
 
   return (
-    <div ref={rootRef} className="canvas-root" style={{ position: 'relative', width: '100%', height: '100%' }}>
+    <div ref={rootRef} className={`canvas-root${penActive ? ' drawing-on' : ''}`} style={{ position: 'relative', width: '100%', height: '100%' }}>
     <ReactFlow
       nodes={nodes}
       edges={rfEdges}
@@ -613,23 +787,27 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       onEdgesChange={onEdgesChange}
       onMoveStart={() => { setMenu(null); setEdgeTip(null); rootRef.current?.classList.add('canvas-moving'); }}
       onMove={(_, vp) => {
-        if (syncingFromDraw.current || drawMode) return;
+        syncHandleHitArea(rootRef.current, vp.zoom);
+        if (syncingFromDraw.current || penActive) return;
         drawRef.current?.previewViewport(vp);   // 平移中只动 CSS 桥，零重绘
       }}
       onMoveEnd={(_, vp) => {
         rootRef.current?.classList.remove('canvas-moving');
-        if (!drawMode) drawRef.current?.syncViewport(vp);   // 松手落定
+        if (!penActive) drawRef.current?.syncViewport(vp);   // 松手落定
         try { localStorage.vp = JSON.stringify(vp); } catch { /* 隐私模式等存不进就算了 */ }
       }}
       onInit={inst => {
         instRef.current = inst;
+        syncHandleHitArea(rootRef.current, inst.getZoom());
         drawRef.current?.syncViewport(inst.getViewport());
       }}
       onNodeClick={onNodeClick}
       onNodeDoubleClick={onNodeDoubleClick}
       onNodeDrag={onNodeDrag}
       onNodeDragStop={onNodeDragStop}
-      onPaneClick={() => { onSelect(null); setMenu(null); }}
+      onPaneClick={onPaneClick}
+      onPaneMouseMove={onPaneMouseMove}
+      onNodeMouseMove={onNodeMouseMove}
       onNodeContextMenu={onNodeContextMenu}
       onPaneContextMenu={onPaneContextMenu}
       onEdgeContextMenu={onEdgeContextMenu}
@@ -653,14 +831,15 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       connectionLineStyle={{ stroke: '#7c3aed', strokeWidth: 2 }}
       connectionMode={ConnectionMode.Loose}
       connectionRadius={44}
+      connectOnClick={false}   // 只认拖线；点击续连会在取消落空菜单后留下隐形状态，普通点击就误生边
       nodeDragThreshold={5}
       defaultViewport={initVp.current || { x: 60, y: 80, zoom: 0.5 }}
-      minZoom={0.1}
-      maxZoom={1.8}
+      minZoom={MIN_ZOOM}
+      maxZoom={MAX_ZOOM}
       proOptions={{ hideAttribution: true }}
     >
-      {/* ===== 关系图例：四种线各是什么，一眼即懂（绘图模式让位） ===== */}
-      {!drawMode && <Panel position="bottom-center" style={{ pointerEvents: 'none' }}>
+      {/* ===== 关系图例：四种线各是什么，一眼即懂（绘图编辑时为工具层让位） ===== */}
+      {!penActive && <Panel position="bottom-center" style={{ pointerEvents: 'none' }}>
         <div className="mono" style={{
           display: 'flex', gap: 18, alignItems: 'center',
           background: 'var(--bg-panel)', border: '1px solid var(--line)',
@@ -692,8 +871,13 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
         </>
       )}
       <Background variant={BackgroundVariant.Dots} gap={26} size={1.4} color="#d0d5dd" />
-      {!drawMode && <Controls showInteractive={false} />}
-      {!drawMode && <MiniMap
+      {!penActive && <Controls showInteractive={false}>
+        <ControlButton onClick={cycleWheel}
+          title={`${WHEEL_MODES[wheelMode].label}：${WHEEL_MODES[wheelMode].hint}（点击切换）`}>
+          <Icon name={WHEEL_MODES[wheelMode].icon} />
+        </ControlButton>
+      </Controls>}
+      {!penActive && <MiniMap
         pannable zoomable
         nodeColor={n =>
           n.type === 'note' ? '#f7e06e'
@@ -706,36 +890,40 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     </ReactFlow>
     {/* ===== 边悬浮说明牌 ===== */}
     {edgeTip && <div className="edge-tip" style={{ left: edgeTip.x, top: edgeTip.y }}>{edgeTip.text}</div>}
-    {(drawMode || (canvas?.drawing?.length > 0)) && (
+    {(penActive || (canvas?.drawing?.length > 0)) && (
       <Suspense fallback={null}>
         <DrawLayer
-          ref={drawRef} active={drawMode}
+          ref={drawRef} active={penActive}
           initialElements={canvas?.drawing}
+          initialFiles={canvas?.drawingFiles}
           onScrollToFlow={onScrollToFlow}
+          onToolChange={onDrawToolChange}
+          onPersisted={els => onCanvasAction('drawingPersisted', els)}
           onReady={() => {
             const vp = instRef.current?.getViewport();
             if (vp) drawRef.current?.syncViewport(vp);
+            if (penActive) drawRef.current?.activateTool(drawToolRef.current);
           }}
         />
       </Suspense>
     )}
-    {/* 画布工具岛：顶部正中——与 Excalidraw 工具栏同一槽位，拿起笔时在这里换班。
-        必须是绘图层的兄弟(z:7)：React Flow 根自成层叠上下文，Panel 里的按钮在绘图模式点不到 */}
-    <div className="island" style={{
-      position: 'absolute', top: 12, left: '50%', transform: 'translateX(-50%)',
-      zIndex: 7, display: 'flex', gap: 4, padding: 5,
-      ...(drawMode ? { top: 76 } : {}),   // 绘图时 Excalidraw 工具栏进驻原位，我方降半格待命
-    }}>
-      {!drawMode && <>
-        <button className="btn ghost" onClick={addNote} title="贴一张便签到视野中央（快捷键 N）"><Icon name="note" /> 便签</button>
-        <button className="btn ghost" onClick={addBoard} title="创建自定义画板：拉角调大小、双击改名、工作区拖进来就归它管（快捷键 B）"><Icon name="board" /> 画板</button>
-        <button className="btn ghost" onClick={toggleDraw} title="绘图：自由画笔/形状/箭头/文字（快捷键 D）"><Icon name="pen" /> 绘图</button>
-        <button className="btn ghost" onClick={() => focusRef.current(null)}
-          title="全景归位（F）· 空白左拖框选 · 双指/空格拖动平移 · 捏合缩放"><Icon name="fit" /> 全景</button>
-      </>}
-      {drawMode && (
-        <button className="btn primary" onClick={toggleDraw} title="退出绘图（Esc 或点击）"><Icon name="pen" /> 收笔返回看板 (Esc)</button>
-      )}
+    {/* 画布工具岛：顶部正中——绘图选择与画笔始终在场，激活后滑移让位给 Excalidraw 工具栏（.drawing-on 驱动）。
+        必须是绘图层的兄弟(z:7)：React Flow 根自成层叠上下文，Panel 里的按钮会被画笔层截住 */}
+    <div className="island tool-island">
+      <button className="btn ghost" onClick={addNote} title="贴一张便签到视野中央（快捷键 N）"><Icon name="note" /> 便签</button>
+      <button className="btn ghost" onClick={addBoard} title="创建自定义画板：拉角调大小、双击改名、工作区拖进来就归它管（快捷键 B）"><Icon name="board" /> 画板</button>
+      <span className="topbar-sep" />
+      <button className={`btn ${penActive && drawTool === 'selection' ? 'primary' : 'ghost'}`} onClick={openSelectDrawing}
+        title={penActive && drawTool === 'selection' ? '正在编辑绘图；再次点击或 Esc 返回看板' : '选择并精细设置已有绘图：描边、背景、透明度与图层'}>
+        <Icon name="cursor" /> 选绘图
+      </button>
+      <button className={`btn ${penActive && drawTool === 'freedraw' ? 'primary' : 'ghost'}`} onClick={() => openDrawing('freedraw')}
+        title={penActive && drawTool === 'freedraw' ? '画笔已拿起；再次点击或 Esc 返回看板' : '拿起常驻画笔；也可从原生工具栏换形状、箭头、文字和图片（快捷键 D）'}>
+        <Icon name="pen" /> 画笔
+      </button>
+      <span className="topbar-sep" />
+      <button className="btn ghost" onClick={() => focusRef.current(null)}
+        title="全景归位（F）· 空白左拖框选 · 双指/空格/中键平移 · 捏合或鼠标滚轮缩放"><Icon name="fit" /> 全景</button>
     </div>
     </div>
   );

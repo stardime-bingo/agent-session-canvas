@@ -2,7 +2,7 @@
  * [INPUT]: 依赖 react、@xyflow/react 的 NodeResizer/Handle、ui 的 InlineEdit/Icon
  * [OUTPUT]: 对外提供 BoardNode 自定义节点（React Flow node type: board，memo 化）与 BOARD_COLORS 色表
  * [POS]: canvas 的用户自建画板——五色一等容器，仅标题栏搬家，可选中可连线，拉角调大小、双击就地改名、
- *        删除走自绘确认流（成员自动回原街区）
+ *        删除走自绘确认流（成员自动回原街区）；缩放松手由画布引擎连同子项相对坐标一起持久化
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
 import React, { memo } from 'react';
@@ -34,10 +34,7 @@ export default memo(function BoardNode({ data, dragging, selected }) {
         isVisible
         lineStyle={{ borderColor: 'transparent', borderWidth: 6 }}
         handleStyle={{ width: 12, height: 12, borderRadius: 4, background: c.ink, border: '2px solid #fff' }}
-        onResizeEnd={(_, p) => onSetBoard({
-          id: board.id, x: Math.round(p.x), y: Math.round(p.y),
-          w: Math.round(p.width), h: Math.round(p.height),
-        })}
+        onResizeEnd={(_, p) => data.onResize(p)}
       />
       <Handle type="source" position={Position.Right} style={{ top: 30 }} />
       <Handle type="target" position={Position.Left} style={{ top: 30 }} />

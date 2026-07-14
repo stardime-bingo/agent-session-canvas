@@ -6,11 +6,12 @@ Node.js 24 (零依赖后端) + React 18 + @xyflow/react 12 + Vite 8
 > 地图从地形自动生长，点击地图反向驱动地形。
 
 <directory>
-server/ - 零依赖 Node 后端 daemon (7文件 + adapters/: 扫描/拉起/模型路由/AI/回填/HTTP)
-web/ - React Flow 画布前端 (src/: 总装 + ui 原子库(toast/确认/就地改名/图标) + canvas/ 画布引擎与菜单 + panels/ 三面板)
+server/ - 零依赖 Node 后端 daemon (9文件 + adapters/: 扫描/拉起/模型路由/AI/回填/HTTP/画布动作与图片仓)
+web/ - React Flow 画布前端 (src/: 总装 + ui 原子库(toast/确认/就地改名/图标) + canvas/ 画布引擎/手势内核/菜单 + panels/ 四面板含终端框)
 hooks/ - Claude Code SessionEnd 接力钩子 (自动生成接力提示词)
-data/ - 运行时产物: scan-cache.json(可丢弃) enrich.json(珍贵) layout.json(手工布局) launch/(临时脚本)
-tests/ - 零依赖 node:test 回归：增强仓跨进程写入、Codex 索引写后校验、模型 JSON/会话尾部提取、增量布局防重叠
+data/ - 运行时产物: scan-cache.json(可丢弃) enrich/canvas/layout/drawing-files.json(珍贵) launch/(临时脚本)
+tests/ - 零依赖 node:test 回归：持久层并发、尾部停止点、增量布局/容器缩放、图片资产、落空连线原子创建、滚轮设备判定与缩放数学、
+  绘图命中(线段/旋转/描边带)、上下文倒序分页(无重叠无丢行)
 scripts/ - 开源安装、只读诊断与发布资产准备；安装脚本按当前 checkout 生成 launchd plist，不写死个人路径；
   prepare-assets 从 lock 固定的 Excalidraw 包同步离线字体，Git 不重复 vendoring 13MB 二进制
 plugins/ - Claude Code / Codex 共用的薄插件，只安装、诊断、启动、打开本地实机
@@ -18,7 +19,7 @@ docs/ + PRIVACY.md + TERMS.md - Codex 市场提交文案、隐私披露与公开
 </directory>
 
 <config>
-package.json - 前端依赖与脚本 (build/serve/scan/start) + 上游精确旧依赖的安全补丁 overrides
+package.json - 前端依赖与脚本 (build/test/serve/scan/start) + 上游精确旧依赖的安全补丁 overrides
 vite.config.mjs - 前端构建: root=web, 产物 web/dist, dev 代理 :4517
 </config>
 
@@ -35,7 +36,7 @@ launchctl kickstart -k gui/$(id -u)/com.bingo.agent-canvas
 npm run scan         # 仅扫描，输出统计
 ```
 
-数据持久化: data/{enrich,canvas,layout}.json 磁盘常驻 + 原子写入 + 每日备份 data/backups/(保 7 天)；scan-cache 可丢弃可重建。
+数据持久化: data/{enrich,canvas,layout,drawing-files}.json 磁盘常驻 + 原子写入 + 每日备份 data/backups/(保 7 天)；scan-cache 可丢弃可重建。
 
 ## 架构决策
 
@@ -51,8 +52,17 @@ npm run scan         # 仅扫描，输出统计
 - **SSE 举旗不抢方向盘**: 文件变化只点亮"有新活动"按钮，用户主动刷新才重排画布
 - **拖动即记忆**: 容器拖过的位置写入 layout.json，永远优先于瀑布流算法
 - **成熟画布手势**: 空白左拖框选；空格+左拖/中键平移；触控板双指平移、捏合缩放；街区/画板仅标题栏搬家
+- **滚轮双模 (gestures.js)**: 逐事件判定设备——wheelDelta 120 倍数/行模式=鼠标→光标锚定缩放；二维/亚像素增量=触控板→平移；
+  150ms 手势连续性防惯性误判；Ctrl/Meta/Shift 与捏合全交还 RF 原生；缩放条第四钮 自动/触控板/鼠标 三态兜底(localStorage 记忆)
+- **原生绘图可编辑**: “选绘图/画笔”是显式双入口，选择态保留 Excalidraw 原生描边/背景/透明度/图层属性岛并按导航宽度让位；激活时全局动作不退场；图片 BinaryFiles 独立落 drawing-files.json，删除图片时同步裁剪孤儿资产
+- **绘图删除不藏在模式里**: 普通模式点击绘图描边带=一键进选绘图并选中（Delete 即删，Esc 返回），右键绘图=“选中编辑/删除此绘图”（删除过确认、即时落盘）；pane 与一切节点同河——含会话卡/工作区（视觉最上层者赢，按钮/输入/拖动把手除外）；空心形状中空区穿透给底下卡片，命中检测是纯函数可证伪
 - **整理只动几何**: 自动整理原子重置 x/y/w/h 但保留 layout.d 人工归属，并提供 toast 撤销与 Cmd/Ctrl+Z
 - **锚点不等于重叠许可**: 手工位置优先，但新增会话/工作区令成员或容器长大时，纯布局层必须确定性顺延避让且不暗写 layout.json
+- **缩放只改画框**: 从左/上放大街区或画板时，持久化 React Flow 已补偿的子项相对坐标，重建后成员绝对位置不跳
+- **落空连线有去处**: 只认明确拖线（关闭点击续连暗状态）；松在 pane、容器空白面或边等画布落点都弹选择——
+  会话卡拉出的线首选“打开会话上下文”终端窗（倒序分页 GET /api/context-page：打开停最新、上滑翻至会话开头、
+  content-visibility 原生虚拟化，5.7GB 会话与 100KB 同速打开；右键菜单同河），其余“便签/画板”与手动边一次原子写入；
+  连接点命中区按缩放保持 12–28px，视觉圆点独立且悬停不位移
 - **看板归属不碰地形**: 工作区拖入另一街区/画板只改 layout.d 与画布坐标，不移动、不改写真实会话目录与文件
 - **纯展示层不抢交互**: 图例等无动作覆盖层必须点击穿透，不能遮挡画布节点与入口
 - **数据流单向**: 地形(~/.claude,~/.codex) → scanner → graph → 画布；画布动作 → launcher/ai → 地形

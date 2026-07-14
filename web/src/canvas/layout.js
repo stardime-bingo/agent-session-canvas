@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 工作区列表、layout 手工位置记忆、工作区实时高度
- * [OUTPUT]: 提供画布布局常量、成员打包、街区碰撞修复与可撤销整理所需的归属提取
+ * [OUTPUT]: 提供画布布局常量、成员打包、容器缩放子项快照、街区碰撞修复与可撤销整理所需的归属提取
  * [POS]: FlowCanvas 的纯布局内核；不读写磁盘，不触碰真实会话，可由 node:test 直接证伪
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -21,6 +21,23 @@ export function tidyLayoutEntries(layout) {
   return Object.entries(layout || {}).flatMap(([path, pos]) =>
     typeof pos?.d === 'string' && pos.d ? [{ path, d: pos.d }] : [],
   );
+}
+
+/**
+ * React Flow 从左/上缩放父容器时会实时补偿直属子节点，使其绝对位置不变。
+ * 松手后必须把这份新相对坐标写进 layout；否则图数据重建会把子节点拉回旧相对坐标，
+ * 肉眼就成了“放大画框，里面全部跟着跳”。
+ */
+export function resizedContainerChildren(nodes, parentId) {
+  const district = parentId.startsWith('district:') ? parentId.slice(9) : parentId;
+  return (nodes || [])
+    .filter(node => node.type === 'workspace' && node.parentId === parentId)
+    .map(node => ({
+      path: node.id,
+      x: Math.round(node.position.x),
+      y: Math.round(node.position.y),
+      d: district,
+    }));
 }
 
 const horizontalConflict = (x, other) =>

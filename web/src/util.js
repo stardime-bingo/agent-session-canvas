@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 独立纯函数，无外部依赖
- * [OUTPUT]: 对外提供 relTime、shortPath、fmtSize、TOOL_META、STATUS_META
+ * [OUTPUT]: 对外提供 relTime、shortPath、fmtSize、classifyDigestLine、TOOL_META、STATUS_META
  * [POS]: web 的展示层工具箱与文案常量，组件共享
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -35,4 +35,18 @@ export function fmtSize(bytes) {
   if (bytes < 1024) return bytes + ' B';
   if (bytes < 1048576) return (bytes / 1024).toFixed(0) + ' KB';
   return (bytes / 1048576).toFixed(1) + ' MB';
+}
+
+// ============================================================
+//  digest 行分类：AI 摘录的行首标记 → 角色样式键
+//  详情面板与画布终端框共用同一双眼睛
+// ============================================================
+export function classifyDigestLine(line) {
+  if (line.startsWith('【')) return ['head', line];
+  if (line.startsWith('[用户]')) return ['user', line.slice(4).trim()];
+  if (line.startsWith('[助手]')) return ['assistant', line.slice(4).trim()];
+  const t = line.trim();
+  if (t.startsWith('▸')) return ['tool', t];
+  if (t.startsWith('✗')) return ['error', t];
+  return ['assistant', line];
 }

@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 scanner 的图数据、launcher 的终端拉起、ai 的摘要/接力、store 的增强仓与静态目录
- * [OUTPUT]: 对外提供 HTTP 服务（:4517）：graph/session/scan/launch/AI/rename/events + 可合并或原子替换的画布布局 API + 前端静态托管
+ * [OUTPUT]: 对外提供 HTTP 服务（:4517）：graph/session/context(深档上下文)/scan/launch/AI/rename/events + 画布布局/图片资产/原子建点连线 API + 前端静态托管
  * [POS]: server 的总入口与路由层，前端画布与本地地形之间唯一的桥
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -11,11 +11,13 @@ import os from 'node:os';
 import path from 'node:path';
 import { scanAll } from './scanner.mjs';
 import { launch } from './launcher.mjs';
-import { summarize, makeHandoff, extractDigest, extractEndingDigest, nameSession } from './ai.mjs';
+import { summarize, makeHandoff, extractDigest, extractEndingDigest, extractContextPage, nameSession } from './ai.mjs';
 import { runBackfill, backfillStatus, findCandidates } from './backfill.mjs';
 import { WEB_DIST, loadEnrich, updateEnrich, appendJsonlVerified, DATA_DIR, readJson, writeJson } from './store.mjs';
+import { loadDrawingFiles, saveDrawingFiles } from './drawing-files.mjs';
+import { createNodeFromEdge } from './canvas-actions.mjs';
 
-const PORT = 4517;
+const PORT = +process.env.AGENT_CANVAS_PORT || 4517;   // 环境变量仅供并行实例测试，生产恒为 4517
 
 // ============================================================
 //  图数据缓存 + SSE 广播：文件变化 → 防抖重扫 → 推送前端
@@ -36,17 +38,18 @@ process.on('uncaughtException', e => console.error('未捕获异常:', e));
 process.on('unhandledRejection', e => console.error('未处理拒绝:', e));
 
 // ============================================================
-//  珍贵数据每日备份：enrich(AI 资产)/canvas(你的笔迹)/layout(布局记忆)
+//  珍贵数据每日备份：enrich(AI 资产)/canvas(你的笔迹)/drawing-files(图片)/layout(布局记忆)
 //  → data/backups/YYYY-MM-DD/，滚动保留 7 天。扫描缓存可重建，不备。
 // ============================================================
 function backupPrecious() {
   try {
     const day = new Date().toISOString().slice(0, 10);
     const dir = path.join(DATA_DIR, 'backups', day);
-    if (fs.existsSync(dir)) return;
     fs.mkdirSync(dir, { recursive: true });
-    for (const f of ['enrich.json', 'canvas.json', 'layout.json']) {
-      try { fs.copyFileSync(path.join(DATA_DIR, f), path.join(dir, f)); } catch { /* 尚未产生 */ }
+    for (const f of ['enrich.json', 'canvas.json', 'drawing-files.json', 'layout.json']) {
+      const dest = path.join(dir, f);
+      if (fs.existsSync(dest)) continue;   // 同日已有快照不覆盖；新产生的图片仓仍能补进当天备份
+      try { fs.copyFileSync(path.join(DATA_DIR, f), dest); } catch { /* 尚未产生 */ }
     }
     const root = path.join(DATA_DIR, 'backups');
     for (const d of fs.readdirSync(root).sort().slice(0, -7)) {
@@ -122,7 +125,7 @@ const routes = {
   'GET /api/graph': async () => ({
     ...graph,
     layout: readJson(LAYOUT_FILE, {}),
-    canvas: loadCanvas(),
+    canvas: { ...loadCanvas(), drawingFiles: loadDrawingFiles(DATA_DIR) },
   }),
 
   // ---- 手动连线：紫色人笔，同对去重 ----
@@ -173,7 +176,18 @@ const routes = {
     const canvas = loadCanvas();
     canvas.drawing = Array.isArray(body.elements) ? body.elements : [];
     writeJson(CANVAS_FILE, canvas);
-    return { ok: true, count: canvas.drawing.length };
+    const hasFiles = Object.prototype.hasOwnProperty.call(body, 'files');
+    const files = hasFiles ? saveDrawingFiles(DATA_DIR, body.files) : loadDrawingFiles(DATA_DIR);
+    if (hasFiles) backupPrecious();   // 第一张图当天立刻入备份，不等下一轮 12h 定时器
+    return { ok: true, count: canvas.drawing.length, files: Object.keys(files).length };
+  },
+
+  // ---- 拉线落空：便签/画板与手动边同一次写盘，同成同败 ----
+  'POST /api/node-from-edge': async body => {
+    const result = createNodeFromEdge(loadCanvas(), body);
+    writeJson(CANVAS_FILE, result.canvas);
+    const { canvas: _, ...response } = result;
+    return response;
   },
 
   // ---- 自定义画板：用户自建的一等容器，补丁式合并同便签 ----
@@ -276,6 +290,21 @@ const routes = {
       handoff: enrich.handoffs[s.key]?.text || null,
       digest: extractDigest(s),
       endingDigest: extractEndingDigest(s),
+    };
+  },
+
+  // 画布终端框专线：倒序分页——首页(无 before)带 meta 停在最新输出，
+  // 向上翻页只回分页体；每页只碰 O(窗口) 字节，会话再大也不整读
+  'GET /api/context-page': async (_, query) => {
+    const s = findSession(query.key);
+    if (!s) throw new Error('会话不存在: ' + query.key);
+    const before = query.before ? +query.before : undefined;
+    const bytes = Math.max(65536, Math.min(2097152, +query.bytes || 524288));
+    const page = extractContextPage(s, before, bytes);
+    return before ? page : {
+      ...page,
+      key: s.key, title: s.title, tool: s.tool, cwd: s.cwd, id: s.id,
+      status: s.status, updatedAt: s.updatedAt, turns: s.turns, sizeBytes: s.sizeBytes,
     };
   },
 

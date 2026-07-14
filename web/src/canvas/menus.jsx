@@ -71,6 +71,7 @@ export async function deleteNoteFlow(note, pos, onCanvasAction) {
 export const sessionMenu = (s, ctx) => [
   { label: L('play', '续开此会话'), fn: () => launchGo({ tool: s.tool, cwd: s.cwd, mode: 'resume', sessionId: s.id }, '已拉起终端：续开会话') },
   { label: L('plus', '同工作区新会话'), fn: () => launchGo({ tool: s.tool, cwd: s.cwd, mode: 'new' }, '已拉起终端：新会话') },
+  { label: L('terminal', '打开会话上下文'), fn: pos => ctx.openContext?.(s.key, pos) },
   { label: L('panel', '打开详情面板'), fn: () => ctx.onSelect(s.key) },
   { label: L('edit', '重命名（同步本体）'), fn: () => ctx.rename(s.key) },
   { sep: true },
