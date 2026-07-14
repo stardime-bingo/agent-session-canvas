@@ -54,6 +54,8 @@ src/canvas/drawing.js: 绘图元素/图片文件的纯快照内核 + hitDrawingE
   线/箭头/手绘按点到折线段距离、旋转元素逆变换跟着视觉走、实心全域、墓碑/锁定跳过、后画者优先）+
   双平面分流 splitDrawingPlanes(customData.below) + 精确包围盒 drawingBounds(旋转四角/折线 points 实算)，
   只保留仍被 image 元素引用的 BinaryFiles，全部可由 node:test 直接证伪
+src/canvas/MiniMapInk.jsx: 小地图墨迹层——镜像 React Flow minimap 的 svg viewBox（MutationObserver 追踪，零重复投影数学），
+  区域底板实心/批注描边投进缩略图，纯展示 pointer-events:none
 src/canvas/menus.jsx: 七套右键菜单构建器(session/workspace/district/board/note/pane/edge) +
   三个删除流程(deleteSessionFlow 含活跃门禁强删/deleteBoardFlow/deleteNoteFlow)——菜单、节点按钮、详情面板共用同一条河
 src/canvas/BoardNode.jsx: 用户自建画板（一等容器），导出 BOARD_COLORS 五色表，仅标题栏可搬家，可选中可连线，

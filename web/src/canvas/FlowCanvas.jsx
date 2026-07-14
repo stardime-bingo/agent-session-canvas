@@ -18,7 +18,8 @@ import NoteNode from './NoteNode.jsx';
 import { COL_W, PAD, BREATH, GUTTER, ROW_MAX_W, HEADER_H, CARD_H, CARD_GAP, MAX_SHOW, packWorkspaces, resizedContainerChildren, resolveContainerOverlaps } from './layout.js';
 import { sessionMenu, workspaceMenu, districtMenu, boardMenu, noteMenu, paneMenu, edgeMenu, deleteBoardFlow, deleteNoteFlow } from './menus.jsx';
 import { connectionDrop, syncHandleHitArea } from './connections.js';
-import { hitDrawingElement } from './drawing.js';
+import { anchoredDrawingIds, hitDrawingElement } from './drawing.js';
+import MiniMapInk from './MiniMapInk.jsx';
 import { wheelDevice, zoomViewport, WHEEL_MODES, nextWheelMode } from './gestures.js';
 import { Icon, toast, confirmPop } from '../ui.jsx';
 
@@ -718,6 +719,41 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     onCanvasAction('setBoard', { x: Math.round(pos.x - 260), y: Math.round(pos.y - 180), w: 520, h: 360, name: '新画板' });
   }, [onCanvasAction]);
 
+  // ============================================================
+  //  容器承载律（FigJam/Miro 共识）：容器搬家，锚定其内的墨迹一起走。
+  //  多容器重叠时面积小者优先认领，一个元素只跟一个容器
+  // ============================================================
+  const dragStartRef = useRef(new Map());
+  const onNodeDragStart = useCallback((_, node) => {
+    if (node.type === 'district' || node.type === 'board') {
+      dragStartRef.current.set(node.id, { x: node.position.x, y: node.position.y });
+    }
+  }, []);
+
+  const followAnchoredDrawings = useCallback(moves => {
+    const els = drawRef.current?.getElements?.() || [];
+    if (!els.length) return;
+    const claimed = new Set();
+    for (const m of [...moves].sort((a, b) => a.rect.w * a.rect.h - b.rect.w * b.rect.h)) {
+      if (!m.dx && !m.dy) continue;
+      const ids = anchoredDrawingIds(els, m.rect).filter(id => !claimed.has(id));
+      if (!ids.length) continue;
+      ids.forEach(id => claimed.add(id));
+      drawRef.current.translateElements(ids, m.dx, m.dy)
+        .catch(err => toast(`批注跟随失败：${err.message}`, 'error'));
+    }
+  }, []);
+
+  const containerRects = useCallback(() => {
+    const out = {};
+    for (const n of instRef.current?.getNodes() || []) {
+      if (n.type === 'district' || n.type === 'board') {
+        out[n.id] = { x: n.position.x, y: n.position.y, w: n.width ?? n.data._w, h: n.height ?? n.data._h };
+      }
+    }
+    return out;
+  }, []);
+
   // 清空画布选中：Esc 与关面板共用（选中态与面板永不脱钩）
   const clearSelection = useCallback(() => {
     setNodes(ns => ns.some(n => n.selected) ? ns.map(n => n.selected ? { ...n, selected: false } : n) : ns);
@@ -736,8 +772,11 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       const p = built.positions[path];
       if (p) inst.setCenter(p.x + p.w / 2, p.y + Math.min(p.h / 2, 280), { zoom: 0.9, duration: 650 });
     };
-    if (actionsRef) actionsRef.current = { addNote, addBoard, fit: () => focusRef.current(null), toggleDraw: togglePen, clearSelection };
-  }, [built, focusRef, actionsRef, addNote, addBoard, togglePen, exitDrawing, clearSelection]);
+    if (actionsRef) actionsRef.current = {
+      addNote, addBoard, fit: () => focusRef.current(null), toggleDraw: togglePen, clearSelection,
+      containerRects, followDrawings: followAnchoredDrawings,   // 容器承载律：整理/撤销的墨迹跟随出口
+    };
+  }, [built, focusRef, actionsRef, addNote, addBoard, togglePen, exitDrawing, clearSelection, containerRects, followAnchoredDrawings]);
 
   const onNodeClick = useCallback((e, node) => {
     const hit = drawingHitFromEvent(e);   // 视觉最上层者赢：描边带上的点击优先归绘图，空心区照常穿透给卡片
@@ -791,14 +830,22 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       if (dest.id !== node.parentId) {
         toast(`看板中已划入「${dest.type === 'board' ? dest.data.board.name : dest.data.name}」，本地文件未移动`, 'ok');
       }
-    } else if (node.type === 'district') {
-      onMoveNode([{ path: node.id, x: node.position.x, y: node.position.y }]);
-    } else if (node.type === 'board') {
-      onCanvasAction('setBoard', { id: node.id.slice(6), x: Math.round(node.position.x), y: Math.round(node.position.y) });
+    } else if (node.type === 'district' || node.type === 'board') {
+      if (node.type === 'district') onMoveNode([{ path: node.id, x: node.position.x, y: node.position.y }]);
+      else onCanvasAction('setBoard', { id: node.id.slice(6), x: Math.round(node.position.x), y: Math.round(node.position.y) });
+      // 容器承载：从拖动起点量差，锚定墨迹随行
+      const start = dragStartRef.current.get(node.id);
+      dragStartRef.current.delete(node.id);
+      if (start) {
+        followAnchoredDrawings([{
+          rect: { x: start.x, y: start.y, w: node.width ?? node.data._w, h: node.height ?? node.data._h },
+          dx: node.position.x - start.x, dy: node.position.y - start.y,
+        }]);
+      }
     } else if (node.type === 'note') {
       onCanvasAction('setNote', { id: node.id, x: Math.round(node.position.x), y: Math.round(node.position.y) });
     }
-  }, [onMoveNode, onCanvasAction]);
+  }, [onMoveNode, onCanvasAction, followAnchoredDrawings]);
 
   // 视口记忆：刷新回到上次看的地方，不再被甩回原点
   const initVp = useRef(undefined);
@@ -844,6 +891,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       onNodeClick={onNodeClick}
       onNodeDoubleClick={onNodeDoubleClick}
       onNodeDrag={onNodeDrag}
+      onNodeDragStart={onNodeDragStart}
       onNodeDragStop={onNodeDragStop}
       onPaneClick={onPaneClick}
       onPaneMouseMove={onPaneMouseMove}
@@ -927,6 +975,8 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
           : 'transparent'}
         maskColor="rgba(242, 244, 247, 0.85)"
       />}
+      {/* 小地图墨迹层：缩略图是空间定向工具，区域底板是最有定向价值的地标 */}
+      {!penActive && <MiniMapInk elements={canvas?.drawing} rootRef={rootRef} />}
     </ReactFlow>
     {/* ===== 边悬浮说明牌 ===== */}
     {edgeTip && <div className="edge-tip" style={{ left: edgeTip.x, top: edgeTip.y }}>{edgeTip.text}</div>}

@@ -1,7 +1,7 @@
 /**
  * [INPUT]: Excalidraw 的元素数组与 BinaryFiles 字典
- * [OUTPUT]: 提供绘图资产快照与稳定签名、命中检测 hitDrawingElement、
- *           双平面分流 splitDrawingPlanes(customData.below)、精确包围盒 drawingBounds(含旋转/折线)
+ * [OUTPUT]: 提供绘图资产快照与稳定签名、命中检测 hitDrawingElement、双平面分流 splitDrawingPlanes(customData.below)、
+ *           精确包围盒 drawingBounds(含旋转/折线)、容器承载判定 anchoredDrawingIds(中心落内即跟随)
  * [POS]: DrawLayer 的纯数据内核；沉层垫在卡片之下、浮层批注在上，全部可由 node:test 证伪
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -41,6 +41,23 @@ export function drawingBounds(elements = []) {
     }
   }
   return minX === Infinity ? null : { minX, minY, maxX, maxY };
+}
+
+// ============================================================
+//  容器承载律（FigJam/Miro 共识）：墨迹中心落在容器矩形内，就跟容器走；
+//  绑定标签跟宿主形状，不独立判定。纯函数，可由 node:test 证伪
+// ============================================================
+export function anchoredDrawingIds(elements = [], rect) {
+  const ids = new Set();
+  for (const el of elements) {
+    if (!el || el.isDeleted || el.containerId) continue;
+    const b = drawingBounds([el]);
+    if (!b) continue;
+    const cx = (b.minX + b.maxX) / 2, cy = (b.minY + b.maxY) / 2;
+    if (cx >= rect.x && cx <= rect.x + rect.w && cy >= rect.y && cy <= rect.y + rect.h) ids.add(el.id);
+  }
+  for (const el of elements) if (el?.containerId && ids.has(el.containerId)) ids.add(el.id);
+  return [...ids];
 }
 
 export function drawingSnapshot(elements = [], files = {}) {

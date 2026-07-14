@@ -64,19 +64,21 @@ export default function App() {
   const reload = useCallback(() => api.graph().then(g => { setGraph(g); setLive(true); setPending(false); }), []);
 
   const undoArrange = useCallback(async () => {
-    const snapshot = layoutUndoRef.current;
-    if (!snapshot) {
+    const undo = layoutUndoRef.current;
+    if (!undo) {
       toast('已有新的手工调整，不能再撤销上次整理');
       return;
     }
     layoutUndoRef.current = null;
     try {
-      await api.layoutBatch(Object.entries(snapshot).map(([path, pos]) => ({ path, ...pos })), true);
+      await api.layoutBatch(Object.entries(undo.snapshot).map(([path, pos]) => ({ path, ...pos })), true);
+      // 容器承载律：撤销整理时，跟着容器走过的墨迹按逆差回家
+      if (undo.undoMoves?.length) actionsRef.current.followDrawings?.(undo.undoMoves);
       await reload();
       focusRef.current(null);
       toast('已撤销整理', 'ok');
     } catch (e) {
-      layoutUndoRef.current = snapshot;
+      layoutUndoRef.current = undo;
       toast(`撤销失败：${e.message}`, 'error');
     }
   }, [reload]);
@@ -84,11 +86,29 @@ export default function App() {
   // ---- 自动整理只清几何、不清人工归属；原子替换后可由按钮或 Cmd/Ctrl+Z 撤销 ----
   const arrange = useCallback(async () => {
     const snapshot = graph?.layout || {};
+    const rectsBefore = actionsRef.current.containerRects?.() || {};
     try {
       await api.layoutBatch(tidyLayoutEntries(snapshot), true);
-      if (!layoutUndoRef.current) layoutUndoRef.current = snapshot;
+      layoutUndoRef.current ||= { snapshot, undoMoves: [] };
       await reload();
       focusRef.current(null);
+      // 容器承载律：新布局由瀑布算法在渲染时定型——等落定后量差，锚定墨迹随容器走
+      setTimeout(() => {
+        const after = actionsRef.current.containerRects?.() || {};
+        const moves = [];
+        for (const [id, r] of Object.entries(rectsBefore)) {
+          const n = after[id];
+          if (n && (Math.abs(n.x - r.x) > 0.5 || Math.abs(n.y - r.y) > 0.5)) {
+            moves.push({ rect: r, dx: n.x - r.x, dy: n.y - r.y });
+          }
+        }
+        if (!moves.length) return;
+        actionsRef.current.followDrawings?.(moves);
+        layoutUndoRef.current?.undoMoves?.push(...moves.map(m => ({
+          rect: { x: m.rect.x + m.dx, y: m.rect.y + m.dy, w: m.rect.w, h: m.rect.h },
+          dx: -m.dx, dy: -m.dy,
+        })));
+      }, 120);
       toast('已整理位置，人工归属保持不变', 'ok', { label: '撤销', onClick: undoArrange });
     } catch (e) {
       toast(`整理失败：${e.message}`, 'error');

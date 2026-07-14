@@ -1,7 +1,7 @@
 /**
  * [INPUT]: 依赖 @excalidraw/excalidraw 组件/样式/exportToCanvas、api 的 setDrawing、drawing 的快照/分流/包围盒/命中内核
  * [OUTPUT]: 对外提供 DrawLayer 组件（ref 暴露 pushViewport/getViewport/activateTool/getElements/selectElement/
- *           deleteElement/setElementPlane/flush）——双平面绘图：沉层(customData.below)静态垫在卡片之下，浮层批注在上；
+ *           deleteElement/setElementPlane/translateElements/flush）——双平面绘图：沉层静态垫在卡片之下，浮层批注在上；
  *           相机主权唯一：pushViewport 领先沿同步喂浮沉两层，rAF 只做风暴合并阀
  * [POS]: canvas 的 Excalidraw 绘图覆盖层——闲置时浮层展示指针穿透、沉层经 belowHost 门户垫底；
  *        激活后全量合流进活实例编辑，退出再分流。坐标契约: excalidraw.scroll = rfViewport.xy / zoom
@@ -190,6 +190,23 @@ export default forwardRef(function DrawLayer({ active, initialElements, initialF
       clearTimeout(timer.current);
       timer.current = null;
       return persist();   // 删除是主权动作，不等防抖，立即落盘；回执由调用方跟结果走
+    },
+    // 容器承载律：容器搬家/整理时，锚定其内的墨迹整体平移（浮沉两层各平各的）
+    translateElements(ids, dx, dy) {
+      const inst = apiRef.current;
+      if (!inst) return Promise.reject(new Error('绘图层未就绪'));
+      const idSet = new Set(ids);
+      const shift = e => idSet.has(e.id) ? { ...e, x: e.x + dx, y: e.y + dy } : e;
+      if (belowRef.current.some(e => idSet.has(e.id))) {
+        belowRef.current = belowRef.current.map(shift);
+        exportBelow();
+      }
+      if (inst.getSceneElements().some(e => idSet.has(e.id))) {
+        inst.updateScene({ elements: inst.getSceneElements().map(shift) });
+      }
+      clearTimeout(timer.current);
+      timer.current = null;
+      return persist();
     },
     // 沉浮切换：区域底板沉到卡片下面当背景，批注浮到上面——层级从此可调
     setElementPlane(id, below) {
