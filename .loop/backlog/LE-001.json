@@ -1,0 +1,26 @@
+{
+  "id": "LE-001",
+  "module": "canvas-renderer",
+  "severity": "P1",
+  "type": "architecture",
+  "summary": "建立继承 React Flow 唯一视口的已提交墨迹合成层",
+  "evidence": [
+    "React Flow 直接写 .react-flow__viewport transform，而当前浮层继续通过 Excalidraw updateScene 异步重画",
+    "ViewportPortal 已由 @xyflow/react 12.11 提供，可让自定义内容与节点共享世界坐标",
+    "Excalidraw 0.18.1 已提供 exportToSvg，可在内容变化时生成矢量快照"
+  ],
+  "fix_hint": "新建 InkWorldLayer；按 customData.below 生成 below/above 已提交 SVG 快照，通过 ViewportPortal 放入同一 viewport；新快照就绪后 replaceChildren 原子换帧；闲置态不挂载 Excalidraw。",
+  "complexity": "complex",
+  "allowed_paths": [
+    "web/src/canvas/InkWorldLayer.jsx",
+    "web/src/canvas/FlowCanvas.jsx",
+    "web/src/canvas/drawing.js",
+    "web/src/theme.css",
+    "tests/drawing.test.mjs",
+    "web/CLAUDE.md",
+    "CLAUDE.md",
+    "AGENTS.md"
+  ],
+  "lane": "guarded",
+  "gate_profile": "focused"
+}

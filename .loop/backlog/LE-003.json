@@ -1,0 +1,28 @@
+{
+  "id": "LE-003",
+  "module": "canvas-camera",
+  "severity": "P1",
+  "type": "architecture",
+  "summary": "建立 React Flow 单相机与编辑手势事务边界",
+  "evidence": [
+    "普通态是 React Flow onMove 追喂 Excalidraw，编辑态又变成 Excalidraw onScrollChange 追喂 React Flow",
+    "双向 lastPushed/onScrollToFlow/syncingFromDraw 回声链证明存在两个相机主权",
+    "调整 rAF 与防抖只会互换慢半拍的对象"
+  ],
+  "fix_hint": "React Flow 始终是唯一 camera store；编辑期遇到平移/缩放先固化 draft 快照、暂停活编辑器，由 RF 变换已提交世界，手势结束后在新视口重建编辑事务；删除双向回声链。",
+  "complexity": "complex",
+  "allowed_paths": [
+    "web/src/canvas/FlowCanvas.jsx",
+    "web/src/canvas/DrawLayer.jsx",
+    "web/src/canvas/gestures.js",
+    "web/src/canvas/drawing.js",
+    "tests/gestures.test.mjs",
+    "tests/drawing.test.mjs",
+    "web/src/theme.css",
+    "web/CLAUDE.md",
+    "CLAUDE.md",
+    "AGENTS.md"
+  ],
+  "lane": "guarded",
+  "gate_profile": "focused"
+}

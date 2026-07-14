@@ -1,0 +1,27 @@
+{
+  "id": "LE-007",
+  "module": "canvas-acceptance",
+  "severity": "P1",
+  "type": "architecture",
+  "summary": "建立无持久化隔离画布并完成 Computer Use 实机验收",
+  "evidence": [
+    "真实 data/canvas.json 与 layout.json 珍贵，历史自动坐标拖拽曾三次污染布局",
+    "node:test 不执行 JSX，Vite build 也不会暴露所有运行时 TDZ/绘制相位问题",
+    "用户明确要求最终使用 Computer Use 进行大量实际验收"
+  ],
+  "fix_hint": "新建 4518 无代理、无 API 写入的合成数据画布 fixture；提供一键启动命令和视口漂移探针；Computer Use 重复验收缩放、平移、绘制、沉浮、命中、撤销与层级；最后打开 4517 真页检查视觉和 console，不对真画布做自动拖拽。",
+  "complexity": "complex",
+  "allowed_paths": [
+    "tests/fixtures/canvas-acceptance/index.html",
+    "tests/fixtures/canvas-acceptance/main.jsx",
+    "tests/fixtures/canvas-acceptance/fixture-data.js",
+    "tests/fixtures/canvas-acceptance/README.md",
+    "scripts/serve-canvas-acceptance.mjs",
+    "package.json",
+    "web/CLAUDE.md",
+    "CLAUDE.md",
+    "AGENTS.md"
+  ],
+  "lane": "guarded",
+  "gate_profile": "focused"
+}

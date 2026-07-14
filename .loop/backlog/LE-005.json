@@ -1,0 +1,30 @@
+{
+  "id": "LE-005",
+  "module": "canvas-invariants",
+  "severity": "P1",
+  "type": "architecture",
+  "summary": "保全命中、容器承载、整理撤销、小地图、图片与删除语义",
+  "evidence": [
+    "现有双平面还承载命中代理、右键沉浮、容器拖动/整理/撤销跟随、MiniMapInk 与 BinaryFiles 剪枝",
+    "架构替换如果只验证视觉，容易在非主路径上丢失已有产品能力",
+    "真实画布不能用自动坐标拖拽验证，必须有纯函数与隔离数据的证伪层"
+  ],
+  "fix_hint": "建立融合画布不变量回归矩阵；确保 hit planes、anchoredDrawingIds、App arrange/undo、MiniMapInk、图片剪枝、删除/沉浮/退场通路在新合成器下仍为单一数据真相。",
+  "complexity": "complex",
+  "allowed_paths": [
+    "web/src/App.jsx",
+    "web/src/canvas/FlowCanvas.jsx",
+    "web/src/canvas/DrawLayer.jsx",
+    "web/src/canvas/InkWorldLayer.jsx",
+    "web/src/canvas/MiniMapInk.jsx",
+    "web/src/canvas/drawing.js",
+    "tests/drawing.test.mjs",
+    "tests/layout.test.mjs",
+    "tests/canvas-actions.test.mjs",
+    "web/CLAUDE.md",
+    "CLAUDE.md",
+    "AGENTS.md"
+  ],
+  "lane": "guarded",
+  "gate_profile": "focused"
+}

@@ -1,0 +1,26 @@
+{
+  "id": "LE-004",
+  "module": "drawing-semantics",
+  "severity": "P1",
+  "type": "architecture",
+  "summary": "让新画的大块实心区域底板自动沉层且可撤销",
+  "evidence": [
+    "hitDrawingElement 对实心形状的整个包围盒命中",
+    "新建实心矩形默认没有 customData.below，大底板因而整面抢走卡片点击",
+    "小实心形状仍应作为浮层批注，不能一刀切全沉"
+  ],
+  "fix_hint": "以世界坐标判定 filled rect/ellipse/diamond；宽高同时不小于 400x300 且面积不小于 120000 时，将形状及其绑定标签标记 below；展示带撤销的 toast；其他形状保持浮层。",
+  "complexity": "complex",
+  "allowed_paths": [
+    "web/src/canvas/drawing.js",
+    "web/src/canvas/DrawLayer.jsx",
+    "web/src/canvas/FlowCanvas.jsx",
+    "web/src/ui.jsx",
+    "tests/drawing.test.mjs",
+    "web/CLAUDE.md",
+    "CLAUDE.md",
+    "AGENTS.md"
+  ],
+  "lane": "guarded",
+  "gate_profile": "focused"
+}

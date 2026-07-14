@@ -1,0 +1,27 @@
+{
+  "id": "LE-002",
+  "module": "drawing-editor",
+  "severity": "P1",
+  "type": "architecture",
+  "summary": "把 Excalidraw 降为临时编辑事务，消灭编辑态全量平面合流",
+  "evidence": [
+    "DrawLayer syncPlanes 在 active=true 时把 below 全部并入 z-index:6 活实例",
+    "原本应在卡片下的底板因此在整个编辑期盖住 DOM 卡片",
+    "退出依赖 passive effect 分流和异步 exportToCanvas，没有新旧画面握手"
+  ],
+  "fix_hint": "已提交 SVG 快照在编辑期持续可见；Excalidraw 只持有 draft/当前编辑集；提交时合并模型并原子换快照；取消 active 全量 below 合流。",
+  "complexity": "complex",
+  "allowed_paths": [
+    "web/src/canvas/DrawLayer.jsx",
+    "web/src/canvas/InkWorldLayer.jsx",
+    "web/src/canvas/FlowCanvas.jsx",
+    "web/src/canvas/drawing.js",
+    "web/src/theme.css",
+    "tests/drawing.test.mjs",
+    "web/CLAUDE.md",
+    "CLAUDE.md",
+    "AGENTS.md"
+  ],
+  "lane": "guarded",
+  "gate_profile": "focused"
+}

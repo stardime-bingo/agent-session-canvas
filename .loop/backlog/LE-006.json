@@ -1,0 +1,27 @@
+{
+  "id": "LE-006",
+  "module": "canvas-performance",
+  "severity": "P1",
+  "type": "architecture",
+  "summary": "对大底板与 300–800 元素场景建立局部更新和性能红线",
+  "evidence": [
+    "真实大底板约 3838x2903 世界像素，旧 exportToCanvas 在 4096 帽下仍会生成约 1270 万像素的主线程位图",
+    "用户要求成熟画布工具级的缩放与平移体验",
+    "单视口树解决错相，但内容提交时仍需防止全场巨型快照卡顿"
+  ],
+  "fix_hint": "先以矢量快照消灭像素帽；用元素包围盒与版本签名只更新受影响的 plane/group；对 300/800 合成元素记录快照耗时、长任务和视口漂移；超红线再分区，不预先引入无证据的复杂瓦片系统。",
+  "complexity": "complex",
+  "allowed_paths": [
+    "web/src/canvas/InkWorldLayer.jsx",
+    "web/src/canvas/drawing.js",
+    "tests/drawing.test.mjs",
+    "tests/fixtures/canvas-acceptance/index.html",
+    "tests/fixtures/canvas-acceptance/main.jsx",
+    "tests/fixtures/canvas-acceptance/fixture-data.js",
+    "web/CLAUDE.md",
+    "CLAUDE.md",
+    "AGENTS.md"
+  ],
+  "lane": "guarded",
+  "gate_profile": "focused"
+}
