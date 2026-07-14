@@ -53,10 +53,9 @@ npm run scan         # 仅扫描，输出统计
 - **滚轮双模 (gestures.js)**: 逐事件判定设备——wheelDelta 120 倍数/行模式=鼠标→光标锚定缩放；二维/亚像素增量=触控板→平移；
   150ms 手势连续性防惯性误判；Ctrl/Meta/Shift 与捏合全交还 RF 原生；缩放条第四钮 自动/触控板/鼠标 三态兜底(localStorage 记忆)
 - **原生绘图可编辑**: “选绘图/画笔”是显式双入口，选择态保留 Excalidraw 原生描边/背景/透明度/图层属性岛并按导航宽度让位；激活时全局动作不退场；图片 BinaryFiles 独立落 drawing-files.json，删除图片时同步裁剪孤儿资产
-- **绘图双平面（单相机融合）**: 已提交绘图按 customData.below 分成沉/浮两张静态 SVG，通过 React Flow ViewportPortal
-  与卡片共用唯一 viewport transform；平移/缩放不再喂送或重绘 Excalidraw，普通态也不挂载 Excalidraw。只在编辑时开临时工作副本，
-  进入编辑先封住普通动作与节点几何、排空队列，以最后成功的 elements/files 同一快照水合；整理/撤销在 opening 窗口让位，active 时先提交并退出绘图再整理，且等待布局落定与墨迹跟随后才解锁。
-  退出必须把 flush 快照同步回队列才卸载解门，失败保留编辑现场与旧 committed 快照。
+- **绘图双平面（committed 世界 + 目标事务）**: 已提交绘图按 customData.below 分成沉/浮两张静态 SVG，通过 React Flow ViewportPortal
+  与卡片共用唯一 viewport transform；平移/缩放不再驱动 Excalidraw 或重导出。选绘图先进入普通平面待选态，命中后只把目标的容器/绑定/分组/画框递归关系闭包交给临时编辑器；新绘图从空事务开始，绝不把全场抬到卡片上。
+  committed 世界编辑时持续在场，只 hole-punch 事务 originalIds；局部 draft 水合后仍先隐藏，hole SVG 进入 DOM 的 layout effect 才同步显现。尚未显现、不可交互的 opening draft 没有用户改动主权，任何退出都在 flush/落盘/closing 前直接取消并恢复 committed 世界；每次 opening 另有唯一 request 身份，上一代迟到的 drain/失败/帧回调不得触碰下一代。已显现事务的退出由 FlowCanvas 把 draft 合并回全量基线并经串行队列落盘，成功即把本轮 draft IDs 并入事务所有权并 rebase merged 基线，完整 merged SVG 进入 DOM 后同一帧卸载 draft，并只在 request 身份仍匹配时收口残留 opening Promise；失败保留洞、编辑现场与最后成功基线，回执严格区分“未落盘”与“已保存但画面交接失败”，DrawLayer 永不直存局部副本。
   普通态绘图动作串行提交，每笔到队首才基于上一成功快照变换，失败不推进基线也不毒死后续。沉层点击让位卡片，浮层命中仍跟着视觉顺序
 - **容器承载律 (FigJam/Miro 共识)**: 墨迹中心落在街区/画板内就跟容器走——容器拖动、自动整理、撤销整理三路都量差平移锚定墨迹
   （面积小者优先认领，绑定标签随宿主）；小地图画一切：MiniMapInk 镜像 minimap 的 svg viewBox 把区域底板与批注投进缩略图（Miro 式地标定向）

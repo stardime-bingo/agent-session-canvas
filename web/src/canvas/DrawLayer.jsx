@@ -1,19 +1,18 @@
 /**
- * [INPUT]: 依赖 @excalidraw/excalidraw 组件、api.setDrawing 与 drawing 的纯变换/快照/命中内核
- * [OUTPUT]: 对外提供仅在编辑态挂载的 DrawLayer；单握手区分首次水合与后续工具变化，仅一次回传稳定 controller
- * [POS]: 临时绘图编辑事务；普通态由 InkWorldLayer 展示已提交 SVG，本组件不再充当常驻渲染器
+ * [INPUT]: 依赖 @excalidraw/excalidraw 与局部事务 elements/files；持久化主权由 FlowCanvas 的全量队列持有
+ * [OUTPUT]: 对外提供仅在编辑态挂载的 DrawLayer；维护/flush 局部 draft，水合完成后一次回传稳定 controller
+ * [POS]: 临时目标事务编辑器；绝不直接保存局部副本，普通态与未选目标始终不挂载
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
 import React, { forwardRef, useEffect, useImperativeHandle, useRef } from 'react';
 import { Excalidraw } from '@excalidraw/excalidraw';
 import '@excalidraw/excalidraw/index.css';
-import { api } from '../api.js';
 import {
-  deleteDrawingElement, drawingEditorReadyStep, drawingFilesSignature, drawingSnapshot, hitDrawingElement,
+  deleteDrawingElement, drawingEditorReadyStep, drawingSnapshot, hitDrawingElement,
   setDrawingElementPlane, translateDrawingElements,
 } from './drawing.js';
 
-export default forwardRef(function DrawLayer({ active, initialElements, initialFiles, onScrollToFlow, onToolChange, onReady, onPersisted, onExitToCanvas }, ref) {
+export default forwardRef(function DrawLayer({ active, visible = true, initialElements, initialFiles, onScrollToFlow, onToolChange, onReady, onDraftPageHide, onExitToCanvas }, ref) {
   const apiRef = useRef(null);
   const raf = useRef(0);
   const pendingVp = useRef(null);
@@ -21,7 +20,6 @@ export default forwardRef(function DrawLayer({ active, initialElements, initialF
   const downRef = useRef(null);
   const handshakeRef = useRef({ apiReady: false, hydrated: false, ready: false });
   const latestFiles = useRef(initialFiles || {});
-  const savedFileSig = useRef(drawingFilesSignature(initialFiles));
 
   // excalidrawAPI 回调可能早于 initialData 水合；这个窗口内 flush 不许把已有绘图误写成空。
   const scene = () => {
@@ -29,23 +27,13 @@ export default forwardRef(function DrawLayer({ active, initialElements, initialF
     return handshakeRef.current.hydrated || current.length ? current : (initialElements || []);
   };
 
-  // flush 是退出编辑的事务门：真正落盘并回写 App 后才 resolve。
-  const persist = () => {
-    const snapshot = drawingSnapshot(scene(), latestFiles.current);
-    const fileSig = drawingFilesSignature(snapshot.files);
-    const changedFiles = fileSig === savedFileSig.current ? undefined : snapshot.files;
-    return api.setDrawing(snapshot.elements, changedFiles).then(() => {
-      if (changedFiles !== undefined) savedFileSig.current = fileSig;
-      onPersisted?.(snapshot.elements, snapshot.files);
-      return snapshot;
-    });
-  };
+  const draftSnapshot = () => drawingSnapshot(scene(), latestFiles.current);
 
   useEffect(() => () => cancelAnimationFrame(raf.current), []);
 
-  // 关标签页/刷新时尽力保存工作副本；正常退出走可等待 flush。
+  // 关标签页/刷新时只把局部 draft 交给父层；父层合并全量世界后才可 best-effort 保存。
   useEffect(() => {
-    const onHide = () => persist().catch(() => {});
+    const onHide = () => onDraftPageHide?.(draftSnapshot());
     window.addEventListener('pagehide', onHide);
     return () => window.removeEventListener('pagehide', onHide);
   }, []);
@@ -77,28 +65,26 @@ export default forwardRef(function DrawLayer({ active, initialElements, initialF
     },
     activateTool(type) { apiRef.current?.setActiveTool({ type }); },
     getElements() { return apiRef.current ? scene() : null; },
-    getSnapshot() {
-      return drawingSnapshot(scene(), latestFiles.current);
-    },
+    getSnapshot() { return draftSnapshot(); },
     selectElement(id) {
       apiRef.current?.updateScene({ appState: { selectedElementIds: { [id]: true } } });
     },
     deleteElement(id) {
       if (!apiRef.current) return Promise.reject(new Error('绘图编辑器未就绪'));
       apiRef.current.updateScene({ elements: deleteDrawingElement(scene(), id) });
-      return persist();
+      return Promise.resolve(draftSnapshot());
     },
     translateElements(ids, dx, dy) {
       if (!apiRef.current) return Promise.reject(new Error('绘图编辑器未就绪'));
       apiRef.current.updateScene({ elements: translateDrawingElements(scene(), ids, dx, dy) });
-      return persist();
+      return Promise.resolve(draftSnapshot());
     },
     setElementPlane(id, below) {
       if (!apiRef.current) return Promise.reject(new Error('绘图编辑器未就绪'));
       apiRef.current.updateScene({ elements: setDrawingElementPlane(scene(), id, below) });
-      return persist();
+      return Promise.resolve(draftSnapshot());
     },
-    flush() { return persist(); },
+    flush() { return Promise.resolve(draftSnapshot()); },
   };
   useImperativeHandle(ref, () => controllerRef.current, []);
 
@@ -110,7 +96,7 @@ export default forwardRef(function DrawLayer({ active, initialElements, initialF
   };
 
   const onDown = e => {
-    if (!active) return;
+    if (!active || !visible) return;
     const s = apiRef.current?.getAppState();
     downRef.current = {
       x: e.clientX, y: e.clientY,
@@ -121,7 +107,7 @@ export default forwardRef(function DrawLayer({ active, initialElements, initialF
   const onUp = e => {
     const down = downRef.current;
     downRef.current = null;
-    if (!active || !down || down.tool !== 'selection' || down.hadSel) return;
+    if (!active || !visible || !down || down.tool !== 'selection' || down.hadSel) return;
     if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5) return;
     const s = apiRef.current?.getAppState();
     if (!s) return;
@@ -132,9 +118,9 @@ export default forwardRef(function DrawLayer({ active, initialElements, initialF
   };
 
   return (
-    <div className="draw-layer draw-active"
+    <div className={`draw-layer draw-active${visible ? '' : ' draw-pending'}`}
       onPointerDownCapture={onDown} onPointerUpCapture={onUp}
-      style={{ position: 'absolute', inset: 0, zIndex: 6, transformOrigin: '0 0', pointerEvents: 'auto' }}>
+      style={{ position: 'absolute', inset: 0, zIndex: 6, transformOrigin: '0 0', pointerEvents: visible ? 'auto' : 'none' }}>
       <Excalidraw
         excalidrawAPI={instance => {
           apiRef.current = instance;

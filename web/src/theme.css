@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 独立样式文件，依赖系统 Inter/PingFang 字体栈
- * [OUTPUT]: 对外提供全局 CSS 变量（Dify 浅色画布基因）、基础排版、面板/按钮/徽章、缩放感知连接点、会话上下文终端框皮肤与可操作 toast 通用类
+ * [OUTPUT]: 对外提供全局 CSS 变量、基础排版/面板/按钮、绘图 armed/opening/hole 帧交接视觉、缩放感知连接点与终端框/toast 皮肤
  * [POS]: web 的视觉唯一真相源——浅灰画布 + 纯白卡片 + Dify 蓝锚点 + 柔和阴影，动画只走合成器
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -142,6 +142,11 @@ body {
   content: ''; position: absolute; inset: 0; z-index: 5; pointer-events: none;
   border: 2px solid var(--accent-soft);
   animation: fade-in 0.25s var(--ease-panel);
+}
+.canvas-root.drawing-armed::after {
+  content: ''; position: absolute; inset: 0; z-index: 5; pointer-events: none;
+  border: 2px dashed var(--accent-soft);
+  animation: fade-in 0.18s var(--ease-panel);
 }
 /* 开编辑的 drain/水合窗口：同一个 ::after 临时升到 RF 与 DrawLayer 之上拦几何，仍低于 z:7 工具岛。 */
 .canvas-root.drawing-opening::after {
@@ -545,13 +550,15 @@ input.inline-edit {
  * ============================================================ */
 .react-flow__viewport-portal { pointer-events: none; }
 .ink-world { position: absolute; inset: 0; pointer-events: none; }
-.ink-world-hidden { display: none; }
 .ink-world-plane {
   position: absolute; pointer-events: none; transform-origin: 0 0;
   user-select: none;
 }
 .ink-world-below { z-index: -1; }
 .ink-world-above { z-index: 1000; }
+
+/* opening 时先在幕后水合局部 draft；hole SVG 进入 DOM 的 layout effect 才同步显现，杜绝双影/白洞。 */
+.draw-pending { opacity: 0; pointer-events: none !important; }
 
 /* 绘图编辑激活：保留原生选择与属性面板；汉堡菜单/帮助钮/杂项工具不进屋。 */
 .draw-active .excalidraw .main-menu-trigger,

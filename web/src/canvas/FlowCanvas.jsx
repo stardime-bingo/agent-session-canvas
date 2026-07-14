@@ -3,7 +3,7 @@
  * [OUTPUT]: 对外提供 FlowCanvas 组件：统一容器模型、弹性生长、拖放改归属、三系统边+手动边、
  *           增量成员防重叠、Figma 式框选/平移/触控板手势、滚轮双模（触控板平移/鼠标缩放+模式切换钮）、
  *           容器缩放定桩、全画布落空连线选择（含就地打开会话上下文）、缩放感知连接点、原生绘图选择/画笔、
- *           committed ink 与节点共用 ViewportPortal 唯一相机、普通态串行提交、排空后同快照开启且锁住几何的绘图编辑事务、
+ *           committed ink 与节点共用 ViewportPortal 唯一相机、普通态串行提交、目标关系闭包局部事务、opening request 身份门与纯取消、无双影帧交接与真实阶段回执、
  *           普通模式绘图命中（pane/容器面同河）与 Backspace 删除治理
  * [POS]: canvas 的画布引擎。归属律：layout.d 手动指定 > 路径推断；容器永远生长包住成员；
  *        每一次点击必有可感知的回应：选中态/菜单/提示三选一
@@ -20,7 +20,8 @@ import { COL_W, PAD, BREATH, GUTTER, ROW_MAX_W, HEADER_H, CARD_H, CARD_GAP, MAX_
 import { sessionMenu, workspaceMenu, districtMenu, boardMenu, noteMenu, paneMenu, edgeMenu, deleteBoardFlow, deleteNoteFlow } from './menus.jsx';
 import { connectionDrop, syncHandleHitArea } from './connections.js';
 import {
-  anchoredDrawingIds, canvasGeometryAllowed, canvasGeometryPreparation, createDrawingCommitQueue, deleteDrawingElement, hitDrawingElement,
+  advanceDrawingTransaction, anchoredDrawingIds, canvasGeometryAllowed, canvasGeometryPreparation, createDrawingCommitQueue, createDrawingTransaction,
+  deleteDrawingElement, drawingClosingHandoffStep, drawingExitAction, drawingExitFailureNotice, drawingOpeningRequestCurrent, hitDrawingElement, mergeDrawingTransaction,
   setDrawingElementPlane, translateDrawingElements,
 } from './drawing.js';
 import InkWorldLayer from './InkWorldLayer.jsx';
@@ -34,6 +35,7 @@ const DrawLayer = lazy(() => import('./DrawLayer.jsx'));
 const nodeTypes = { workspace: WorkspaceNode, session: SessionNode, district: DistrictNode, board: BoardNode, note: NoteNode };
 
 const MIN_ZOOM = 0.1, MAX_ZOOM = 1.8;   // 缩放界限唯一真相：RF props 与滚轮内核共用
+const NO_DRAWING_IDS = Object.freeze([]);
 
 // ============================================================
 //  街区识别：路径亲缘即城市区域（HOME 下前两段路径）
@@ -217,13 +219,23 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   const [renaming, setRenaming] = useState({ id: null, n: 0 });   // 就地改名信号（nonce 驱动）
   const [penActive, setPenActive] = useState(false);
   const [drawOpening, setDrawOpening] = useState(false);
+  const [drawVisible, setDrawVisible] = useState(false);
+  const [selectArmed, setSelectArmed] = useState(false);
   const [drawTool, setDrawTool] = useState('selection');
   const [editSeed, setEditSeed] = useState(null);
+  const [worldOverride, setWorldOverride] = useState(null);
   const drawRef = useRef(null);
   const penActiveRef = useRef(false);
+  const drawVisibleRef = useRef(false);
+  const selectArmedRef = useRef(false);
   const drawToolRef = useRef('selection');
   const pendingSelectRef = useRef(null);
+  const editTransactionRef = useRef(null);
+  const editBaseRef = useRef(null);
+  const worldRevisionRef = useRef(0);
+  const worldHandoffRef = useRef(null);
   const openingRef = useRef(false);
+  const openingRequestRef = useRef(null);
   const openingPromiseRef = useRef(null);
   const openingReadyResolveRef = useRef(null);
   const exitingDrawRef = useRef(false);
@@ -238,13 +250,20 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     );
   }
   const drawingCommitQueue = drawingCommitQueueRef.current;
+  const updateDrawVisible = useCallback(visible => {
+    drawVisibleRef.current = visible;
+    setDrawVisible(visible);
+  }, []);
 
   // 普通态外部回读可更新队列基线；开门/编辑事务内只认 drain seed 与 flush snapshot。
   useEffect(() => {
     if (!openingRef.current && !penActiveRef.current) {
       drawingCommitQueue.sync({ elements: canvas?.drawing, files: canvas?.drawingFiles });
+      if (worldOverride && worldOverride.elements === canvas?.drawing && worldOverride.files === canvas?.drawingFiles) {
+        setWorldOverride(null);
+      }
     }
-  }, [drawingCommitQueue, canvas?.drawing, canvas?.drawingFiles]);
+  }, [drawingCommitQueue, canvas?.drawing, canvas?.drawingFiles, worldOverride]);
 
   const geometryAllowed = useCallback(() => canvasGeometryAllowed({
     opening: openingRef.current,
@@ -294,51 +313,153 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     return () => el.removeEventListener('wheel', onWheel, { capture: true });
   }, []);
 
-  // ---- 绘图编辑：选择/画笔各有显式入口；进入对齐视口，退出带回视口并冲刷存盘 ----
-  const exitDrawing = useCallback(async () => {
-    if (!penActiveRef.current || exitingDrawRef.current) return false;
-    exitingDrawRef.current = true;
-    setMenu(null);
-    const vp = drawRef.current?.getViewport();
-    try {
-      const snapshot = await drawRef.current?.flush();
-      if (!snapshot) throw new Error('绘图编辑器尚未就绪');
-      if (drawingCommitQueue.sync(snapshot) === false) throw new Error('普通绘图提交尚未排空');
-      if (vp) instRef.current?.setViewport(vp);
-      setEditSeed(null);
+  // ---- 绘图编辑：静态 committed 世界常驻；局部 draft 只在 hole SVG 进入 DOM 后显现。 ----
+  const onInkSnapshotReady = useCallback(revision => {
+    const handoff = worldHandoffRef.current;
+    if (!handoff || handoff.revision !== revision) return;
+    if (handoff.phase === 'opening'
+      && !drawingOpeningRequestCurrent(openingRequestRef.current, handoff.openingRequest)) return;
+    if (handoff.phase === 'closing' && openingRequestRef.current
+      && !drawingOpeningRequestCurrent(openingRequestRef.current, handoff.openingRequest)) return;
+    worldHandoffRef.current = null;
+    if (handoff.phase === 'opening') {
+      updateDrawVisible(true);
       setDrawOpening(false);
       openingRef.current = false;
       openingPromiseRef.current = null;
       const resolveOpening = openingReadyResolveRef.current;
       openingReadyResolveRef.current = null;
+      openingRequestRef.current = null;
+      resolveOpening?.(true);
+      return;
+    }
+
+    // InkWorld 的完整 merged SVG 已经进入 DOM；layout-effect 回调内同步卸载 live draft，首 paint 前闭合。
+    if (drawingOpeningRequestCurrent(openingRequestRef.current, handoff.openingRequest)) {
+      const closeStep = drawingClosingHandoffStep({ hasOpeningResolver: !!openingReadyResolveRef.current });
+      const resolveOpening = openingReadyResolveRef.current;
+      openingRef.current = closeStep.opening;
+      openingPromiseRef.current = closeStep.openingPromise;
+      openingReadyResolveRef.current = closeStep.openingResolver;
+      openingRequestRef.current = null;
+      if (closeStep.resolveOpeningWith !== null) resolveOpening?.(closeStep.resolveOpeningWith);
+    }
+    updateDrawVisible(false);
+    setEditSeed(null);
+    editTransactionRef.current = null;
+    editBaseRef.current = null;
+    pendingSelectRef.current = null;
+    penActiveRef.current = false;
+    setPenActive(false);
+    setDrawOpening(false);
+    handoff.resolve?.(true);
+  }, [updateDrawVisible]);
+
+  const onInkSnapshotError = useCallback((revision, error) => {
+    const handoff = worldHandoffRef.current;
+    if (!handoff || handoff.revision !== revision) return;
+    if (handoff.phase === 'opening'
+      && !drawingOpeningRequestCurrent(openingRequestRef.current, handoff.openingRequest)) return;
+    if (handoff.phase === 'closing' && openingRequestRef.current
+      && !drawingOpeningRequestCurrent(openingRequestRef.current, handoff.openingRequest)) return;
+    worldHandoffRef.current = null;
+    if (handoff.phase === 'opening') {
+      setWorldOverride(null);
+      updateDrawVisible(false);
+      setDrawOpening(false);
+      setEditSeed(null);
+      editTransactionRef.current = null;
+      editBaseRef.current = null;
+      openingRef.current = false;
+      openingPromiseRef.current = null;
+      penActiveRef.current = false;
+      setPenActive(false);
+      const resolveOpening = openingReadyResolveRef.current;
+      openingReadyResolveRef.current = null;
+      openingRequestRef.current = null;
+      resolveOpening?.(false);
+      toast(`打开绘图失败：${error.message}`, 'error');
+      return;
+    }
+    const base = editBaseRef.current;
+    const transaction = editTransactionRef.current;
+    if (base && transaction) setWorldOverride({
+      elements: base.elements, files: base.files, excludedIds: transaction.originalIds,
+      revision: ++worldRevisionRef.current,
+    });
+    handoff.reject?.(error);
+  }, [updateDrawVisible]);
+
+  const exitDrawing = useCallback(async () => {
+    const openingRequest = openingRequestRef.current;
+    const action = drawingExitAction({
+      opening: openingRef.current,
+      visible: drawVisibleRef.current,
+      hasOpeningResolver: !!openingReadyResolveRef.current,
+    });
+    if (action.type === 'cancel-opening') {
+      if (!drawingOpeningRequestCurrent(openingRequestRef.current, openingRequest)) return false;
+      const resolveOpening = openingReadyResolveRef.current;
+      setMenu(null);
+      worldHandoffRef.current = null;
+      setWorldOverride(null);
+      updateDrawVisible(false);
+      setDrawOpening(false);
+      setEditSeed(null);
+      editTransactionRef.current = null;
+      editBaseRef.current = null;
+      openingRef.current = action.opening;
+      openingRequestRef.current = null;
+      openingPromiseRef.current = action.openingPromise;
+      openingReadyResolveRef.current = action.openingResolver;
       penActiveRef.current = false;
       pendingSelectRef.current = null;
       setPenActive(false);
-      resolveOpening?.(false);
+      if (action.resolveOpeningWith !== null) resolveOpening?.(action.resolveOpeningWith);
       return true;
+    }
+    if (!penActiveRef.current || exitingDrawRef.current) return false;
+    exitingDrawRef.current = true;
+    setMenu(null);
+    setDrawOpening(true);   // flush 之后不能再接收新笔；失败会原地解锁，成功则保持到 full SVG 交接
+    const vp = drawRef.current?.getViewport();
+    let persisted = false;
+    try {
+      const draft = await drawRef.current?.flush();
+      const transaction = editTransactionRef.current;
+      if (!draft || !transaction) throw new Error('绘图编辑器尚未就绪');
+      const merged = await drawingCommitQueue.submit(base => mergeDrawingTransaction(base, transaction, draft));
+      persisted = true;
+      // 持久化已成功但 full SVG 仍可能失败：立即 rebase 所有权，后续删除新生 ID 时重试/pagehide 不得复活幽灵。
+      editBaseRef.current = merged;
+      editTransactionRef.current = advanceDrawingTransaction(transaction, draft);
+      if (vp) instRef.current?.setViewport(vp);
+
+      const revision = ++worldRevisionRef.current;
+      const closed = new Promise((resolve, reject) => {
+        worldHandoffRef.current = { phase: 'closing', revision, openingRequest, resolve, reject };
+      });
+      // live draft 继续填着旧 hole；只有完整 merged SVG 进 DOM 后才会在 layout effect 同步卸载。
+      setWorldOverride({ elements: merged.elements, files: merged.files, excludedIds: NO_DRAWING_IDS, revision });
+      return await closed;
     } catch (err) {
-      // 用户若恰在 Suspense/水合窗口退出，取消未完成开门，不能留下永久几何锁。
-      const cancelledOpening = openingRef.current;
-      if (cancelledOpening) {
-        setDrawOpening(false);
-        setEditSeed(null);
+      const notice = drawingExitFailureNotice({ persisted, errorMessage: err.message });
+      toast(notice.message, 'error');
+      setDrawOpening(false);
+      updateDrawVisible(true);
+      if (drawingOpeningRequestCurrent(openingRequestRef.current, openingRequest)) {
         openingRef.current = false;
+        openingRequestRef.current = null;
+        openingPromiseRef.current = null;
         const resolveReady = openingReadyResolveRef.current;
         openingReadyResolveRef.current = null;
-        openingPromiseRef.current = null;
-        penActiveRef.current = false;
-        pendingSelectRef.current = null;
-        setPenActive(false);
         resolveReady?.(false);
       }
-      toast(cancelledOpening
-        ? `打开绘图已取消：${err.message}`
-        : `绘图未落盘，已保留编辑现场：${err.message}`, 'error');
       return false;
     } finally {
       exitingDrawRef.current = false;
     }
-  }, [drawingCommitQueue]);
+  }, [drawingCommitQueue, updateDrawVisible]);
 
   const prepareGeometry = useCallback(async () => {
     const step = canvasGeometryPreparation({
@@ -360,40 +481,68 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       return Promise.resolve(false);
     }
     setMenu(null);
+    selectArmedRef.current = false;
+    setSelectArmed(false);
     clearSelectionRef.current();   // 清掉看板选中：绘图里按 Delete 时 RF 不许顺手删掉选中的手动边
     const toggleActiveTool = penActiveRef.current && drawToolRef.current === tool && !selectId;
-    pendingSelectRef.current = selectId || null;
     drawToolRef.current = tool;
     setDrawTool(tool);
 
-    // drain 尚未完成或编辑器尚未 ready：只更新最终工具/选中意图，复用同一扇门。
-    if (openingRef.current) return openingPromiseRef.current;
+    // drain/hole 尚未完成：工具可切换，但另一目标不能偷换当前事务。
+    if (openingRef.current) {
+      if (selectId && pendingSelectRef.current && pendingSelectRef.current !== selectId) {
+        toast('当前目标正在打开，请稍后再选择另一段绘图');
+        return Promise.resolve(false);
+      }
+      if (selectId) pendingSelectRef.current = selectId;
+      drawRef.current?.activateTool(tool);
+      return openingPromiseRef.current;
+    }
+    pendingSelectRef.current = selectId || null;
     if (toggleActiveTool) {
       return exitDrawing();
     }
     if (penActiveRef.current) {
+      const transaction = editTransactionRef.current;
+      if (selectId && !transaction?.originalIds?.includes(selectId)) {
+        toast('请先退出当前绘图，再选择另一段绘图');
+        return Promise.resolve(false);
+      }
       drawRef.current?.activateTool(tool);
       if (selectId) drawRef.current?.selectElement(selectId);
       return Promise.resolve(true);
     }
 
     // 第一条进入请求在任何 await 前封门；其后的普通态提交必须失败，不能越过 drain。
+    const openingRequest = {};
+    openingRequestRef.current = openingRequest;
     openingRef.current = true;
     setDrawOpening(true);
     let resolveReady;
     const ready = new Promise(resolve => { resolveReady = resolve; });
     openingReadyResolveRef.current = resolveReady;
     const openingPromise = drawingCommitQueue.whenIdle().then(seed => {
-      setEditSeed(seed);
+      if (!drawingOpeningRequestCurrent(openingRequestRef.current, openingRequest)) return false;
+      const transaction = createDrawingTransaction(seed, selectId || null);
+      if (!transaction) throw new Error('目标绘图刚刚发生变化，请重新选择');
+      editBaseRef.current = seed;
+      editTransactionRef.current = transaction;
+      setEditSeed({ ...transaction, openingRequest });
+      updateDrawVisible(false);
       penActiveRef.current = true;
       setPenActive(true);
       return ready;
     }).catch(err => {
+      if (!drawingOpeningRequestCurrent(openingRequestRef.current, openingRequest)) return false;
       openingRef.current = false;
+      openingRequestRef.current = null;
       openingPromiseRef.current = null;
       openingReadyResolveRef.current = null;
       setDrawOpening(false);
+      updateDrawVisible(false);
       setEditSeed(null);
+      editTransactionRef.current = null;
+      editBaseRef.current = null;
       penActiveRef.current = false;
       setPenActive(false);
       toast(`打开绘图失败：${err.message}`, 'error');
@@ -401,7 +550,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     });
     openingPromiseRef.current = openingPromise;
     return openingPromise;
-  }, [drawingCommitQueue, exitDrawing, geometryPendingRef]);
+  }, [drawingCommitQueue, exitDrawing, geometryPendingRef, updateDrawVisible]);
 
   const togglePen = useCallback(() => {
     if (penActiveRef.current && !openingRef.current) exitDrawing();
@@ -420,12 +569,21 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     }, 0);
   }, [exitDrawing]);
 
-  // 选绘图入口：空画布也进模式，但先说一句实话——零反馈的模式切换是哑谜
+  // 选绘图入口只武装普通平面；真正命中目标后才创建局部事务、挂载 Excalidraw。
   const openSelectDrawing = useCallback(() => {
-    if (!penActiveRef.current && !canvas?.drawing?.length) {
-      toast('画布还没有绘图——先用画笔（D）画一笔，再来选中编辑');
+    if (penActiveRef.current || openingRef.current) {
+      openDrawing('selection');
+      return;
     }
-    openDrawing('selection');
+    const armed = !selectArmedRef.current;
+    selectArmedRef.current = armed;
+    setSelectArmed(armed);
+    drawToolRef.current = 'selection';
+    setDrawTool('selection');
+    if (!armed) return;
+    toast(canvas?.drawing?.length
+      ? '请选择一段绘图；点空白会返回并继续操作底下对象'
+      : '画布还没有绘图——点空白返回，或改用画笔开始绘制');
   }, [openDrawing, canvas?.drawing]);
 
   const onDrawToolChange = useCallback(tool => {
@@ -441,9 +599,14 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   }, []);
 
   useEffect(() => {
-    if (!penActive) return;
+    if (!penActive && !selectArmed) return;
     const onKey = e => {
       if (e.key !== 'Escape') return;
+      if (selectArmedRef.current && !penActiveRef.current) {
+        selectArmedRef.current = false;
+        setSelectArmed(false);
+        return;
+      }
       // Excalidraw 文字编辑中的 Esc 归它自己（结束输入），不许连坐退出绘图
       const t = e.target;
       if (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable) return;
@@ -451,7 +614,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [penActive, exitDrawing]);
+  }, [penActive, selectArmed, exitDrawing]);
 
   // Esc 分层：菜单在 capture 阶段拦截并阻断传播——面板与选中不许连坐
   useEffect(() => {
@@ -746,6 +909,8 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   };
 
   const enterDrawingSelection = hit => {
+    selectArmedRef.current = false;
+    setSelectArmed(false);
     openDrawing('selection', hit.id)
       .then(opened => { if (opened) toast('已选中绘图——Delete 删除，Esc 返回看板'); })
       .catch(err => toast(`打开绘图失败：${err.message}`, 'error'));
@@ -788,6 +953,10 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   const onPaneClick = useCallback(e => {
     const hit = drawingHitFromEvent(e, 'all');   // 纯空地：浮层批注优先，其次沉层底板
     if (hit) return enterDrawingSelection(hit);
+    if (selectArmedRef.current) {
+      selectArmedRef.current = false;
+      setSelectArmed(false);
+    }
     onSelect(null);
     setMenu(null);
   }, [onSelect, openDrawing, canvas?.drawing]);
@@ -911,6 +1080,10 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   const onNodeClick = useCallback((e, node) => {
     const hit = drawingHitFromEvent(e);   // 视觉最上层者赢：描边带上的点击优先归绘图，空心区照常穿透给卡片
     if (hit) return enterDrawingSelection(hit);
+    if (selectArmedRef.current) {
+      selectArmedRef.current = false;
+      setSelectArmed(false);
+    }
     if (node.type === 'session') onSelect(node.id);
     // 其余类型：RF 原生选中态即回应（描边+手柄亮起）
   }, [onSelect, openDrawing, canvas?.drawing]);
@@ -987,9 +1160,12 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   if (initVp.current === undefined) {
     try { initVp.current = JSON.parse(localStorage.vp); } catch { initVp.current = null; }
   }
+  const world = worldOverride || {
+    elements: canvas?.drawing, files: canvas?.drawingFiles, excludedIds: NO_DRAWING_IDS, revision: 0,
+  };
 
   return (
-    <div ref={rootRef} className={`canvas-root${penActive ? ' drawing-on' : ''}${drawOpening ? ' drawing-opening' : ''}`} style={{ position: 'relative', width: '100%', height: '100%' }}>
+    <div ref={rootRef} className={`canvas-root${penActive ? ' drawing-on' : ''}${drawOpening ? ' drawing-opening' : ''}${selectArmed ? ' drawing-armed' : ''}`} style={{ position: 'relative', width: '100%', height: '100%' }}>
     <ReactFlow
       nodes={nodes}
       edges={rfEdges}
@@ -1059,9 +1235,12 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     >
       {/* committed ink 与节点共享 React Flow 的同一 viewport transform；视口手势不触发重导出。 */}
       <InkWorldLayer
-        elements={canvas?.drawing}
-        files={canvas?.drawingFiles}
-        hidden={penActive}
+        elements={world.elements}
+        files={world.files}
+        excludedIds={world.excludedIds}
+        revision={world.revision}
+        onSnapshotReady={onInkSnapshotReady}
+        onSnapshotError={onInkSnapshotError}
       />
       {/* ===== 关系图例：四种线各是什么，一眼即懂（绘图编辑时为工具层让位） ===== */}
       {!penActive && <Panel position="bottom-center" style={{ pointerEvents: 'none' }}>
@@ -1120,26 +1299,62 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     {penActive && editSeed && (
       <Suspense fallback={null}>
         <DrawLayer
-          ref={drawRef} active={penActive}
+          ref={drawRef} active={penActive} visible={drawVisible}
           initialElements={editSeed.elements}
           initialFiles={editSeed.files}
           onScrollToFlow={onScrollToFlow}
           onToolChange={onDrawToolChange}
           onExitToCanvas={exitToCanvas}
-          onPersisted={(els, files) => onCanvasAction('drawingPersisted', { elements: els, files })}
+          onDraftPageHide={draft => {
+            const transaction = editTransactionRef.current;
+            if (transaction) drawingCommitQueue.submit(base => mergeDrawingTransaction(base, transaction, draft)).catch(() => {});
+          }}
           onReady={controller => {
+            const openingRequest = editSeed.openingRequest;
+            if (!drawingOpeningRequestCurrent(openingRequestRef.current, openingRequest)) return;
             const vp = instRef.current?.getViewport();
             if (vp) controller.pushViewport(vp);
             controller.activateTool(drawToolRef.current);
             const selectId = pendingSelectRef.current;
             const selected = !selectId || controller.getElements()?.some(el => el.id === selectId);
             if (selectId && selected) controller.selectElement(selectId);
-            if (selectId && !selected) toast('目标绘图刚刚发生变化，请重新选择', 'error');
-            openingRef.current = false;
-            setDrawOpening(false);
-            const resolveReady = openingReadyResolveRef.current;
-            openingReadyResolveRef.current = null;
-            resolveReady?.(!!selected);
+            if (!selected) {
+              updateDrawVisible(false);
+              setDrawOpening(false);
+              setEditSeed(null);
+              editTransactionRef.current = null;
+              editBaseRef.current = null;
+              openingRef.current = false;
+              openingRequestRef.current = null;
+              openingPromiseRef.current = null;
+              penActiveRef.current = false;
+              pendingSelectRef.current = null;
+              setPenActive(false);
+              const resolveReady = openingReadyResolveRef.current;
+              openingReadyResolveRef.current = null;
+              resolveReady?.(false);
+              toast('目标绘图刚刚发生变化，请重新选择', 'error');
+              return;
+            }
+            const transaction = editTransactionRef.current;
+            const base = editBaseRef.current;
+            if (!transaction?.originalIds?.length) {
+              // 新绘图从空 draft 开始，committed 世界没有洞；水合完成即可在首帧显现。
+              updateDrawVisible(true);
+              openingRef.current = false;
+              openingRequestRef.current = null;
+              setDrawOpening(false);
+              openingPromiseRef.current = null;
+              const resolveReady = openingReadyResolveRef.current;
+              openingReadyResolveRef.current = null;
+              resolveReady?.(true);
+              return;
+            }
+            const revision = ++worldRevisionRef.current;
+            worldHandoffRef.current = { phase: 'opening', revision, openingRequest };
+            setWorldOverride({
+              elements: base.elements, files: base.files, excludedIds: transaction.originalIds, revision,
+            });
           }}
         />
       </Suspense>
@@ -1150,8 +1365,8 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       <button className="btn ghost" onClick={addNote} title="贴一张便签到视野中央（快捷键 N）"><Icon name="note" /> 便签</button>
       <button className="btn ghost" onClick={addBoard} title="创建自定义画板：拉角调大小、双击改名、工作区拖进来就归它管（快捷键 B）"><Icon name="board" /> 画板</button>
       <span className="topbar-sep" />
-      <button className={`btn ${penActive && drawTool === 'selection' ? 'primary' : 'ghost'}`} onClick={openSelectDrawing}
-        title={penActive && drawTool === 'selection' ? '正在编辑绘图；再次点击或 Esc 返回看板' : '选择并精细设置已有绘图：描边、背景、透明度与图层'}>
+      <button className={`btn ${(selectArmed || (penActive && drawTool === 'selection')) ? 'primary' : 'ghost'}`} onClick={openSelectDrawing}
+        title={selectArmed ? '请选择一段绘图；点空白或 Esc 返回看板' : penActive && drawTool === 'selection' ? '正在编辑绘图；再次点击或 Esc 返回看板' : '选择并精细设置已有绘图：描边、背景、透明度与图层'}>
         <Icon name="cursor" /> 选绘图
       </button>
       <button className={`btn ${penActive && drawTool === 'freedraw' ? 'primary' : 'ghost'}`} onClick={() => openDrawing('freedraw')}

@@ -1,7 +1,7 @@
 /**
  * [INPUT]: Excalidraw 的元素数组与 BinaryFiles 字典
- * [OUTPUT]: 提供已提交绘图的过滤/删除/沉浮/平移纯变换、可排空的串行提交队列、编辑器就绪与几何互斥纯门、
- *           资产快照与稳定签名、命中检测、双平面分流、精确包围盒与容器承载判定
+ * [OUTPUT]: 提供已提交绘图的过滤/删除/沉浮/平移纯变换、目标关系闭包/局部编辑事务/全量合并、
+ *           可排空的串行提交队列、opening request 身份门/隐藏 opening 取消/退出失败回执/closing 收口步、编辑器就绪与几何互斥纯门、资产快照/命中/双平面/包围盒与承载判定
  * [POS]: 绘图的纯数据内核；静态世界层、临时编辑器与普通态动作共用，全部可由 node:test 证伪
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -92,8 +92,151 @@ export function drawingSnapshot(elements = [], files = {}) {
   return { elements: committed, files: kept };
 }
 
+// ============================================================
+//  局部编辑事务：committed 世界持续在场，Excalidraw 只拿目标关系闭包。
+//  关系按无向图递归闭合：绑定宿主/文字、箭头端点、画框成员与嵌套分组必须同进同出。
+// ============================================================
+const elementReferenceIds = element => {
+  const ids = [];
+  if (typeof element?.containerId === 'string') ids.push(element.containerId);
+  if (typeof element?.frameId === 'string') ids.push(element.frameId);
+  for (const bound of element?.boundElements || []) if (typeof bound?.id === 'string') ids.push(bound.id);
+  for (const id of element?.boundElementIds || []) if (typeof id === 'string') ids.push(id);
+  for (const binding of [element?.startBinding, element?.endBinding]) {
+    if (typeof binding?.elementId === 'string') ids.push(binding.elementId);
+  }
+  return ids;
+};
+
+export function drawingTransactionClosure(elements = [], targetId) {
+  const committed = committedDrawingElements(elements);
+  if (!targetId || !committed.some(element => element.id === targetId)) return [];
+
+  const byId = new Map(committed.map(element => [element.id, element]));
+  const neighbors = new Map(committed.map(element => [element.id, new Set()]));
+  const groups = new Map();
+  for (const element of committed) {
+    for (const refId of elementReferenceIds(element)) {
+      if (!byId.has(refId)) continue;
+      neighbors.get(element.id).add(refId);
+      neighbors.get(refId).add(element.id);
+    }
+    for (const groupId of element.groupIds || []) {
+      if (typeof groupId !== 'string') continue;
+      if (!groups.has(groupId)) groups.set(groupId, []);
+      groups.get(groupId).push(element.id);
+    }
+  }
+  for (const members of groups.values()) {
+    for (const id of members) for (const peerId of members) if (peerId !== id) neighbors.get(id).add(peerId);
+  }
+
+  const included = new Set([targetId]);
+  const queue = [targetId];
+  while (queue.length) {
+    const id = queue.shift();
+    for (const neighborId of neighbors.get(id) || []) {
+      if (included.has(neighborId)) continue;
+      included.add(neighborId);
+      queue.push(neighborId);
+    }
+  }
+  return committed.filter(element => included.has(element.id));
+}
+
+export function createDrawingTransaction(snapshot = {}, targetId = null) {
+  const base = drawingSnapshot(snapshot.elements, snapshot.files);
+  if (!targetId) return {
+    kind: 'new', targetId: null, originalIds: [], anchorIndex: base.elements.length, elements: [], files: {},
+  };
+  const elements = drawingTransactionClosure(base.elements, targetId);
+  if (!elements.length) return null;
+  const originalIds = elements.map(element => element.id);
+  const originalSet = new Set(originalIds);
+  return {
+    kind: 'selection', targetId, originalIds,
+    anchorIndex: base.elements.findIndex(element => originalSet.has(element.id)),
+    ...drawingSnapshot(elements, base.files),
+  };
+}
+
+export function drawingTransactionVisibleElements(elements = [], originalIds = []) {
+  const hidden = new Set(originalIds);
+  return committedDrawingElements(elements).filter(element => !hidden.has(element.id));
+}
+
+// full merge 已成功持久化、但静态帧尚未交接时，事务必须接管本轮新生 ID。
+// 否则帧导出失败后继续编辑并删除新元素，重试会把已落入 base 的幽灵重新带回来。
+export function advanceDrawingTransaction(transaction, draftSnapshot = {}) {
+  if (!transaction) return null;
+  const draft = drawingSnapshot(draftSnapshot.elements, draftSnapshot.files);
+  const originalIds = [];
+  const seen = new Set();
+  for (const id of [...(transaction.originalIds || []), ...draft.elements.map(element => element.id)]) {
+    if (seen.has(id)) continue;
+    seen.add(id);
+    originalIds.push(id);
+  }
+  return { ...transaction, originalIds, elements: draft.elements, files: draft.files };
+}
+
+export function mergeDrawingTransaction(baseSnapshot = {}, transaction, draftSnapshot = {}) {
+  const base = drawingSnapshot(baseSnapshot.elements, baseSnapshot.files);
+  if (!transaction) return base;
+  const originalIds = new Set(transaction.originalIds || []);
+  const draftElements = committedDrawingElements(draftSnapshot.elements);
+  const draftIds = new Set(draftElements.map(element => element.id));
+  const unaffected = base.elements.filter(element => !originalIds.has(element.id) && !draftIds.has(element.id));
+  const anchorIndex = Math.max(0, Math.min(transaction.anchorIndex ?? base.elements.length, base.elements.length));
+  let insertionIndex = 0;
+  for (let index = 0; index < anchorIndex; index++) {
+    if (!originalIds.has(base.elements[index]?.id)) insertionIndex++;
+  }
+  const elements = [...unaffected];
+  elements.splice(insertionIndex, 0, ...draftElements);
+  return drawingSnapshot(elements, { ...base.files, ...(draftSnapshot.files || {}) });
+}
+
 // Excalidraw 的 fileId 对应不可变图片内容；ID 集变化即可判定资产仓需要更新。
 export const drawingFilesSignature = files => Object.keys(files || {}).sort().join('|');
+
+// opening 的布尔状态可被下一次请求重新置真；只有对象身份才能拒绝上一代迟到的 then/catch。
+export const drawingOpeningRequestCurrent = (currentRequest, request) => !!request && currentRequest === request;
+
+// 尚未显现、不可交互的 opening draft 没有用户改动主权：退出必须在 flush/submit 前直接取消。
+export function drawingExitAction({ opening = false, visible = false, hasOpeningResolver = false } = {}) {
+  if (!opening || visible) return { type: 'commit' };
+  return {
+    type: 'cancel-opening',
+    opening: false,
+    openingPromise: null,
+    openingResolver: null,
+    resolveOpeningWith: hasOpeningResolver ? false : null,
+  };
+}
+
+// 退出失败必须说真话：submit reject 才是未落盘；submit 已成功后只可能是静态画面交接失败。
+export function drawingExitFailureNotice({ persisted = false, errorMessage = '未知错误' } = {}) {
+  return persisted
+    ? {
+        stage: 'after-persist',
+        message: `绘图已保存，但画面交接失败；编辑现场已保留，可重试退出：${errorMessage}`,
+      }
+    : {
+        stage: 'before-persist',
+        message: `绘图未落盘，已保留编辑现场：${errorMessage}`,
+      };
+}
+
+// closing full SVG 已进入 DOM 后必须顺手收掉可能被 early-exit 覆盖的 opening 门。
+export function drawingClosingHandoffStep({ hasOpeningResolver = false } = {}) {
+  return {
+    opening: false,
+    openingPromise: null,
+    openingResolver: null,
+    resolveOpeningWith: hasOpeningResolver ? false : null,
+  };
+}
 
 // 几何副作用只有在开编辑、绘图编辑、布局事务三把锁都空闲时才允许发生。
 export const canvasGeometryAllowed = ({ opening = false, drawing = false, pending = false } = {}) =>
