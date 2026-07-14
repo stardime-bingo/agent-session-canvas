@@ -666,10 +666,13 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     setMenu(null);
   }, [onSelect, openDrawing, canvas?.drawing]);
 
-  // 悬停绘图描边带 → 指针光标（rAF 节流，元素只有几个，成本可忽略）
+  // 悬停绘图描边带 → 指针光标（rAF 节流，元素只有几个，成本可忽略）；移动中整体静默
   const overDrawRaf = useRef(0);
+  const moveEndT = useRef(null);
+  useEffect(() => () => clearTimeout(moveEndT.current), []);
   const onPaneMouseMove = useCallback(e => {
     if (penActiveRef.current || !drawRef.current) return;
+    if (rootRef.current?.classList.contains('canvas-moving')) return;   // 平移/缩放中内容扫过光标，悬停态不许进出闪烁
     const { clientX, clientY } = e;
     const blocked = !!e.target?.closest?.(HIT_BLOCK);
     const planes = e.target?.classList?.contains('react-flow__pane') ? 'all' : 'above';
@@ -813,16 +816,27 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       nodeTypes={nodeTypes}
       onNodesChange={onNodesChange}
       onEdgesChange={onEdgesChange}
-      onMoveStart={() => { setMenu(null); setEdgeTip(null); rootRef.current?.classList.add('canvas-moving'); }}
+      onMoveStart={() => {
+        setMenu(null); setEdgeTip(null);
+        clearTimeout(moveEndT.current); moveEndT.current = null;   // 新手势接管：撤销待决的落定
+        rootRef.current?.classList.add('canvas-moving');
+        rootRef.current?.classList.remove('over-drawing');          // 移动中悬停态整体静默，不许闪
+      }}
       onMove={(_, vp) => {
         syncHandleHitArea(rootRef.current, vp.zoom);
         if (syncingFromDraw.current || penActive) return;
         drawRef.current?.previewViewport(vp);   // 平移中只动 CSS 桥，零重绘
       }}
       onMoveEnd={(_, vp) => {
-        rootRef.current?.classList.remove('canvas-moving');
-        if (!penActive) drawRef.current?.syncViewport(vp);   // 松手落定
-        try { localStorage.vp = JSON.stringify(vp); } catch { /* 隐私模式等存不进就算了 */ }
+        // 滚轮缩放每一格都发一次 end——落定提交（Excalidraw 整场重绘+视口记忆）若逐格执行就是闪烁风暴。
+        // 收敛到手势尾部一次；期间 preview 双桥继续钉住浮沉两层，视觉无缝。
+        clearTimeout(moveEndT.current);
+        moveEndT.current = setTimeout(() => {
+          moveEndT.current = null;
+          rootRef.current?.classList.remove('canvas-moving');
+          if (!penActive) drawRef.current?.syncViewport(vp);   // 手势尾部落定
+          try { localStorage.vp = JSON.stringify(vp); } catch { /* 隐私模式等存不进就算了 */ }
+        }, 180);
       }}
       onInit={inst => {
         instRef.current = inst;
