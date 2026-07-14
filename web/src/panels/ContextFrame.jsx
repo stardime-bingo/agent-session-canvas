@@ -186,7 +186,7 @@ export default function ContextFrame({ frame, onClose, onOpenDetail }) {
               : <div className="tl head term-more" onClick={loadOlder}>↑ 上滑或点击加载更早</div>}
             {pages.map(p => <Page key={p.off} text={p.text} />)}
             {partial && <div className="tl head">【节选】daemon 重启后升级为可上滑翻页的完整历史</div>}
-            <div className="tl"><span className="term-cursor">▊</span></div>
+            <div className="tl"><span className="term-cursor" /></div>
           </>
         )}
       </div>
