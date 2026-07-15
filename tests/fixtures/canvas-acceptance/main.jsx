@@ -1,7 +1,7 @@
 /**
- * [INPUT]: 4518 query(size=300|800, autorun=0|1) 与真实 ReactFlow/InkWorldLayer
- * [OUTPUT]: 页面可读报告（含 plane/group 复用数）、data-acceptance-* 与 window.__CANVAS_ACCEPTANCE__ 探针
- * [POS]: 无 API/无持久化的画布性能验收宿主；只操作合成数据
+ * [INPUT]: 4518 query(mode=performance|interaction, size=300|800, autorun=0|1) 与真实画布组件
+ * [OUTPUT]: 性能报告/探针；interaction 动态加载真实 FlowCanvas 全内存验收页
+ * [POS]: 无 API/无持久化的画布验收路由；performance 首屏闭包不静态引入 FlowCanvas
  * [PROTOCOL]: 变更时更新此头部，然后检查 README/web/CLAUDE.md
  */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -15,6 +15,7 @@ import {
 
 const BOOT_STARTED = performance.now();
 const params = new URLSearchParams(location.search);
+const MODE = params.get('mode') === 'interaction' ? 'interaction' : 'performance';
 const SIZE = Number(params.get('size')) === 800 ? 800 : 300;
 const AUTORUN = params.get('autorun') !== '0';
 const LONG_TASKS = [];
@@ -257,6 +258,16 @@ function AcceptanceCanvas() {
   );
 }
 
-createRoot(document.getElementById('root')).render(
-  <ReactFlowProvider><AcceptanceCanvas /></ReactFlowProvider>,
-);
+if (MODE === 'interaction') {
+  import('./interaction-data.js')
+    .then(module => module.mountInteractionFixture(document.getElementById('root')))
+    .catch(error => {
+      PAGE_ERRORS.push(error.message);
+      document.documentElement.dataset.interactionStatus = 'error';
+      document.getElementById('root').textContent = `interaction fixture failed: ${error.message}`;
+    });
+} else {
+  createRoot(document.getElementById('root')).render(
+    <ReactFlowProvider><AcceptanceCanvas /></ReactFlowProvider>,
+  );
+}

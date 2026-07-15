@@ -6,7 +6,7 @@ import path from 'node:path';
 import {
   advanceDrawingTransaction, anchoredDrawingIds, autoSinkLargeNewDrawingDraft, canvasGeometryAllowed, canvasGeometryPreparation, committedDrawingElements, createDrawingArrangeUndoTicket, createDrawingCommitQueue, deleteDrawingElement, DRAWING_HIT_BLOCK, drawingBounds, drawingCameraExitPolicy, drawingCameraStep, drawingCompositionStep,
   createDrawingTransaction, drawingEditorReadyStep, drawingTransactionClosure, drawingTransactionVisibleElements,
-  drawingClosingHandoffStep, drawingExitAction, drawingExitFailureNotice, drawingFilesSignature, drawingFontSignature, drawingFontSignaturesEqual, drawingFontWorkRoute, drawingOpeningRequestCurrent, drawingPlaneDirtyPlan, drawingPlaneGroupPlan, drawingPlaneGroups, drawingPlaneSignature, drawingPlaneSignaturesEqual, drawingPlaneSettledInFlight, drawingPlaneWorkRoute, drawingRestoredWorldOverride, drawingSnapshot, drawingWorldSyncStep, hitDrawingElement, setDrawingElementPlane, splitDrawingPlanes,
+  drawingAutoExitGestureStep, drawingClosingHandoffStep, drawingExitAction, drawingExitFailureNotice, drawingFilesSignature, drawingFontSignature, drawingFontSignaturesEqual, drawingFontWorkRoute, drawingOpeningRequestCurrent, drawingPlaneDirtyPlan, drawingPlaneGroupPlan, drawingPlaneGroups, drawingPlaneSignature, drawingPlaneSignaturesEqual, drawingPlaneSettledInFlight, drawingPlaneWorkRoute, drawingRestoredWorldOverride, drawingSnapshot, drawingWorldSyncStep, hitDrawingElement, isLargeFilledDrawingElement, setDrawingElementPlane, splitDrawingPlanes,
   mergeDrawingTransaction, translateDrawingElements,
 } from '../web/src/canvas/drawing.js';
 import { loadDrawingFiles, normalizeDrawingFiles, saveDrawingFiles } from '../server/drawing-files.mjs';
@@ -219,6 +219,82 @@ test('自动沉底拒绝小边、透明填充、非区域类型、selection 与�
   const eligible = { elements: [rect('zone', 0, 0, 500, 400, { backgroundColor: '#fff' })], files: {} };
   assert.deepEqual(autoSinkLargeNewDrawingDraft(base, { ...tx, kind: 'selection' }, eligible).sunkIds, []);
   assert.deepEqual(autoSinkLargeNewDrawingDraft(base, { ...tx, originalIds: ['zone'] }, eligible).sunkIds, []);
+});
+
+test('大实心底板谓词与提交阈值共用一把尺，负尺寸按绝对值判定', () => {
+  assert.equal(isLargeFilledDrawingElement(rect('threshold', 0, 0, 400, 300, { backgroundColor: '#fff' })), true);
+  assert.equal(isLargeFilledDrawingElement({ ...rect('ellipse', 0, 0, -400, -300, { backgroundColor: '#fff' }), type: 'ellipse' }), true);
+  assert.equal(isLargeFilledDrawingElement({ ...rect('diamond', 0, 0, 600, 300, { backgroundColor: '#fff' }), type: 'diamond' }), true);
+  assert.equal(isLargeFilledDrawingElement(rect('narrow', 0, 0, 399, 400, { backgroundColor: '#fff' })), false);
+  assert.equal(isLargeFilledDrawingElement(rect('short', 0, 0, 500, 299, { backgroundColor: '#fff' })), false);
+  assert.equal(isLargeFilledDrawingElement(rect('hollow', 0, 0, 500, 400)), false);
+  assert.equal(isLargeFilledDrawingElement(rect('transparent', 0, 0, 500, 400, { backgroundColor: 'transparent' })), false);
+  assert.equal(isLargeFilledDrawingElement({ ...rect('line', 0, 0, 500, 400, { backgroundColor: '#fff' }), type: 'line' }), false);
+});
+
+const autoExitStep = (state, event) => drawingAutoExitGestureStep(state, event);
+
+test('自动退场手势：pointerup 早于最终 onChange，稳定两帧后只 signal 一次', () => {
+  const zone = rect('zone', 0, 0, 600, 400, { backgroundColor: '#fff' });
+  let result = autoExitStep(undefined, {
+    type: 'begin', enabled: true, token: 1, pointerId: 7, tool: 'rectangle',
+    beforeIds: [], elements: [], changeVersion: 0,
+  });
+  result = autoExitStep(result.state, { type: 'release', token: 1, pointerId: 7 });
+  assert.equal(result.action, 'schedule');
+  result = autoExitStep(result.state, { type: 'change', token: 1, elements: [zone], changeVersion: 1 });
+  result = autoExitStep(result.state, { type: 'frame', token: 1 });
+  assert.equal(result.action, 'wait');
+  result = autoExitStep(result.state, { type: 'frame', token: 1 });
+  assert.deepEqual({ action: result.action, elementId: result.elementId }, { action: 'signal', elementId: 'zone' });
+  assert.equal(autoExitStep(result.state, { type: 'frame', token: 1 }).action, 'none');
+});
+
+test('自动退场手势：最终 onChange 早于 pointerup 时走两帧兜底，版本变化重置稳定计数', () => {
+  const zone = rect('zone', 0, 0, 600, 400, { backgroundColor: '#fff' });
+  let result = autoExitStep(undefined, {
+    type: 'begin', enabled: true, token: 2, pointerId: 8, tool: 'rectangle',
+    beforeIds: [], elements: [], changeVersion: 0,
+  });
+  result = autoExitStep(result.state, { type: 'change', token: 2, elements: [zone], changeVersion: 1 });
+  result = autoExitStep(result.state, { type: 'release', token: 2, pointerId: 8 });
+  result = autoExitStep(result.state, { type: 'frame', token: 2 });
+  result = autoExitStep(result.state, { type: 'change', token: 2, elements: [{ ...zone, version: 2 }], changeVersion: 2 });
+  result = autoExitStep(result.state, { type: 'frame', token: 2 });
+  assert.equal(result.action, 'wait');
+  result = autoExitStep(result.state, { type: 'frame', token: 2 });
+  assert.equal(result.action, 'signal');
+});
+
+test('自动退场手势拒绝 selection/旧大形状/新小形状，cancel 与新 token 令迟到事件失效', () => {
+  const oldZone = rect('old-zone', 0, 0, 800, 600, { backgroundColor: '#fff' });
+  const small = rect('small', 0, 0, 200, 120, { backgroundColor: '#fff' });
+  assert.equal(autoExitStep(undefined, {
+    type: 'begin', enabled: false, token: 3, pointerId: 9, tool: 'rectangle', beforeIds: [], elements: [], changeVersion: 0,
+  }).action, 'none');
+  assert.equal(autoExitStep(undefined, {
+    type: 'begin', enabled: true, token: 3, pointerId: 9, tool: 'selection', beforeIds: [], elements: [], changeVersion: 0,
+  }).action, 'none');
+
+  let result = autoExitStep(undefined, {
+    type: 'begin', enabled: true, token: 4, pointerId: 10, tool: 'rectangle',
+    beforeIds: ['old-zone'], elements: [oldZone], changeVersion: 0,
+  });
+  result = autoExitStep(result.state, { type: 'change', token: 4, elements: [oldZone, small], changeVersion: 1 });
+  result = autoExitStep(result.state, { type: 'release', token: 4, pointerId: 10 });
+  result = autoExitStep(result.state, { type: 'frame', token: 4 });
+  result = autoExitStep(result.state, { type: 'frame', token: 4 });
+  assert.equal(result.action, 'complete');
+
+  result = autoExitStep(undefined, {
+    type: 'begin', enabled: true, token: 5, pointerId: 11, tool: 'rectangle', beforeIds: [], elements: [], changeVersion: 0,
+  });
+  result = autoExitStep(result.state, { type: 'cancel', token: 5 });
+  assert.equal(autoExitStep(result.state, { type: 'change', token: 5, elements: [oldZone], changeVersion: 2 }).action, 'none');
+  const next = autoExitStep(result.state, {
+    type: 'begin', enabled: true, token: 6, pointerId: 12, tool: 'ellipse', beforeIds: [], elements: [], changeVersion: 2,
+  });
+  assert.equal(autoExitStep(next.state, { type: 'release', token: 5, pointerId: 11 }).action, 'none');
 });
 
 test('common merge 首次自动沉底；rebase 后用户手动浮起必须保持选择', () => {
