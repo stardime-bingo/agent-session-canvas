@@ -1,13 +1,13 @@
 /**
- * [INPUT]: 已提交的 Excalidraw elements/BinaryFiles、事务 originalIds 与帧 revision，依赖 ViewportPortal/SVG 导出器
- * [OUTPUT]: 对外提供 InkWorldLayer；沉/浮连续 z-order SVG groups + frame font capsule 共用 RF 相机并按签名复用，在新帧已进 DOM 后回报 ready/metrics
- * [POS]: committed ink compositor；编辑时只 hole-punch 事务原件，所有 dirty/join groups 与字体胶囊就绪前保留旧完整帧
+ * [INPUT]: 已提交的 Excalidraw elements/BinaryFiles、事务 originalIds 与帧 revision，依赖 ViewportPortal/SVG 导出器；4518 可仅替换 exporter 做故障注入
+ * [OUTPUT]: 对外提供 InkWorldLayer；沉/浮连续 z-order SVG groups + frame font capsule 共用 RF 相机并按签名复用，在新帧已进 DOM 后回报 rendered world/metrics
+ * [POS]: committed ink compositor；编辑时只 hole-punch 事务原件，所有 dirty/join groups 与字体胶囊就绪前保留旧完整帧，失败有界重试
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { ViewportPortal } from '@xyflow/react';
 import {
-  drawingFontSignature, drawingFontWorkRoute, drawingPlaneGroupPlan, drawingPlaneGroups, drawingPlaneSettledInFlight,
+  drawingFontSignature, drawingFontWorkRoute, drawingFrameRetryDecision, drawingPlaneGroupPlan, drawingPlaneGroups, drawingPlaneSettledInFlight,
   drawingTransactionVisibleElements, splitDrawingPlanes,
 } from './drawing.js';
 
@@ -15,6 +15,14 @@ const EXPORT_PADDING = 8;
 const EMPTY_ELEMENTS = Object.freeze([]);
 const EMPTY_FILES = Object.freeze({});
 const PLANE_NAMES = Object.freeze(['below', 'above']);
+let excalidrawModulePromise = null;
+const loadExcalidraw = () => {
+  excalidrawModulePromise ||= import('@excalidraw/excalidraw').catch(error => {
+    excalidrawModulePromise = null;
+    throw error;
+  });
+  return excalidrawModulePromise;
+};
 
 function SvgGroup({ name, index, snapshot }) {
   const hostRef = useCallback(host => {
@@ -34,8 +42,9 @@ function SvgGroup({ name, index, snapshot }) {
   );
 }
 
-export default function InkWorldLayer({ elements, files, excludedIds = EMPTY_ELEMENTS, revision = 0, onSnapshotReady, onSnapshotError }) {
-  const [snapshot, setSnapshot] = useState({ below: [], above: [], fonts: '', revision: -1, metrics: null });
+export default function InkWorldLayer({ elements, files, excludedIds = EMPTY_ELEMENTS, revision = 0, onSnapshotReady, onSnapshotError, exporterProbe }) {
+  const [snapshot, setSnapshot] = useState({ below: [], above: [], fonts: '', revision: -1, metrics: null, world: null });
+  const [retryRequest, setRetryRequest] = useState({ revision: -1, attempt: 1 });
   const readyRef = useRef({ below: [], above: [] });
   const inFlightRef = useRef({ below: [], above: [] });
   const fontReadyRef = useRef({ signature: null, css: '' });
@@ -45,11 +54,13 @@ export default function InkWorldLayer({ elements, files, excludedIds = EMPTY_ELE
 
   // ref callback 已把整帧 groups 放进 DOM；layout effect 再通知父层同步显隐 live draft，首 paint 前闭合交接。
   useLayoutEffect(() => {
-    if (snapshot.revision === revision) onSnapshotReady?.(revision, snapshot.metrics);
+    if (snapshot.revision === revision) onSnapshotReady?.(revision, snapshot.metrics, snapshot.world);
   }, [snapshot, revision, onSnapshotReady]);
 
   useEffect(() => {
     let current = true;
+    let retryTimer = null;
+    const attempt = retryRequest.revision === revision ? retryRequest.attempt : 1;
     const started = performance.now();
     const visible = drawingTransactionVisibleElements(committedElements, excludedIds);
     const planes = splitDrawingPlanes(visible);
@@ -84,21 +95,27 @@ export default function InkWorldLayer({ elements, files, excludedIds = EMPTY_ELE
     const reused = PLANE_NAMES.filter(name => planeRoute(name) === 'ready');
     const cleared = PLANE_NAMES.filter(name => planeRoute(name) === 'clear');
 
-    const exportSvg = (exportElements, mod, skipInliningFonts) => mod.exportToSvg({
-      elements: exportElements,
-      files: committedFiles,
-      exportPadding: EXPORT_PADDING,
-      skipInliningFonts,
-      appState: {
-        exportBackground: false,
-        exportEmbedScene: false,
-        viewBackgroundColor: 'transparent',
-      },
-    });
+    const exportSvg = (exportElements, mod, skipInliningFonts, kind) => {
+      const options = {
+        elements: exportElements,
+        files: committedFiles,
+        exportPadding: EXPORT_PADDING,
+        skipInliningFonts,
+        appState: {
+          exportBackground: false,
+          exportEmbedScene: false,
+          viewBackgroundColor: 'transparent',
+        },
+      };
+      const delegate = nextOptions => mod.exportToSvg(nextOptions);
+      return exporterProbe?.exportToSvg
+        ? exporterProbe.exportToSvg({ revision, attempt, kind, elements: exportElements, options, delegate })
+        : delegate(options);
+    };
 
     const renderGroup = async (group, mod) => {
       const [minX, minY] = mod.getCommonBounds(group.elements);
-      const svg = await exportSvg(group.elements, mod, true);
+      const svg = await exportSvg(group.elements, mod, true, 'group');
       svg.setAttribute('focusable', 'false');
       svg.style.display = 'block';
       svg.style.pointerEvents = 'none';
@@ -106,17 +123,15 @@ export default function InkWorldLayer({ elements, files, excludedIds = EMPTY_ELE
     };
 
     const renderFontCapsule = async mod => {
-      const svg = await exportSvg(textElements, mod, false);
+      const svg = await exportSvg(textElements, mod, false, 'font');
       return [...svg.querySelectorAll('style')]
         .filter(style => style.classList.contains('style-fonts') || style.textContent.includes('@font-face'))
         .map(style => style.textContent)
         .join('\n');
     };
 
-    let modulePromise = null;
     const startExport = (name, group) => {
-      modulePromise ||= import('@excalidraw/excalidraw');
-      const promise = modulePromise.then(mod => renderGroup(group, mod));
+      const promise = loadExcalidraw().then(mod => renderGroup(group, mod));
       const planeInFlight = [...inFlightRef.current[name]];
       planeInFlight[group.index] = { signature: group.signature, promise };
       inFlightRef.current = {
@@ -136,8 +151,7 @@ export default function InkWorldLayer({ elements, files, excludedIds = EMPTY_ELE
     };
 
     const startFontExport = () => {
-      modulePromise ||= import('@excalidraw/excalidraw');
-      const promise = modulePromise.then(renderFontCapsule);
+      const promise = loadExcalidraw().then(renderFontCapsule);
       fontInFlightRef.current = { signature: fontSignature, promise };
       const settle = () => {
         fontInFlightRef.current = drawingPlaneSettledInFlight(fontInFlightRef.current, promise);
@@ -168,6 +182,7 @@ export default function InkWorldLayer({ elements, files, excludedIds = EMPTY_ELE
         above: rendered.above,
         fonts: fontCss,
         revision,
+        world: { elements: visible, files: committedFiles, revision },
         metrics: {
           exported, joined, reused, cleared, groupCounts,
           font: {
@@ -175,6 +190,7 @@ export default function InkWorldLayer({ elements, files, excludedIds = EMPTY_ELE
             reused: Number(fontRoute === 'ready'), cleared: Number(fontRoute === 'clear'),
           },
           duration: performance.now() - started,
+          attempt,
         },
       });
     };
@@ -186,15 +202,29 @@ export default function InkWorldLayer({ elements, files, excludedIds = EMPTY_ELE
     ])
       .then(([entries, fontCss]) => commitFrame(Object.fromEntries(entries), fontCss))
       .catch(error => {
-        if (current) onSnapshotError?.(revision, error);   // 保留上一帧，不用半份新图覆盖
+        if (!current) return;
+        const decision = drawingFrameRetryDecision(attempt);
+        onSnapshotError?.(revision, error, {
+          attempt,
+          willRetry: decision.retry,
+          final: !decision.retry,
+        });   // 保留上一帧，不用半份新图覆盖
+        if (decision.retry) {
+          retryTimer = setTimeout(() => {
+            if (current) setRetryRequest({ revision, attempt: decision.nextAttempt });
+          }, decision.delayMs);
+        }
       });
 
-    return () => { current = false; };
-  }, [committedElements, committedFiles, excludedIds, revision, onSnapshotError]);
+    return () => {
+      current = false;
+      clearTimeout(retryTimer);
+    };
+  }, [committedElements, committedFiles, excludedIds, revision, retryRequest, onSnapshotError, exporterProbe]);
 
   return (
     <ViewportPortal>
-      <div className="ink-world">
+      <div className="ink-world" data-rendered-revision={snapshot.revision}>
         {snapshot.fonts ? <style data-ink-fonts="true">{snapshot.fonts}</style> : null}
         {snapshot.below.map((group, index) => <SvgGroup key={`below-${index}`} name="below" index={index} snapshot={group} />)}
         {snapshot.above.map((group, index) => <SvgGroup key={`above-${index}`} name="above" index={index} snapshot={group} />)}

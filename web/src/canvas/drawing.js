@@ -1,7 +1,7 @@
 /**
  * [INPUT]: Excalidraw 的元素数组与 BinaryFiles 字典
  * [OUTPUT]: 提供已提交绘图的过滤/删除/沉浮/平移纯变换、整理的单步墨迹撤销票据、唯一功能件命中排除表、首次新建大底板共享判定/落笔退场状态机/自动沉层、目标关系闭包/局部编辑事务/全量合并、
- *           可稳定排空且按成功代际守卫撤销的串行提交队列、屏幕override/外部props/队列三真相同步门、opening request 身份门/相机事务与退出策略/IME 周期状态机/隐藏 opening 取消/退出回执/closing 收口步、编辑器就绪与几何互斥纯门、资产快照/命中/双平面连续 z-order 分组签名与 ready/in-flight 工作路由/包围盒与承载判定
+ *           可稳定排空且按成功代际守卫撤销的串行提交队列、屏幕override/外部props/队列三真相同步门、opening request 身份门/相机事务与退出策略/IME 周期状态机/隐藏 opening 取消/退出回执/closing 收口步、编辑器就绪与几何互斥纯门、资产快照/命中/已 paint 帧真相与有界重试、双平面连续 z-order 分组签名与 ready/in-flight 工作路由/包围盒与承载判定
  * [POS]: 绘图的纯数据内核；静态世界层、临时编辑器与普通态动作共用，全部可由 node:test 证伪
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -147,6 +147,91 @@ export function drawingPlaneGroupPlan(readyGroups = [], inFlightGroups = [], nex
 export const drawingPlaneSettledInFlight = (current, settledPromise) => (
   current?.promise === settledPromise ? null : current
 );
+
+// persisted props 在 override 期只是 pending input；只有真正成为 active world 时才分配
+// 大于当前输入的 revision，避免 closing 撤桥后回落到较旧的预分配世界。
+const EMPTY_DRAWING_EXCLUDED_IDS = Object.freeze([]);
+export function drawingWorldInputStep({
+  persistedWorld = null,
+  activeWorld = null,
+  override = null,
+  elements,
+  files,
+  excludedIds = EMPTY_DRAWING_EXCLUDED_IDS,
+  revision = 0,
+} = {}) {
+  let nextPersisted = persistedWorld;
+  if (!nextPersisted
+    || nextPersisted.elements !== elements
+    || nextPersisted.files !== files
+    || nextPersisted.excludedIds !== excludedIds) {
+    nextPersisted = { elements, files, excludedIds, revision: null };
+  }
+  let nextRevision = Math.max(
+    0,
+    Number.isFinite(revision) ? revision : 0,
+    Number.isFinite(activeWorld?.revision) ? activeWorld.revision : 0,
+    Number.isFinite(override?.revision) ? override.revision : 0,
+  );
+  if (override) return { persistedWorld: nextPersisted, world: override, revision: nextRevision };
+  if (activeWorld !== nextPersisted || !Number.isFinite(nextPersisted.revision)) {
+    nextPersisted = { ...nextPersisted, revision: ++nextRevision };
+  }
+  return { persistedWorld: nextPersisted, world: nextPersisted, revision: nextRevision };
+}
+
+// 像素、命中与小地图共用的唯一帧真相：只有当前 requested revision 的 DOM-ready
+// 事件能换帧；cold 不暴露命中，warm 失败则继续服务上一已显示帧。
+const EMPTY_DRAWING_FRAME = Object.freeze({
+  requestedRevision: -1,
+  renderedWorld: null,
+  phase: 'idle',
+  attempt: 0,
+  error: null,
+});
+
+export function drawingFrameTruthStep(state = EMPTY_DRAWING_FRAME, event = {}) {
+  if (event.type === 'request') {
+    if (!Number.isFinite(event.revision) || event.revision <= state.requestedRevision) return state;
+    return {
+      ...state,
+      requestedRevision: event.revision,
+      phase: state.renderedWorld ? 'updating' : 'cold',
+      attempt: 0,
+      error: null,
+    };
+  }
+  if (event.revision !== state.requestedRevision) return state;
+  if (event.type === 'ready') {
+    if (!event.world || event.world.revision !== event.revision) return state;
+    return {
+      requestedRevision: state.requestedRevision,
+      renderedWorld: event.world,
+      phase: 'ready',
+      attempt: event.attempt || 1,
+      error: null,
+    };
+  }
+  if (event.type === 'error') {
+    return {
+      ...state,
+      phase: event.willRetry ? 'retrying' : (state.renderedWorld ? 'stale' : 'failed'),
+      attempt: event.attempt || state.attempt,
+      error: event.error || null,
+    };
+  }
+  return state;
+}
+
+export const drawingFrameHitElements = frame => frame?.renderedWorld?.elements || [];
+
+export const DRAWING_FRAME_MAX_ATTEMPTS = 3;
+export function drawingFrameRetryDecision(failedAttempt, maxAttempts = DRAWING_FRAME_MAX_ATTEMPTS) {
+  const max = Math.max(1, Math.trunc(maxAttempts) || DRAWING_FRAME_MAX_ATTEMPTS);
+  const attempt = Math.min(max, Math.max(1, Math.trunc(failedAttempt) || 1));
+  if (attempt >= max) return { retry: false, nextAttempt: max, delayMs: 0 };
+  return { retry: true, nextAttempt: attempt + 1, delayMs: 40 * (2 ** (attempt - 1)) };
+}
 
 // 点击/右键/悬停共用的唯一功能件边界：功能件永远优先于覆盖它的墨迹。
 export const DRAWING_HIT_BLOCK = '.container-drag-handle, .react-flow__resize-control, .react-flow__handle, .nodrag, button, input, textarea, [contenteditable]';

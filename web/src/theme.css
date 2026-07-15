@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 独立样式文件，依赖系统 Inter/PingFang 字体栈
- * [OUTPUT]: 对外提供全局 CSS 变量、基础排版/面板/按钮、绘图 armed/opening/hole 帧交接视觉、缩放感知连接点与终端框/toast 皮肤
+ * [OUTPUT]: 对外提供全局 CSS 变量、基础排版/面板/按钮、绘图 armed/opening/hole 帧交接与 cold/retrying/stale 视觉、缩放感知连接点与终端框/toast 皮肤
  * [POS]: web 的视觉唯一真相源——浅灰画布 + 纯白卡片 + Dify 蓝锚点 + 柔和阴影，动画只走合成器
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -556,6 +556,16 @@ input.inline-edit {
 }
 .ink-world-below { z-index: -1; }
 .ink-world-above { z-index: 1000; }
+.ink-frame-status {
+  position: absolute; left: 50%; top: 72px; z-index: 6; pointer-events: none;
+  transform: translateX(-50%); padding: 7px 12px; border-radius: 999px;
+  border: 1px solid var(--line); background: color-mix(in srgb, var(--bg-panel) 94%, transparent);
+  color: var(--ink-dim); box-shadow: var(--shadow); font-size: 11px; line-height: 1;
+  animation: fade-in 120ms var(--ease-panel);
+}
+.ink-frame-status.retrying { color: #b54708; border-color: #fdb022; }
+.ink-frame-status.stale,
+.ink-frame-status.failed { color: #b42318; border-color: #fda29b; }
 
 /* opening 时先在幕后水合局部 draft；hole SVG 进入 DOM 的 layout effect 才同步显现，杜绝双影/白洞。 */
 .draw-pending { opacity: 0; pointer-events: none !important; }
