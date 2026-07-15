@@ -6,10 +6,11 @@ import path from 'node:path';
 import {
   advanceDrawingTransaction, anchoredDrawingIds, autoSinkLargeNewDrawingDraft, canvasGeometryAllowed, canvasGeometryPreparation, committedDrawingElements, createDrawingArrangeUndoTicket, createDrawingCommitQueue, deleteDrawingElement, DRAWING_HIT_BLOCK, drawingBounds, drawingCameraExitPolicy, drawingCameraStep, drawingCompositionStep,
   createDrawingTransaction, drawingEditorReadyStep, drawingTransactionClosure, drawingTransactionVisibleElements,
-  drawingClosingHandoffStep, drawingExitAction, drawingExitFailureNotice, drawingFilesSignature, drawingOpeningRequestCurrent, drawingRestoredWorldOverride, drawingSnapshot, drawingWorldSyncStep, hitDrawingElement, setDrawingElementPlane, splitDrawingPlanes,
+  drawingClosingHandoffStep, drawingExitAction, drawingExitFailureNotice, drawingFilesSignature, drawingFontSignature, drawingFontSignaturesEqual, drawingFontWorkRoute, drawingOpeningRequestCurrent, drawingPlaneDirtyPlan, drawingPlaneGroupPlan, drawingPlaneGroups, drawingPlaneSignature, drawingPlaneSignaturesEqual, drawingPlaneSettledInFlight, drawingPlaneWorkRoute, drawingRestoredWorldOverride, drawingSnapshot, drawingWorldSyncStep, hitDrawingElement, setDrawingElementPlane, splitDrawingPlanes,
   mergeDrawingTransaction, translateDrawingElements,
 } from '../web/src/canvas/drawing.js';
 import { loadDrawingFiles, normalizeDrawingFiles, saveDrawingFiles } from '../server/drawing-files.mjs';
+import { createCanvasAcceptanceElements, mutateBelowPlane } from './fixtures/canvas-acceptance/fixture-data.js';
 
 const image = id => ({ id: `element-${id}`, type: 'image', fileId: id });
 const binary = id => ({ id, mimeType: 'image/png', dataURL: 'data:image/png;base64,c3ludGhldGlj', created: 1 });
@@ -593,6 +594,215 @@ test('双平面分流：customData.below 沉层与浮层各归各，顺序保留
   assert.deepEqual(below.map(e => e.id), ['zone', 'zone2']);
   assert.deepEqual(above.map(e => e.id), ['note1', 'note2']);
   assert.deepEqual(splitDrawingPlanes([]).below, []);
+});
+
+test('plane 签名跨持久化深克隆复用，仍辨认本地几何、Excal 版本与绘制顺序', () => {
+  const first = rect('first', 0, 0, 100, 80, { version: 1, versionNonce: 11, index: 'a0' });
+  const second = rect('second', 120, 0, 100, 80, { version: 1, versionNonce: 12, index: 'a1' });
+  const baseline = drawingPlaneSignature([first, second], {});
+
+  assert.equal(
+    drawingPlaneSignaturesEqual(baseline, drawingPlaneSignature([first, second], {})),
+    true,
+    '只换外层数组不得误判为绘图变更',
+  );
+  assert.equal(
+    drawingPlaneSignaturesEqual(baseline, drawingPlaneSignature([{ ...first }, { ...second }], {})),
+    true,
+    'API/JSON 回读的同视觉深克隆不得让两平面全脏',
+  );
+  const locallyMoved = { ...first, x: 5 };
+  assert.equal(
+    drawingPlaneSignaturesEqual(baseline, drawingPlaneSignature([locallyMoved, second], {})),
+    false,
+    '应用内同 version 的不可变几何变换也必须变脏',
+  );
+
+  first.x = 9;
+  first.version = 2;
+  assert.equal(
+    drawingPlaneSignaturesEqual(baseline, drawingPlaneSignature([first, second], {})),
+    false,
+    'Excal 对同一对象原地推进 version 不得漏掉',
+  );
+  assert.equal(
+    drawingPlaneSignaturesEqual(baseline, drawingPlaneSignature([second, first], {})),
+    false,
+    '顺序与 index 是 z-order 真相的一部分',
+  );
+});
+
+test('plane dirty plan 只脏化层级或 hole 真正影响的平面', () => {
+  const zone = rect('zone', 0, 0, 500, 400, { customData: { below: true }, version: 1 });
+  const note = rect('note', 20, 20, 80, 60, { version: 1 });
+  const beforePlanes = splitDrawingPlanes([zone, note]);
+  const before = {
+    below: drawingPlaneSignature(beforePlanes.below, {}),
+    above: drawingPlaneSignature(beforePlanes.above, {}),
+  };
+  const sameRevisionContent = {
+    below: drawingPlaneSignature([...beforePlanes.below], {}),
+    above: drawingPlaneSignature([...beforePlanes.above], {}),
+  };
+  assert.deepEqual(drawingPlaneDirtyPlan(before, sameRevisionContent), { below: false, above: false, count: 0 });
+
+  const visible = drawingTransactionVisibleElements([zone, note], ['note']);
+  const holedPlanes = splitDrawingPlanes(visible);
+  const holed = {
+    below: drawingPlaneSignature(holedPlanes.below, {}),
+    above: drawingPlaneSignature(holedPlanes.above, {}),
+  };
+  assert.deepEqual(drawingPlaneDirtyPlan(before, holed), { below: false, above: true, count: 1 });
+
+  const floatedPlanes = splitDrawingPlanes(setDrawingElementPlane([zone, note], 'zone', false));
+  const floated = {
+    below: drawingPlaneSignature(floatedPlanes.below, {}),
+    above: drawingPlaneSignature(floatedPlanes.above, {}),
+  };
+  assert.deepEqual(drawingPlaneDirtyPlan(before, floated), { below: true, above: true, count: 2 });
+});
+
+test('plane 工作路由优先复用 ready，其次 join 同签名在途，旧 promise 不清新世代', () => {
+  const ready = drawingPlaneSignature([rect('ready', 0, 0, 10, 10, { version: 1 })], {});
+  const pending = drawingPlaneSignature([rect('pending', 0, 0, 10, 10, { version: 1 })], {});
+  const changed = drawingPlaneSignature([rect('changed', 0, 0, 10, 10, { version: 1 })], {});
+
+  assert.equal(drawingPlaneWorkRoute(ready, pending, ready, true), 'ready');
+  assert.equal(drawingPlaneWorkRoute(ready, pending, pending, true), 'join');
+  assert.equal(drawingPlaneWorkRoute(ready, pending, changed, true), 'export');
+  assert.equal(drawingPlaneWorkRoute(ready, pending, drawingPlaneSignature([], {}), false), 'clear');
+
+  const oldPromise = Promise.resolve('old');
+  const newPromise = Promise.resolve('new');
+  const newer = { signature: changed, promise: newPromise };
+  assert.equal(drawingPlaneSettledInFlight(newer, oldPromise), newer, '旧导出迟到不得清掉新世代');
+  assert.equal(drawingPlaneSettledInFlight(newer, newPromise), null, '只有当前 promise 可清自己');
+});
+
+test('连续 z-order group 严格按边界切分并保留元素顺序，空面不制造占位组', () => {
+  const elements = ['a', 'b', 'c', 'd', 'e'].map((id, index) => rect(id, index * 10, 0, 8, 8));
+  const groups = drawingPlaneGroups(elements, {}, 2);
+  assert.deepEqual(groups.map(group => group.elements.map(element => element.id)), [['a', 'b'], ['c', 'd'], ['e']]);
+  assert.deepEqual(groups.map(group => group.index), [0, 1, 2]);
+  assert.deepEqual(drawingPlaneGroups([], {}, 2), []);
+  assert.deepEqual(drawingPlaneGroupPlan([], [], []), []);
+});
+
+test('frame font signature 合并多字体字符集且与文字顺序/重复无关，纯几何不入签名', () => {
+  const text = (id, fontFamily, value) => ({ id, type: 'text', fontFamily, text: value, originalText: value });
+  const first = drawingFontSignature([
+    text('early', 1, '早期龘'), rect('shape', 0, 0, 8, 8), text('later', 5, '自动化'), text('dup', 1, '早早'),
+  ]);
+  const reordered = drawingFontSignature([text('later', 5, '化自动'), text('early', 1, '龘期早')]);
+  assert.deepEqual(first, reordered);
+  assert.deepEqual(first.map(item => item.fontFamily), ['1', '5']);
+  assert.equal(first[0].glyphs.includes('龘'), true);
+  assert.deepEqual(drawingFontSignature([rect('shape', 0, 0, 8, 8)]), []);
+});
+
+test('早期独有字符或字体改变会脏化 capsule；纯几何变化继续 ready，同签名在途 join', () => {
+  const text = (fontFamily, value) => ({ id: 'early', type: 'text', fontFamily, text: value, originalText: value });
+  const ready = drawingFontSignature([text(1, '早期龘')]);
+  const changedGlyph = drawingFontSignature([text(1, '早期靐')]);
+  const changedFont = drawingFontSignature([text(5, '早期龘')]);
+  assert.equal(drawingFontSignaturesEqual(ready, drawingFontSignature([text(1, '期早龘')])), true);
+  assert.equal(drawingFontSignaturesEqual(ready, changedGlyph), false);
+  assert.equal(drawingFontSignaturesEqual(ready, changedFont), false);
+  assert.equal(drawingFontWorkRoute(ready, changedGlyph, ready, true), 'ready');
+  assert.equal(drawingFontWorkRoute(ready, changedGlyph, changedGlyph, true), 'join');
+  assert.equal(drawingFontWorkRoute(ready, changedGlyph, changedFont, true), 'export');
+  assert.equal(drawingFontWorkRoute(ready, null, [], false), 'clear');
+});
+
+test('group plan 单元素变更只脏一组，未变组继续 ready 复用', () => {
+  const elements = ['a', 'b', 'c', 'd', 'e', 'f'].map((id, index) => rect(id, index * 10, 0, 8, 8));
+  const baseline = drawingPlaneGroups(elements, {}, 2);
+  const ready = baseline.map(group => ({ signature: group.signature, snapshot: { id: group.index } }));
+  const moved = elements.map(element => element.id === 'c' ? { ...element, x: element.x + 1 } : element);
+  const plan = drawingPlaneGroupPlan(ready, [], drawingPlaneGroups(moved, {}, 2));
+  assert.deepEqual(plan.map(group => group.route), ['ready', 'export', 'ready']);
+});
+
+test('跨 group 边界重排让相邻两组失效，后续连续顺序仍可复用', () => {
+  const elements = ['a', 'b', 'c', 'd', 'e', 'f'].map((id, index) => rect(id, index * 10, 0, 8, 8));
+  const baseline = drawingPlaneGroups(elements, {}, 2);
+  const ready = baseline.map(group => ({ signature: group.signature, snapshot: { id: group.index } }));
+  const reordered = [elements[0], elements[2], elements[1], ...elements.slice(3)];
+  const plan = drawingPlaneGroupPlan(ready, [], drawingPlaneGroups(reordered, {}, 2));
+  assert.deepEqual(plan.map(group => group.route), ['export', 'export', 'ready']);
+  assert.deepEqual(plan.flatMap(group => group.elements.map(element => element.id)), ['a', 'c', 'b', 'd', 'e', 'f']);
+});
+
+test('多组同签名在途逐组 join；ready 仍优先于同槽在途', () => {
+  const elements = ['a', 'b', 'c', 'd'].map((id, index) => rect(id, index * 10, 0, 8, 8));
+  const groups = drawingPlaneGroups(elements, {}, 2);
+  const inFlight = groups.map(group => ({ signature: group.signature, promise: Promise.resolve(group.index) }));
+  assert.deepEqual(drawingPlaneGroupPlan([], inFlight, groups).map(group => group.route), ['join', 'join']);
+  const ready = [{ signature: groups[0].signature, snapshot: { id: 0 } }];
+  assert.deepEqual(drawingPlaneGroupPlan(ready, inFlight, groups).map(group => group.route), ['ready', 'join']);
+});
+
+test('图片签名只跟踪本 plane 引用的资产，同内容换代复用而标量变更变脏', () => {
+  const photo = { ...image('photo'), x: 0, y: 0, width: 100, height: 80, customData: { below: true }, version: 1 };
+  const note = rect('note', 120, 0, 80, 60, { version: 1 });
+  const photoFile = binary('photo');
+  const unrelated = binary('unrelated');
+  const before = {
+    below: drawingPlaneSignature([photo], { photo: photoFile, unrelated }),
+    above: drawingPlaneSignature([note], { photo: photoFile, unrelated }),
+  };
+  const unrelatedReplacement = { ...unrelated, created: 2 };
+  const unchanged = {
+    below: drawingPlaneSignature([photo], { photo: photoFile, unrelated: unrelatedReplacement }),
+    above: drawingPlaneSignature([note], { photo: photoFile, unrelated: unrelatedReplacement }),
+  };
+  assert.deepEqual(drawingPlaneDirtyPlan(before, unchanged), { below: false, above: false, count: 0 });
+
+  photoFile.dataURL = 'data:image/png;base64,bmV3';
+  photoFile.lastRetrieved = 3;
+  const mutated = {
+    below: drawingPlaneSignature([photo], { photo: photoFile, unrelated: unrelatedReplacement }),
+    above: drawingPlaneSignature([note], { photo: photoFile, unrelated: unrelatedReplacement }),
+  };
+  assert.deepEqual(drawingPlaneDirtyPlan(before, mutated), { below: true, above: false, count: 1 });
+
+  const replaced = {
+    below: drawingPlaneSignature([photo], { photo: { ...photoFile }, unrelated: unrelatedReplacement }),
+    above: mutated.above,
+  };
+  assert.deepEqual(drawingPlaneDirtyPlan(mutated, replaced), { below: false, above: false, count: 0 });
+
+  const changedReplacement = {
+    below: drawingPlaneSignature([photo], { photo: { ...photoFile, created: photoFile.created + 1 }, unrelated: unrelatedReplacement }),
+    above: mutated.above,
+  };
+  assert.deepEqual(drawingPlaneDirtyPlan(mutated, changedReplacement), { below: true, above: false, count: 1 });
+});
+
+test('300/800 元素签名成本受控，单平面变更不连坐另一面', () => {
+  const run = (size, budgetMs) => {
+    const elements = createCanvasAcceptanceElements(size);
+    const planes = splitDrawingPlanes(elements);
+    assert.deepEqual([planes.below.length, planes.above.length], [size / 2, size / 2]);
+    const started = performance.now();
+    const before = {
+      below: drawingPlaneSignature(planes.below, {}),
+      above: drawingPlaneSignature(planes.above, {}),
+    };
+    const elapsed = performance.now() - started;
+    assert.ok(elapsed <= budgetMs, `${size} 元素签名 ${elapsed.toFixed(2)}ms 超过 ${budgetMs}ms 红线`);
+
+    const moved = mutateBelowPlane(elements, 1);
+    const movedPlanes = splitDrawingPlanes(moved);
+    const after = {
+      below: drawingPlaneSignature(movedPlanes.below, {}),
+      above: drawingPlaneSignature(movedPlanes.above, {}),
+    };
+    assert.deepEqual(drawingPlaneDirtyPlan(before, after), { below: true, above: false, count: 1 });
+  };
+
+  run(300, 50);
+  run(800, 100);
 });
 
 test('已提交快照过滤墓碑，删除宿主时连带绑定文字', () => {
