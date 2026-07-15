@@ -1,6 +1,6 @@
 /**
  * [INPUT]: Excalidraw 的元素数组与 BinaryFiles 字典
- * [OUTPUT]: 提供已提交绘图的过滤/删除/沉浮/平移纯变换、整理的单步墨迹撤销票据、唯一功能件命中排除表、首次新建大底板自动沉层、目标关系闭包/局部编辑事务/全量合并、
+ * [OUTPUT]: 提供已提交绘图的过滤/删除/沉浮/平移纯变换、整理的单步墨迹撤销票据、唯一功能件命中排除表、首次新建大底板共享判定/落笔退场状态机/自动沉层、目标关系闭包/局部编辑事务/全量合并、
  *           可稳定排空且按成功代际守卫撤销的串行提交队列、屏幕override/外部props/队列三真相同步门、opening request 身份门/相机事务与退出策略/IME 周期状态机/隐藏 opening 取消/退出回执/closing 收口步、编辑器就绪与几何互斥纯门、资产快照/命中/双平面连续 z-order 分组签名与 ready/in-flight 工作路由/包围盒与承载判定
  * [POS]: 绘图的纯数据内核；静态世界层、临时编辑器与普通态动作共用，全部可由 node:test 证伪
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -331,6 +331,16 @@ const AUTO_BELOW_MIN_WIDTH = 400;
 const AUTO_BELOW_MIN_HEIGHT = 300;
 const AUTO_BELOW_MIN_AREA = 120000;
 
+export function isLargeFilledDrawingElement(element) {
+  if (!AUTO_BELOW_TYPES.has(element?.type)) return false;
+  if (!element.backgroundColor || element.backgroundColor === 'transparent') return false;
+  const width = Math.abs(Number(element.width) || 0);
+  const height = Math.abs(Number(element.height) || 0);
+  return width >= AUTO_BELOW_MIN_WIDTH
+    && height >= AUTO_BELOW_MIN_HEIGHT
+    && width * height >= AUTO_BELOW_MIN_AREA;
+}
+
 // 只在第一次 new 事务提交时识别“大块实心底板”。一旦事务 rebase，用户后续手动浮起就是新真相。
 export function autoSinkLargeNewDrawingDraft(baseSnapshot = {}, transaction, draftSnapshot = {}) {
   const snapshot = drawingSnapshot(draftSnapshot.elements, draftSnapshot.files);
@@ -338,11 +348,7 @@ export function autoSinkLargeNewDrawingDraft(baseSnapshot = {}, transaction, dra
   const baseIds = new Set(committedDrawingElements(baseSnapshot.elements).map(element => element.id));
   const sunkIds = [];
   for (const element of snapshot.elements) {
-    const width = Math.abs(Number(element.width) || 0);
-    const height = Math.abs(Number(element.height) || 0);
-    if (baseIds.has(element.id) || element.customData?.below || !AUTO_BELOW_TYPES.has(element.type)) continue;
-    if (!element.backgroundColor || element.backgroundColor === 'transparent') continue;
-    if (width < AUTO_BELOW_MIN_WIDTH || height < AUTO_BELOW_MIN_HEIGHT || width * height < AUTO_BELOW_MIN_AREA) continue;
+    if (baseIds.has(element.id) || element.customData?.below || !isLargeFilledDrawingElement(element)) continue;
     sunkIds.push(element.id);
   }
   if (!sunkIds.length) return { snapshot, sunkIds };
@@ -356,6 +362,68 @@ export function autoSinkLargeNewDrawingDraft(baseSnapshot = {}, transaction, dra
       files: snapshot.files,
     },
   };
+}
+
+const AUTO_EXIT_IDLE = Object.freeze({ phase: 'idle' });
+
+const autoExitCandidate = state => {
+  const beforeIds = new Set(state.beforeIds || []);
+  const elements = committedDrawingElements(state.elements);
+  const prepared = autoSinkLargeNewDrawingDraft(
+    { elements: elements.filter(element => beforeIds.has(element.id)), files: {} },
+    { kind: 'new', originalIds: [] },
+    { elements, files: {} },
+  );
+  const sunk = new Set(prepared.sunkIds);
+  return elements.find(element => !beforeIds.has(element.id)
+    && sunk.has(element.id) && element.type === state.tool) || null;
+};
+
+// DrawLayer 只识别一次“本手势新生的大底板已稳定”；提交、沉层与撤销仍只归 FlowCanvas。
+// capture pointerup 早于 Excal 最终 change，因此稳定两帧；第三帧是 50ms 内的硬收口。
+export function drawingAutoExitGestureStep(state = AUTO_EXIT_IDLE, event = {}) {
+  if (event.type === 'begin') {
+    if (!event.enabled || !AUTO_BELOW_TYPES.has(event.tool)) return { state: AUTO_EXIT_IDLE, action: 'none' };
+    return {
+      state: {
+        phase: 'tracking', token: event.token, pointerId: event.pointerId, tool: event.tool,
+        beforeIds: [...(event.beforeIds || [])], elements: event.elements || [],
+        changeVersion: event.changeVersion || 0, stableFrames: 0, frames: 0,
+      },
+      action: 'none',
+    };
+  }
+  if (event.type === 'cancel') {
+    if (event.token != null && state.token !== event.token) return { state, action: 'none' };
+    return { state: AUTO_EXIT_IDLE, action: 'none' };
+  }
+  if (state.phase === 'idle' || state.phase === 'fired' || state.phase === 'complete') {
+    return { state, action: 'none' };
+  }
+  if (event.token !== state.token) return { state, action: 'none' };
+  if (event.type === 'change') {
+    const changed = event.changeVersion !== state.changeVersion;
+    return {
+      state: {
+        ...state,
+        elements: event.elements || [],
+        changeVersion: event.changeVersion,
+        stableFrames: state.phase === 'released' && changed ? 0 : state.stableFrames,
+      },
+      action: 'none',
+    };
+  }
+  if (event.type === 'release') {
+    if (state.phase !== 'tracking' || event.pointerId !== state.pointerId) return { state, action: 'none' };
+    return { state: { ...state, phase: 'released', stableFrames: 0, frames: 0 }, action: 'schedule' };
+  }
+  if (event.type !== 'frame' || state.phase !== 'released') return { state, action: 'none' };
+
+  const next = { ...state, stableFrames: state.stableFrames + 1, frames: state.frames + 1 };
+  if (next.stableFrames < 2 && next.frames < 3) return { state: next, action: 'wait' };
+  const candidate = autoExitCandidate(next);
+  if (!candidate) return { state: { ...next, phase: 'complete' }, action: 'complete' };
+  return { state: { ...next, phase: 'fired' }, action: 'signal', elementId: candidate.id };
 }
 
 export function mergeDrawingTransaction(baseSnapshot = {}, transaction, draftSnapshot = {}) {

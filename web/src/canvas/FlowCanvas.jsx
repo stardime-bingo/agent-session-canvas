@@ -4,7 +4,7 @@
  *           增量成员防重叠、Figma 式框选/平移/触控板手势、滚轮双模（触控板平移/鼠标缩放+模式切换钮）、
  *           容器缩放定桩、全画布落空连线选择（含就地打开会话上下文）、缩放感知连接点、原生绘图选择/画笔、
  *           committed ink 与节点共用 ViewportPortal 唯一相机、编辑态 wheel/key/Safari gesture/pointer 全入口 RF 相机事务、
- *           目标关系闭包局部事务、新建大底板自动沉层与稳定排空撤销、屏幕/队列/持久化三真相收口、opening request 身份门与纯取消、无双影帧交接与真实阶段回执、
+ *           目标关系闭包局部事务、新建大底板落笔即退场/自动沉层与稳定排空撤销、屏幕/队列/持久化三真相收口、opening request 身份门与纯取消、无双影帧交接与真实阶段回执、
  *           普通模式绘图命中（pane/容器面同河、nodrag/连接点等功能件优先）与 Backspace 删除治理
  * [POS]: canvas 的画布引擎。归属律：layout.d 手动指定 > 路径推断；容器永远生长包住成员；
  *        每一次点击必有可感知的回应：选中态/菜单/提示三选一
@@ -821,6 +821,13 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       exitingDrawRef.current = false;
     }
   }, [clearCameraTiming, clearPointerNavigation, drawingCommitQueue, resetDrawingCamera, updateDrawVisible]);
+
+  const autoExitLargeNewDrawing = useCallback(() => {
+    const transaction = editTransactionRef.current;
+    if (openingRef.current || exitingDrawRef.current || compositionStateRef.current.active) return;
+    if (transaction?.kind !== 'new' || transaction.originalIds?.length) return;
+    void exitDrawing();
+  }, [exitDrawing]);
 
   const prepareGeometry = useCallback(async () => {
     const step = canvasGeometryPreparation({
@@ -1665,6 +1672,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
           ref={drawRef} active={penActive} visible={drawVisible}
           initialElements={editSeed.elements}
           initialFiles={editSeed.files}
+          autoExitLargeNew={editSeed.kind === 'new' && !editSeed.originalIds?.length}
           onToolChange={onDrawToolChange}
           onCompositionChange={active => {
             compositionStateRef.current = drawingCompositionStep(compositionStateRef.current, {
@@ -1672,6 +1680,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
             }).state;
           }}
           onExitToCanvas={exitToCanvas}
+          onAutoExitLargeNew={autoExitLargeNewDrawing}
           onDraftPageHide={draft => {
             const transaction = editTransactionRef.current;
             if (transaction) drawingCommitQueue.submit(base => mergeDrawingTransaction(base, transaction, draft)).catch(() => {});

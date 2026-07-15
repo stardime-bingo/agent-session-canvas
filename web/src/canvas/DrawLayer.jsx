@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 @excalidraw/excalidraw 与局部事务 elements/files；持久化主权由 FlowCanvas 的全量队列持有
- * [OUTPUT]: 对外提供仅在编辑态挂载的 DrawLayer；维护/flush/freeze 局部 draft、上报 IME 周期、capture 截断 Excal 缩放键，并仅在 opening/resume 同步对齐 RF viewport
+ * [OUTPUT]: 对外提供仅在编辑态挂载的 DrawLayer；维护/flush/freeze 局部 draft、上报 IME 周期、识别新事务单次大底板落笔、capture 截断 Excal 缩放键，并仅在 opening/resume 同步对齐 RF viewport
  * [POS]: 临时目标事务编辑器；绝不直接保存局部副本，普通态与未选目标始终不挂载
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -8,17 +8,20 @@ import React, { forwardRef, useEffect, useImperativeHandle, useRef } from 'react
 import { Excalidraw } from '@excalidraw/excalidraw';
 import '@excalidraw/excalidraw/index.css';
 import {
-  deleteDrawingElement, drawingEditorReadyStep, drawingSnapshot, hitDrawingElement,
+  deleteDrawingElement, drawingAutoExitGestureStep, drawingEditorReadyStep, drawingSnapshot, hitDrawingElement,
   setDrawingElementPlane, translateDrawingElements,
 } from './drawing.js';
 import { drawingZoomKeyRoute } from './gestures.js';
 
-export default forwardRef(function DrawLayer({ active, visible = true, initialElements, initialFiles, onToolChange, onReady, onDraftPageHide, onExitToCanvas, onCompositionChange }, ref) {
+export default forwardRef(function DrawLayer({ active, visible = true, initialElements, initialFiles, autoExitLargeNew = false, onToolChange, onReady, onDraftPageHide, onExitToCanvas, onAutoExitLargeNew, onCompositionChange }, ref) {
   const apiRef = useRef(null);
   const rootRef = useRef(null);
   const composingRef = useRef(false);
   const changeVersionRef = useRef(0);
   const downRef = useRef(null);
+  const autoExitRef = useRef({ phase: 'idle' });
+  const autoExitTokenRef = useRef(0);
+  const autoExitRafRef = useRef(null);
   const handshakeRef = useRef({ apiReady: false, hydrated: false, ready: false });
   const latestFiles = useRef(initialFiles || {});
 
@@ -30,12 +33,44 @@ export default forwardRef(function DrawLayer({ active, visible = true, initialEl
 
   const draftSnapshot = () => drawingSnapshot(scene(), latestFiles.current);
 
+  const cancelAutoExit = token => {
+    if (autoExitRafRef.current !== null) cancelAnimationFrame(autoExitRafRef.current);
+    autoExitRafRef.current = null;
+    const result = drawingAutoExitGestureStep(autoExitRef.current, { type: 'cancel', token });
+    autoExitRef.current = result.state;
+  };
+
+  const scheduleAutoExit = token => {
+    const frame = () => {
+      autoExitRafRef.current = null;
+      if (composingRef.current) {
+        cancelAutoExit(token);
+        return;
+      }
+      const result = drawingAutoExitGestureStep(autoExitRef.current, { type: 'frame', token });
+      autoExitRef.current = result.state;
+      if (result.action === 'wait') {
+        autoExitRafRef.current = requestAnimationFrame(frame);
+      } else if (result.action === 'signal') {
+        onAutoExitLargeNew?.({ id: result.elementId, token, signaledAt: performance.now() });
+      }
+    };
+    if (autoExitRafRef.current !== null) cancelAnimationFrame(autoExitRafRef.current);
+    autoExitRafRef.current = requestAnimationFrame(frame);
+  };
+
   // 关标签页/刷新时只把局部 draft 交给父层；父层合并全量世界后才可 best-effort 保存。
   useEffect(() => {
     const onHide = () => onDraftPageHide?.(draftSnapshot());
     window.addEventListener('pagehide', onHide);
     return () => window.removeEventListener('pagehide', onHide);
   }, []);
+
+  useEffect(() => {
+    if (!active || !visible || !autoExitLargeNew) cancelAutoExit();
+  }, [active, visible, autoExitLargeNew]);
+
+  useEffect(() => () => cancelAutoExit(), []);
 
   const alignViewport = v => {
     if (!v || !apiRef.current) return false;
@@ -99,18 +134,34 @@ export default forwardRef(function DrawLayer({ active, visible = true, initialEl
   };
 
   const onDown = e => {
-    if (!active || !visible) return;
+    if (!active || !visible || !e.isPrimary || e.button !== 0) return;
+    cancelAutoExit();
     const s = apiRef.current?.getAppState();
+    const elements = scene();
+    const token = ++autoExitTokenRef.current;
+    const autoExit = drawingAutoExitGestureStep(autoExitRef.current, {
+      type: 'begin', enabled: autoExitLargeNew && !composingRef.current, token, pointerId: e.pointerId,
+      tool: s?.activeTool?.type, beforeIds: elements.map(element => element.id), elements,
+      changeVersion: changeVersionRef.current,
+    });
+    autoExitRef.current = autoExit.state;
     downRef.current = {
       x: e.clientX, y: e.clientY,
+      pointerId: e.pointerId, token,
       tool: s?.activeTool?.type,
       hadSel: Object.values(s?.selectedElementIds || {}).some(Boolean),
     };
   };
   const onUp = e => {
     const down = downRef.current;
+    if (!active || !visible || !down || e.pointerId !== down.pointerId) return;
     downRef.current = null;
-    if (!active || !visible || !down || down.tool !== 'selection' || down.hadSel) return;
+    const released = drawingAutoExitGestureStep(autoExitRef.current, {
+      type: 'release', token: down.token, pointerId: e.pointerId,
+    });
+    autoExitRef.current = released.state;
+    if (released.action === 'schedule') scheduleAutoExit(down.token);
+    if (down.tool !== 'selection' || down.hadSel) return;
     if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > 5) return;
     const s = apiRef.current?.getAppState();
     if (!s) return;
@@ -118,6 +169,12 @@ export default forwardRef(function DrawLayer({ active, visible = true, initialEl
     const fx = e.clientX / zoom - s.scrollX, fy = e.clientY / zoom - s.scrollY;
     if (hitDrawingElement(scene(), fx, fy, 8 / zoom)) return;
     onExitToCanvas?.({ x: e.clientX, y: e.clientY });
+  };
+  const onPointerCancel = e => {
+    const down = downRef.current;
+    if (!down || down.pointerId !== e.pointerId) return;
+    downRef.current = null;
+    cancelAutoExit(down.token);
   };
   const blockZoomKey = e => {
     const target = e.target;
@@ -133,7 +190,7 @@ export default forwardRef(function DrawLayer({ active, visible = true, initialEl
 
   return (
     <div ref={rootRef} className={`draw-layer draw-active${visible ? '' : ' draw-pending'}`}
-      onPointerDownCapture={onDown} onPointerUpCapture={onUp}
+      onPointerDownCapture={onDown} onPointerUpCapture={onUp} onPointerCancelCapture={onPointerCancel}
       onKeyDownCapture={blockZoomKey}
       onCompositionStartCapture={() => { composingRef.current = true; onCompositionChange?.(true); }}
       onCompositionEndCapture={() => { composingRef.current = false; onCompositionChange?.(false); }}
@@ -150,9 +207,18 @@ export default forwardRef(function DrawLayer({ active, visible = true, initialEl
           appState: { viewBackgroundColor: 'transparent' },
           scrollToContent: false,
         }}
-        onChange={(_, appState, files) => {
+        onChange={(elements, appState, files) => {
           changeVersionRef.current++;
           latestFiles.current = files || {};
+          const tracked = autoExitRef.current;
+          if (tracked.phase === 'tracking' && appState?.activeTool?.type !== tracked.tool) {
+            cancelAutoExit(tracked.token);
+          } else if (tracked.phase === 'tracking' || tracked.phase === 'released') {
+            const changed = drawingAutoExitGestureStep(tracked, {
+              type: 'change', token: tracked.token, elements, changeVersion: changeVersionRef.current,
+            });
+            autoExitRef.current = changed.state;
+          }
           advanceHandshake('change', appState?.activeTool?.type);
         }}
         UIOptions={{
