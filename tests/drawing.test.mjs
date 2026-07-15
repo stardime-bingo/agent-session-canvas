@@ -4,9 +4,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  anchoredDrawingIds, canvasGeometryAllowed, canvasGeometryPreparation, committedDrawingElements, createDrawingCommitQueue, deleteDrawingElement, drawingBounds, drawingCameraExitPolicy, drawingCameraStep, drawingCompositionStep,
-  advanceDrawingTransaction, createDrawingTransaction, drawingEditorReadyStep, drawingTransactionClosure, drawingTransactionVisibleElements,
-  drawingClosingHandoffStep, drawingExitAction, drawingExitFailureNotice, drawingFilesSignature, drawingOpeningRequestCurrent, drawingSnapshot, hitDrawingElement, setDrawingElementPlane, splitDrawingPlanes,
+  advanceDrawingTransaction, anchoredDrawingIds, autoSinkLargeNewDrawingDraft, canvasGeometryAllowed, canvasGeometryPreparation, committedDrawingElements, createDrawingCommitQueue, deleteDrawingElement, drawingBounds, drawingCameraExitPolicy, drawingCameraStep, drawingCompositionStep,
+  createDrawingTransaction, drawingEditorReadyStep, drawingTransactionClosure, drawingTransactionVisibleElements,
+  drawingClosingHandoffStep, drawingExitAction, drawingExitFailureNotice, drawingFilesSignature, drawingOpeningRequestCurrent, drawingRestoredWorldOverride, drawingSnapshot, drawingWorldSyncStep, hitDrawingElement, setDrawingElementPlane, splitDrawingPlanes,
   mergeDrawingTransaction, translateDrawingElements,
 } from '../web/src/canvas/drawing.js';
 import { loadDrawingFiles, normalizeDrawingFiles, saveDrawingFiles } from '../server/drawing-files.mjs';
@@ -172,6 +172,68 @@ test('new merge 追加到世界末尾；base+draft 文件只合并一次并由�
 
   assert.deepEqual(merged.elements.map(el => el.id), ['element-kept', 'base', 'element-new', 'ink']);
   assert.deepEqual(Object.keys(merged.files), ['kept', 'new']);
+});
+
+test('首次 new 事务只把达阈值的实心区域形状及其绑定文字自动沉底', () => {
+  const base = { elements: [rect('existing', 0, 0, 800, 600, { backgroundColor: '#fff' })], files: {} };
+  const tx = createDrawingTransaction(base);
+  const draft = {
+    elements: [
+      rect('threshold', 0, 0, 400, 300, { backgroundColor: '#ffd43b', angle: Math.PI / 4 }),
+      { id: 'label', type: 'text', x: 20, y: 20, width: 80, height: 20, containerId: 'threshold' },
+      { ...rect('ellipse', 0, 0, -500, -350, { backgroundColor: '#74c0fc' }), type: 'ellipse' },
+      { ...rect('diamond', 0, 0, 600, 400, { backgroundColor: '#b2f2bb' }), type: 'diamond', customData: { below: true } },
+      { id: 'independent-arrow', type: 'arrow', x: 0, y: 0, width: 600, height: 0, points: [[0, 0], [600, 0]] },
+    ],
+    files: {},
+  };
+
+  const prepared = autoSinkLargeNewDrawingDraft(base, tx, draft);
+  assert.deepEqual(prepared.sunkIds, ['threshold', 'ellipse']);
+  assert.equal(prepared.snapshot.elements.find(el => el.id === 'threshold').customData.below, true);
+  assert.equal(prepared.snapshot.elements.find(el => el.id === 'label').customData.below, true);
+  assert.equal(prepared.snapshot.elements.find(el => el.id === 'ellipse').customData.below, true);
+  assert.equal(prepared.snapshot.elements.find(el => el.id === 'diamond').customData.below, true);
+  assert.equal(prepared.snapshot.elements.find(el => el.id === 'independent-arrow').customData?.below, undefined);
+  assert.equal(base.elements[0].customData?.below, undefined, 'base 中已有大形状不能被追溯改层');
+});
+
+test('自动沉底拒绝小边、透明填充、非区域类型、selection 与已 rebase 的 new 事务', () => {
+  const base = { elements: [], files: {} };
+  const tx = createDrawingTransaction(base);
+  const draft = {
+    elements: [
+      rect('narrow', 0, 0, 399, 301, { backgroundColor: '#fff' }),
+      rect('short', 0, 0, 401, 299, { backgroundColor: '#fff' }),
+      rect('transparent', 0, 0, 500, 400),
+      { id: 'line', type: 'line', x: 0, y: 0, width: 500, height: 400, backgroundColor: '#fff', points: [[0, 0], [500, 400]] },
+      { id: 'freedraw', type: 'freedraw', x: 0, y: 0, width: 500, height: 400, backgroundColor: '#fff', points: [[0, 0], [500, 400]] },
+      { id: 'text', type: 'text', x: 0, y: 0, width: 500, height: 400, backgroundColor: '#fff' },
+      { id: 'image', type: 'image', fileId: 'photo', x: 0, y: 0, width: 500, height: 400, backgroundColor: '#fff' },
+    ],
+    files: { photo: binary('photo') },
+  };
+  assert.deepEqual(autoSinkLargeNewDrawingDraft(base, tx, draft).sunkIds, []);
+
+  const eligible = { elements: [rect('zone', 0, 0, 500, 400, { backgroundColor: '#fff' })], files: {} };
+  assert.deepEqual(autoSinkLargeNewDrawingDraft(base, { ...tx, kind: 'selection' }, eligible).sunkIds, []);
+  assert.deepEqual(autoSinkLargeNewDrawingDraft(base, { ...tx, originalIds: ['zone'] }, eligible).sunkIds, []);
+});
+
+test('common merge 首次自动沉底；rebase 后用户手动浮起必须保持选择', () => {
+  const base = { elements: [rect('unrelated', -100, 0, 20, 20)], files: {} };
+  const tx = createDrawingTransaction(base);
+  const draft = { elements: [rect('zone', 0, 0, 800, 600, { backgroundColor: '#fff' })], files: {} };
+  const prepared = autoSinkLargeNewDrawingDraft(base, tx, draft);
+  const firstMerged = mergeDrawingTransaction(base, tx, draft);
+  assert.equal(firstMerged.elements.find(el => el.id === 'zone').customData.below, true);
+
+  const rebased = advanceDrawingTransaction(tx, prepared.snapshot);
+  assert.deepEqual(rebased.originalIds, ['zone'], 'new 事务只能接管局部 draft，不能吞进 full world 旧元素');
+  const floated = { elements: setDrawingElementPlane(prepared.snapshot.elements, 'zone', false), files: {} };
+  const retried = mergeDrawingTransaction(firstMerged, rebased, floated);
+  assert.equal(retried.elements.find(el => el.id === 'zone').customData.below, false);
+  assert.ok(retried.elements.some(el => el.id === 'unrelated'));
 });
 
 test('new 事务首次持久化后 rebase 所有新生 ID；帧失败后删掉一笔再 merge 不得幽灵复活', () => {
@@ -592,6 +654,184 @@ test('committed 队列单笔 reject 不推进基线也不毒死后续提交', as
   const final = await recovered;
   assert.equal(attempt, 2);
   assert.deepEqual(final.elements.map(e => [e.id, e.x, e.y]), [['host', 15, 26]]);
+});
+
+test('自动沉底撤销按成功代际恢复完整 pre-commit elements/files，props 原样回读不破坏身份门', async () => {
+  const beforeElements = [image('photo'), rect('host', 0, 0, 50, 50)];
+  const beforeFiles = { photo: binary('photo') };
+  const writes = [];
+  const queue = createDrawingCommitQueue({ elements: beforeElements, files: beforeFiles }, async snapshot => { writes.push(snapshot); });
+  const before = queue.snapshot();
+  const after = await queue.submit(base => ({
+    elements: [rect('zone', 0, 0, 500, 400, { backgroundColor: '#fff', customData: { below: true } })],
+    files: base.files,
+  }));
+
+  assert.equal(queue.sync({ elements: after.elements, files: after.files }), after, '落盘 payload 的 props echo 必须保留同一成功代际');
+  const result = await queue.guardedRestore(after, before);
+  assert.equal(result.restored, true);
+  assert.deepEqual(result.snapshot.elements.map(el => el.id), ['element-photo', 'host']);
+  assert.deepEqual(result.snapshot.files, { photo: binary('photo') });
+  assert.equal(writes.length, 2);
+});
+
+test('自动沉底撤销在真正出队时判代：后续成功使其失效，后续失败则仍可恢复', async () => {
+  let failNext = false;
+  const queue = createDrawingCommitQueue({ elements: [rect('host', 0, 0, 50, 50)], files: {} }, async () => {
+    if (failNext) {
+      failNext = false;
+      throw new Error('synthetic later failure');
+    }
+  });
+  const before = queue.snapshot();
+  const after = await queue.submit(base => ({ elements: [...base.elements, rect('zone', 0, 0, 500, 400)], files: base.files }));
+  const later = queue.submit(base => ({ elements: translateDrawingElements(base.elements, ['host'], 5, 0), files: base.files }));
+  const staleUndo = queue.guardedRestore(after, before);
+  await later;
+  assert.equal((await staleUndo).restored, false);
+  assert.equal(queue.snapshot().elements.find(el => el.id === 'host').x, 5);
+
+  const beforeSecond = queue.snapshot();
+  const afterSecond = await queue.submit(base => ({ elements: [...base.elements, rect('zone-2', 0, 0, 500, 400)], files: base.files }));
+  failNext = true;
+  const failedLater = queue.submit(base => ({ elements: deleteDrawingElement(base.elements, 'host'), files: base.files }));
+  const survivingUndo = queue.guardedRestore(afterSecond, beforeSecond);
+  await assert.rejects(failedLater, /synthetic later failure/);
+  assert.equal((await survivingUndo).restored, true);
+  assert.deepEqual(queue.snapshot().elements.map(el => el.id), ['host', 'zone']);
+});
+
+test('撤销持久化失败不推进 committed 队列成功代际', async () => {
+  let writes = 0;
+  const queue = createDrawingCommitQueue({ elements: [rect('host', 0, 0, 50, 50)], files: {} }, async () => {
+    writes++;
+    if (writes === 2) throw new Error('synthetic undo failure');
+  });
+  const before = queue.snapshot();
+  const after = await queue.submit(base => ({ elements: [...base.elements, rect('zone', 0, 0, 500, 400)], files: base.files }));
+  await assert.rejects(queue.guardedRestore(after, before), /synthetic undo failure/);
+  assert.equal(queue.snapshot(), after);
+});
+
+test('whenIdle 创建后追加的成功提交也必须纳入稳定排空，并让 restored 代际失效', async () => {
+  const queue = createDrawingCommitQueue({ elements: [rect('host', 0, 0, 50, 50)], files: {} }, async () => {});
+  const before = queue.snapshot();
+  const after = await queue.submit(base => ({ elements: [...base.elements, rect('zone', 0, 0, 500, 400)], files: base.files }));
+  const restored = await queue.guardedRestore(after, before);
+  assert.equal(restored.restored, true);
+
+  const drained = queue.whenIdle();
+  const later = queue.submit(base => ({ elements: translateDrawingElements(base.elements, ['host'], 9, 0), files: base.files }));
+  const newer = await later;
+  assert.equal(await drained, newer, 'wait创建后追加的新tail不能逃逸');
+  assert.equal(queue.isIdleAt(restored.snapshot), false);
+  assert.equal(queue.isIdleAt(newer), true);
+});
+
+test('whenIdle 创建后追加的失败提交被隔离，稳定排空仍返回 restored 成功代际', async () => {
+  let failNext = false;
+  const queue = createDrawingCommitQueue({ elements: [rect('host', 0, 0, 50, 50)], files: {} }, async () => {
+    if (failNext) {
+      failNext = false;
+      throw new Error('synthetic appended failure');
+    }
+  });
+  const before = queue.snapshot();
+  const after = await queue.submit(base => ({ elements: [...base.elements, rect('zone', 0, 0, 500, 400)], files: base.files }));
+  const restored = await queue.guardedRestore(after, before);
+
+  const drained = queue.whenIdle();
+  failNext = true;
+  const later = queue.submit(base => ({ elements: translateDrawingElements(base.elements, ['host'], 9, 0), files: base.files }));
+  await assert.rejects(later, /synthetic appended failure/);
+  assert.equal(await drained, restored.snapshot);
+  assert.equal(queue.isIdleAt(restored.snapshot), true);
+});
+
+test('isIdleAt 在延迟持久化pending期间为false，只在tail finally落定后为true', async () => {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const queue = createDrawingCommitQueue({ elements: [rect('host', 0, 0, 50, 50)], files: {} }, () => gate);
+  const initial = queue.snapshot();
+  const pending = queue.submit(base => ({ elements: translateDrawingElements(base.elements, ['host'], 3, 0), files: base.files }));
+  assert.equal(queue.isIdleAt(initial), false);
+  release();
+  const settled = await pending;
+  await queue.whenIdle();
+  assert.equal(queue.isIdleAt(settled), true);
+});
+
+test('静态世界同步门：编辑阶段与props未追上override时hold，只在idle同代回声时sync并清屏幕override', () => {
+  const external = { elements: [rect('merged', 0, 0, 10, 10)], files: {} };
+  const override = { ...external, revision: 7 };
+
+  assert.deepEqual(drawingWorldSyncStep({ idle: false, worldOverride: null, ...external }), { type: 'hold' });
+  assert.deepEqual(drawingWorldSyncStep({ idle: false, worldOverride: override, ...external }), { type: 'hold' });
+  assert.deepEqual(drawingWorldSyncStep({ idle: true, worldOverride: null, ...external }), { type: 'sync', clearOverride: null });
+  assert.deepEqual(drawingWorldSyncStep({
+    idle: true,
+    worldOverride: override,
+    elements: [rect('stale-props', 0, 0, 10, 10)],
+    files: {},
+  }), { type: 'hold' }, 'override在屏幕上而props尚未追上时绝不能倒灌queue');
+  assert.deepEqual(drawingWorldSyncStep({ idle: true, worldOverride: override, ...external }), {
+    type: 'sync', clearOverride: override,
+  });
+
+  const newer = { elements: [rect('newer', 0, 0, 10, 10)], files: {} };
+  assert.deepEqual(drawingWorldSyncStep({
+    idle: true,
+    worldOverride: override,
+    queueSnapshot: newer,
+    ...newer,
+  }), { type: 'sync', clearOverride: override }, 'future成功提交的props匹配queue真相时必须收口旧override');
+});
+
+test('撤销后的屏幕世界取完整pre-commit快照；后续成功已换代时不覆盖更新override', () => {
+  const restored = {
+    elements: [image('photo'), rect('host', 0, 0, 50, 50)],
+    files: { photo: binary('photo') },
+  };
+  const oldOverride = { elements: [rect('zone', 0, 0, 500, 400)], files: {}, revision: 8 };
+  const next = drawingRestoredWorldOverride({
+    queueIdle: true,
+    editorIdle: true,
+    currentSnapshot: restored,
+    restoredSnapshot: restored,
+    currentOverride: oldOverride,
+    revision: 9,
+  });
+  assert.deepEqual(next.elements.map(el => el.id), ['element-photo', 'host']);
+  assert.equal(next.elements, restored.elements);
+  assert.equal(next.files, restored.files);
+  assert.equal(next.revision, 9);
+
+  const newerSnapshot = { elements: [rect('newer', 0, 0, 20, 20)], files: {} };
+  const newerOverride = { ...newerSnapshot, revision: 10 };
+  assert.equal(drawingRestoredWorldOverride({
+    queueIdle: true,
+    editorIdle: true,
+    currentSnapshot: newerSnapshot,
+    restoredSnapshot: restored,
+    currentOverride: newerOverride,
+    revision: 11,
+  }), newerOverride, 'stale undo不得清掉或覆盖更新代屏幕世界');
+  assert.equal(drawingRestoredWorldOverride({
+    queueIdle: true,
+    editorIdle: false,
+    currentSnapshot: restored,
+    restoredSnapshot: restored,
+    currentOverride: newerOverride,
+    revision: 12,
+  }), newerOverride, '等待排空期间重新opening/editing时不得主动安装静态恢复世界');
+  assert.equal(drawingRestoredWorldOverride({
+    queueIdle: false,
+    editorIdle: true,
+    currentSnapshot: restored,
+    restoredSnapshot: restored,
+    currentOverride: newerOverride,
+    revision: 13,
+  }), newerOverride, '成功代际相同但仍有pending时不得先安装静态恢复世界');
 });
 
 test('编辑事务门等待 pending 删除落盘，再以无旧图片与文件的同一快照水合', async () => {

@@ -1,7 +1,7 @@
 /**
  * [INPUT]: Excalidraw 的元素数组与 BinaryFiles 字典
- * [OUTPUT]: 提供已提交绘图的过滤/删除/沉浮/平移纯变换、目标关系闭包/局部编辑事务/全量合并、
- *           可排空的串行提交队列、opening request 身份门/相机事务与退出策略/IME 周期状态机/隐藏 opening 取消/退出回执/closing 收口步、编辑器就绪与几何互斥纯门、资产快照/命中/双平面/包围盒与承载判定
+ * [OUTPUT]: 提供已提交绘图的过滤/删除/沉浮/平移纯变换、首次新建大底板自动沉层、目标关系闭包/局部编辑事务/全量合并、
+ *           可稳定排空且按成功代际守卫撤销的串行提交队列、屏幕override/外部props/队列三真相同步门、opening request 身份门/相机事务与退出策略/IME 周期状态机/隐藏 opening 取消/退出回执/closing 收口步、编辑器就绪与几何互斥纯门、资产快照/命中/双平面/包围盒与承载判定
  * [POS]: 绘图的纯数据内核；静态世界层、临时编辑器与普通态动作共用，全部可由 node:test 证伪
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -180,11 +180,44 @@ export function advanceDrawingTransaction(transaction, draftSnapshot = {}) {
   return { ...transaction, originalIds, elements: draft.elements, files: draft.files };
 }
 
+const AUTO_BELOW_TYPES = new Set(['rectangle', 'ellipse', 'diamond']);
+const AUTO_BELOW_MIN_WIDTH = 400;
+const AUTO_BELOW_MIN_HEIGHT = 300;
+const AUTO_BELOW_MIN_AREA = 120000;
+
+// 只在第一次 new 事务提交时识别“大块实心底板”。一旦事务 rebase，用户后续手动浮起就是新真相。
+export function autoSinkLargeNewDrawingDraft(baseSnapshot = {}, transaction, draftSnapshot = {}) {
+  const snapshot = drawingSnapshot(draftSnapshot.elements, draftSnapshot.files);
+  if (transaction?.kind !== 'new' || (transaction.originalIds || []).length) return { snapshot, sunkIds: [] };
+  const baseIds = new Set(committedDrawingElements(baseSnapshot.elements).map(element => element.id));
+  const sunkIds = [];
+  for (const element of snapshot.elements) {
+    const width = Math.abs(Number(element.width) || 0);
+    const height = Math.abs(Number(element.height) || 0);
+    if (baseIds.has(element.id) || element.customData?.below || !AUTO_BELOW_TYPES.has(element.type)) continue;
+    if (!element.backgroundColor || element.backgroundColor === 'transparent') continue;
+    if (width < AUTO_BELOW_MIN_WIDTH || height < AUTO_BELOW_MIN_HEIGHT || width * height < AUTO_BELOW_MIN_AREA) continue;
+    sunkIds.push(element.id);
+  }
+  if (!sunkIds.length) return { snapshot, sunkIds };
+  const hosts = new Set(sunkIds);
+  return {
+    sunkIds,
+    snapshot: {
+      elements: snapshot.elements.map(element => (hosts.has(element.id) || hosts.has(element.containerId))
+        ? { ...element, customData: { ...element.customData, below: true } }
+        : element),
+      files: snapshot.files,
+    },
+  };
+}
+
 export function mergeDrawingTransaction(baseSnapshot = {}, transaction, draftSnapshot = {}) {
   const base = drawingSnapshot(baseSnapshot.elements, baseSnapshot.files);
   if (!transaction) return base;
+  const prepared = autoSinkLargeNewDrawingDraft(base, transaction, draftSnapshot).snapshot;
   const originalIds = new Set(transaction.originalIds || []);
-  const draftElements = committedDrawingElements(draftSnapshot.elements);
+  const draftElements = prepared.elements;
   const draftIds = new Set(draftElements.map(element => element.id));
   const unaffected = base.elements.filter(element => !originalIds.has(element.id) && !draftIds.has(element.id));
   const anchorIndex = Math.max(0, Math.min(transaction.anchorIndex ?? base.elements.length, base.elements.length));
@@ -194,7 +227,7 @@ export function mergeDrawingTransaction(baseSnapshot = {}, transaction, draftSna
   }
   const elements = [...unaffected];
   elements.splice(insertionIndex, 0, ...draftElements);
-  return drawingSnapshot(elements, { ...base.files, ...(draftSnapshot.files || {}) });
+  return drawingSnapshot(elements, { ...base.files, ...prepared.files });
 }
 
 // Excalidraw 的 fileId 对应不可变图片内容；ID 集变化即可判定资产仓需要更新。
@@ -352,18 +385,60 @@ export function createDrawingCommitQueue(initialSnapshot = {}, persist) {
     return run;
   };
 
+  // 真排空必须追赶等待创建后追加的 tail；额外一个 microtask 让同轮 promise reaction 先完成追加。
+  const whenIdle = async () => {
+    while (true) {
+      const observedTail = tail;
+      await observedTail;
+      await Promise.resolve();
+      if (tail === observedTail && pending === 0) return lastSuccessful;
+    }
+  };
+
   return {
     submit,
+    // 撤销在真正轮到队首时按成功快照对象身份判代；后续失败不换代，后续成功必使旧撤销失效。
+    guardedRestore(expectedSnapshot, previousSnapshot) {
+      let restored = false;
+      return submit(base => {
+        if (base !== expectedSnapshot) return null;
+        restored = true;
+        return previousSnapshot;
+      }).then(snapshot => ({ snapshot, restored }));
+    },
     // 排空门返回最后成功的 elements/files 同一快照；单笔失败已在 tail 内隔离，不阻断读取基线。
-    whenIdle: () => tail.then(() => lastSuccessful),
+    whenIdle,
+    // React 函数式 updater 的最终同步门：快照同代但仍有 pending 也不算 idle。
+    isIdleAt: snapshot => pending === 0 && lastSuccessful === snapshot,
     // React props 可在落盘回执后同步新快照；队列忙时的外部值可能是中间态，明确拒绝倒灌。
     sync(snapshot = {}) {
+      if (snapshot.elements === lastSuccessful.elements && snapshot.files === lastSuccessful.files) return lastSuccessful;
       if (pending) return false;
       lastSuccessful = drawingSnapshot(snapshot.elements, snapshot.files);
       return lastSuccessful;
     },
     snapshot: () => lastSuccessful,
   };
+}
+
+// 屏幕仍由 override 托管时，只有 idle 且外部 props 已用同一 elements/files 回声追上，才可同步并撤桥。
+// props 尚未追上时必须 hold，否则会把旧磁盘回读倒灌进 committed 队列。
+export function drawingWorldSyncStep({ idle = false, worldOverride = null, queueSnapshot = null, elements, files } = {}) {
+  if (!idle) return { type: 'hold' };
+  if (!worldOverride) return { type: 'sync', clearOverride: null };
+  const overrideCaughtUp = worldOverride.elements === elements && worldOverride.files === files;
+  const queueCaughtUp = queueSnapshot
+    && queueSnapshot.elements === elements && queueSnapshot.files === files;
+  if (overrideCaughtUp || queueCaughtUp) {
+    return { type: 'sync', clearOverride: worldOverride };
+  }
+  return { type: 'hold' };
+}
+
+// guarded restore 已换代才生成 pre-commit 静态世界；若队列已被后续成功推进，保留更新代 override 原引用。
+export function drawingRestoredWorldOverride({ queueIdle = false, editorIdle = false, currentSnapshot, restoredSnapshot, currentOverride = null, revision = 0 } = {}) {
+  if (!queueIdle || !editorIdle || !restoredSnapshot || currentSnapshot !== restoredSnapshot) return currentOverride;
+  return { elements: restoredSnapshot.elements, files: restoredSnapshot.files, revision };
 }
 
 // ============================================================
