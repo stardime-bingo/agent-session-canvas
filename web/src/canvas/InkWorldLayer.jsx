@@ -1,7 +1,7 @@
 /**
  * [INPUT]: 已提交的 Excalidraw elements/BinaryFiles、事务 originalIds 与帧 revision，依赖 ViewportPortal/SVG 导出器；4518 可仅替换 exporter 做故障注入
- * [OUTPUT]: 对外提供 InkWorldLayer；沉/浮连续 z-order SVG groups + frame font capsule 共用 RF 相机并按签名复用，在新帧已进 DOM 后回报 rendered world/metrics
- * [POS]: committed ink compositor；编辑时只 hole-punch 事务原件，所有 dirty/join groups 与字体胶囊就绪前保留旧完整帧，失败有界重试
+ * [OUTPUT]: 对外提供 InkWorldLayer；沉/浮固定 z-order 槽内 hole SVG groups + frame font capsule 共用 RF 相机并按签名复用，在新帧已进 DOM 后回报 visible rendered world/metrics
+ * [POS]: committed ink compositor；编辑时只 hole-punch 事务原件，空槽 clear 不导出，所有 dirty/join groups 与字体胶囊就绪前保留旧完整帧，失败有界重试
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
@@ -63,13 +63,15 @@ export default function InkWorldLayer({ elements, files, excludedIds = EMPTY_ELE
     const attempt = retryRequest.revision === revision ? retryRequest.attempt : 1;
     const started = performance.now();
     const visible = drawingTransactionVisibleElements(committedElements, excludedIds);
-    const planes = splitDrawingPlanes(visible);
+    const planes = splitDrawingPlanes(committedElements);
     const textElements = visible.filter(element => element?.type === 'text');
     const fontSignature = drawingFontSignature(textElements);
     const fontRoute = drawingFontWorkRoute(
       fontReadyRef.current.signature, fontInFlightRef.current?.signature, fontSignature, !!textElements.length,
     );
-    const groups = Object.fromEntries(PLANE_NAMES.map(name => [name, drawingPlaneGroups(planes[name], committedFiles)]));
+    const groups = Object.fromEntries(PLANE_NAMES.map(name => [name, drawingPlaneGroups(
+      planes[name], committedFiles, undefined, excludedIds,
+    )]));
     const plans = Object.fromEntries(PLANE_NAMES.map(name => [name, drawingPlaneGroupPlan(
       readyRef.current[name], inFlightRef.current[name], groups[name],
     )]));
@@ -80,7 +82,8 @@ export default function InkWorldLayer({ elements, files, excludedIds = EMPTY_ELE
         exported: plan.filter(group => group.route === 'export').length,
         joined: plan.filter(group => group.route === 'join').length,
         reused: plan.filter(group => group.route === 'ready').length,
-        cleared: Math.max(0, readyRef.current[name].length - plan.length),
+        cleared: plan.filter(group => group.route === 'clear').length
+          + Math.max(0, readyRef.current[name].length - plan.length),
       }];
     }));
     const planeRoute = name => {
@@ -163,6 +166,7 @@ export default function InkWorldLayer({ elements, files, excludedIds = EMPTY_ELE
     const work = Object.fromEntries(PLANE_NAMES.map(name => [name, Promise.all(plans[name].map(group => {
       if (group.route === 'ready') return Promise.resolve(group.ready.snapshot);
       if (group.route === 'join') return group.inFlight.promise;
+      if (group.route === 'clear') return Promise.resolve(null);
       return startExport(name, group);
     }))]));
     const fontWork = fontRoute === 'ready' ? Promise.resolve(fontReadyRef.current.css)
