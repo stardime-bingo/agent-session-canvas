@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 @excalidraw/excalidraw 与局部事务 elements/files；持久化主权由 FlowCanvas 的全量队列持有
- * [OUTPUT]: 对外提供仅在编辑态挂载的 DrawLayer；维护/flush 局部 draft，水合完成后一次回传稳定 controller
+ * [OUTPUT]: 对外提供仅在编辑态挂载的 DrawLayer；维护/flush/freeze 局部 draft、上报 IME 周期、capture 截断 Excal 缩放键，并仅在 opening/resume 同步对齐 RF viewport
  * [POS]: 临时目标事务编辑器；绝不直接保存局部副本，普通态与未选目标始终不挂载
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -11,12 +11,13 @@ import {
   deleteDrawingElement, drawingEditorReadyStep, drawingSnapshot, hitDrawingElement,
   setDrawingElementPlane, translateDrawingElements,
 } from './drawing.js';
+import { drawingZoomKeyRoute } from './gestures.js';
 
-export default forwardRef(function DrawLayer({ active, visible = true, initialElements, initialFiles, onScrollToFlow, onToolChange, onReady, onDraftPageHide, onExitToCanvas }, ref) {
+export default forwardRef(function DrawLayer({ active, visible = true, initialElements, initialFiles, onToolChange, onReady, onDraftPageHide, onExitToCanvas, onCompositionChange }, ref) {
   const apiRef = useRef(null);
-  const raf = useRef(0);
-  const pendingVp = useRef(null);
-  const lastPushed = useRef({ x: 0, y: 0, z: 1 });
+  const rootRef = useRef(null);
+  const composingRef = useRef(false);
+  const changeVersionRef = useRef(0);
   const downRef = useRef(null);
   const handshakeRef = useRef({ apiReady: false, hydrated: false, ready: false });
   const latestFiles = useRef(initialFiles || {});
@@ -29,8 +30,6 @@ export default forwardRef(function DrawLayer({ active, visible = true, initialEl
 
   const draftSnapshot = () => drawingSnapshot(scene(), latestFiles.current);
 
-  useEffect(() => () => cancelAnimationFrame(raf.current), []);
-
   // 关标签页/刷新时只把局部 draft 交给父层；父层合并全量世界后才可 best-effort 保存。
   useEffect(() => {
     const onHide = () => onDraftPageHide?.(draftSnapshot());
@@ -38,31 +37,35 @@ export default forwardRef(function DrawLayer({ active, visible = true, initialEl
     return () => window.removeEventListener('pagehide', onHide);
   }, []);
 
-  const applyVp = v => {
-    lastPushed.current = { x: v.x / v.zoom, y: v.y / v.zoom, z: v.zoom };
+  const alignViewport = v => {
+    if (!v || !apiRef.current) return false;
     apiRef.current?.updateScene({
       appState: { scrollX: v.x / v.zoom, scrollY: v.y / v.zoom, zoom: { value: v.zoom } },
     });
+    return true;
   };
-  const pushViewport = vp => {
-    if (raf.current) { pendingVp.current = vp; return; }
-    applyVp(vp);
-    raf.current = requestAnimationFrame(() => {
-      raf.current = 0;
-      const pending = pendingVp.current;
-      pendingVp.current = null;
-      if (pending) applyVp(pending);
-    });
+
+  const freezeDraft = async () => {
+    if (composingRef.current) return { status: 'blocked' };
+    const focused = document.activeElement;
+    if (focused && rootRef.current?.contains(focused)
+      && (focused.tagName === 'TEXTAREA' || focused.tagName === 'INPUT' || focused.isContentEditable)) {
+      focused.blur();
+      let version = changeVersionRef.current;
+      let stableFrames = 0;
+      for (let frame = 0; frame < 4 && stableFrames < 2; frame++) {
+        await new Promise(resolve => requestAnimationFrame(resolve));
+        if (changeVersionRef.current === version) stableFrames++;
+        else { version = changeVersionRef.current; stableFrames = 0; }
+      }
+    }
+    return { status: 'ready', snapshot: draftSnapshot() };
   };
 
   const controllerRef = useRef(null);
   if (!controllerRef.current) controllerRef.current = {
-    pushViewport,
-    getViewport() {
-      const s = apiRef.current?.getAppState();
-      if (!s) return null;
-      return { x: s.scrollX * s.zoom.value, y: s.scrollY * s.zoom.value, zoom: s.zoom.value };
-    },
+    alignViewport,
+    freezeDraft,
     activateTool(type) { apiRef.current?.setActiveTool({ type }); },
     getElements() { return apiRef.current ? scene() : null; },
     getSnapshot() { return draftSnapshot(); },
@@ -116,10 +119,24 @@ export default forwardRef(function DrawLayer({ active, visible = true, initialEl
     if (hitDrawingElement(scene(), fx, fy, 8 / zoom)) return;
     onExitToCanvas?.({ x: e.clientX, y: e.clientY });
   };
+  const blockZoomKey = e => {
+    const target = e.target;
+    const editable = target?.tagName === 'TEXTAREA' || target?.tagName === 'INPUT' || target?.isContentEditable;
+    const route = drawingZoomKeyRoute({
+      code: e.code, editable, shiftKey: e.shiftKey, altKey: e.altKey,
+      metaKey: e.metaKey, ctrlKey: e.ctrlKey,
+    });
+    if (route === 'pass') return;
+    if (route === 'block') e.preventDefault();
+    e.stopPropagation();
+  };
 
   return (
-    <div className={`draw-layer draw-active${visible ? '' : ' draw-pending'}`}
+    <div ref={rootRef} className={`draw-layer draw-active${visible ? '' : ' draw-pending'}`}
       onPointerDownCapture={onDown} onPointerUpCapture={onUp}
+      onKeyDownCapture={blockZoomKey}
+      onCompositionStartCapture={() => { composingRef.current = true; onCompositionChange?.(true); }}
+      onCompositionEndCapture={() => { composingRef.current = false; onCompositionChange?.(false); }}
       style={{ position: 'absolute', inset: 0, zIndex: 6, transformOrigin: '0 0', pointerEvents: visible ? 'auto' : 'none' }}>
       <Excalidraw
         excalidrawAPI={instance => {
@@ -134,14 +151,9 @@ export default forwardRef(function DrawLayer({ active, visible = true, initialEl
           scrollToContent: false,
         }}
         onChange={(_, appState, files) => {
+          changeVersionRef.current++;
           latestFiles.current = files || {};
           advanceHandshake('change', appState?.activeTool?.type);
-        }}
-        onScrollChange={(sx, sy, zoom) => {
-          const value = zoom?.value ?? zoom;
-          const last = lastPushed.current;
-          if (Math.abs(sx - last.x) < 0.5 && Math.abs(sy - last.y) < 0.5 && Math.abs(value - last.z) < 0.001) return;
-          onScrollToFlow?.({ x: sx * value, y: sy * value, zoom: value });
         }}
         UIOptions={{
           canvasActions: {

@@ -58,6 +58,7 @@ npm run scan         # 仅扫描，输出统计
 - **绘图双平面（committed 世界 + 目标事务）**: 已提交绘图按 customData.below 分成沉/浮两张静态 SVG，通过 React Flow ViewportPortal
   与卡片共用唯一 viewport transform；平移/缩放不再驱动 Excalidraw 或重导出。选绘图先进入普通平面待选态，命中后只把目标的容器/绑定/分组/画框递归关系闭包交给临时编辑器；新绘图从空事务开始，绝不把全场抬到卡片上。
   committed 世界编辑时持续在场，只 hole-punch 事务 originalIds；局部 draft 水合后仍先隐藏，hole SVG 进入 DOM 的 layout effect 才同步显现。尚未显现、不可交互的 opening draft 没有用户改动主权，任何退出都在 flush/落盘/closing 前直接取消并恢复 committed 世界；每次 opening 另有唯一 request 身份，上一代迟到的 drain/失败/帧回调不得触碰下一代。已显现事务的退出由 FlowCanvas 把 draft 合并回全量基线并经串行队列落盘，成功即把本轮 draft IDs 并入事务所有权并 rebase merged 基线，完整 merged SVG 进入 DOM 后同一帧卸载 draft，并只在 request 身份仍匹配时收口残留 opening Promise；失败保留洞、编辑现场与最后成功基线，回执严格区分“未落盘”与“已保存但画面交接失败”，DrawLayer 永不直存局部副本。
+  编辑态导航是独立相机事务：第一个 wheel/空格拖/中键/手工具意图先阻断 Excalidraw，freeze draft 并用第二个 InkWorldLayer 静态预览接管；预览 DOM ready 后才逐事件改唯一 RF viewport，180ms 尾部只同步 align Excalidraw 一次，双 rAF token 握手后同一 commit 恢复 live/撤预览。wheel 对外部功能件放行，对 Excal textarea/Island 只断传播保留默认滚动，绘图面才进 RF 相机；缩放快捷键与 Safari gesture 也在 root capture 阻断 Excal 全局监听并只产出 RF viewport，文字普通字符与 Excal UI 默认行为保留。window pointer 监听是幂等资源，finish/reset/exit/unmount 均无条件回收。新手势可抢占过期 resume；freezing 退出丢弃未 ready preview，只有 suspended/resuming 预览可填 closing 洞；IME 同周期只 freeze/提示一次，compositionend 解锁。
   普通态绘图动作串行提交，每笔到队首才基于上一成功快照变换，失败不推进基线也不毒死后续。沉层点击让位卡片，浮层命中仍跟着视觉顺序
 - **容器承载律 (FigJam/Miro 共识)**: 墨迹中心落在街区/画板内就跟容器走——容器拖动、自动整理、撤销整理三路都量差平移锚定墨迹
   （面积小者优先认领，绑定标签随宿主）；小地图画一切：MiniMapInk 镜像 minimap 的 svg viewBox 把区域底板与批注投进缩略图（Miro 式地标定向）
