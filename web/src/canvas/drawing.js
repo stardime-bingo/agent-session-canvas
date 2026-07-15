@@ -1,7 +1,7 @@
 /**
  * [INPUT]: Excalidraw 的元素数组与 BinaryFiles 字典
- * [OUTPUT]: 提供已提交绘图的过滤/删除/沉浮/平移纯变换、整理的单步墨迹撤销票据、唯一功能件命中排除表、首次新建大底板共享判定/落笔退场状态机/自动沉层、目标关系闭包/局部编辑事务/全量合并、
- *           可稳定排空且按成功代际守卫撤销的串行提交队列、屏幕override/外部props/队列三真相同步门、opening request 身份门/相机事务与退出策略/IME 周期状态机/隐藏 opening 取消/退出回执/closing 收口步、编辑器就绪与几何互斥纯门、资产快照/命中/已 paint 帧真相与有界重试、双平面固定 z-order 槽内 hole 分组签名与 ready/in-flight 工作路由/包围盒与承载判定
+ * [OUTPUT]: 提供已提交绘图的过滤/删除/沉浮/平移纯变换、整理的单步墨迹撤销票据、包含 Excalidraw `.Island` 的唯一功能件命中排除表、首次新建大底板共享判定/落笔退场状态机/自动沉层、目标关系闭包/局部编辑事务/全量合并、
+ *           可稳定排空且按成功代际守卫撤销的串行提交队列、屏幕override/外部props/队列三真相同步门、opening request 身份门/已对齐 resuming 相机事务与分期退出策略/可渲染输入盾呈现策略/IME 周期状态机/隐藏 opening 取消/退出回执/closing 收口步、编辑器就绪与几何互斥纯门、资产快照/命中/已 paint 帧真相与有界重试、双平面固定 z-order 槽内 hole 分组签名与 ready/in-flight 工作路由/包围盒与承载判定
  * [POS]: 绘图的纯数据内核；静态世界层、临时编辑器与普通态动作共用，全部可由 node:test 证伪
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -235,7 +235,7 @@ export function drawingFrameRetryDecision(failedAttempt, maxAttempts = DRAWING_F
 }
 
 // 点击/右键/悬停共用的唯一功能件边界：功能件永远优先于覆盖它的墨迹。
-export const DRAWING_HIT_BLOCK = '.container-drag-handle, .react-flow__resize-control, .react-flow__handle, .nodrag, button, input, textarea, [contenteditable]';
+export const DRAWING_HIT_BLOCK = '.container-drag-handle, .react-flow__resize-control, .react-flow__handle, .nodrag, .Island, button, input, textarea, [contenteditable]';
 
 // 普通看板态不挂 Excalidraw：所有主权动作都是已提交数组上的不可变变换。
 // 宿主形状与它的绑定文字同生共死、同层移动，不留幽灵标签。
@@ -581,7 +581,7 @@ export const drawingOpeningRequestCurrent = (currentRequest, request) => !!reque
 
 const LIVE_CAMERA = Object.freeze({ phase: 'live', token: null });
 
-// camera token 与 opening token 完全独立；迟到帧返回同一 state 引用，调用方即可零副作用退出。
+// camera token 与 opening token 完全独立；resuming 只表示本尾部已成功 align、仅等双 rAF；迟到帧返回同一 state 引用。
 export function drawingCameraStep(state = LIVE_CAMERA, event = {}) {
   const current = state.token === event.token && !!event.token;
   if (event.type === 'navigate') {
@@ -596,7 +596,7 @@ export function drawingCameraStep(state = LIVE_CAMERA, event = {}) {
   if (event.type === 'preview-error') {
     return current && state.phase === 'freezing' ? LIVE_CAMERA : state;
   }
-  if (event.type === 'resume') {
+  if (event.type === 'resume-aligned') {
     return state.phase === 'suspended' && event.token ? { phase: 'resuming', token: event.token } : state;
   }
   if (event.type === 'resume-ready') {
@@ -609,13 +609,18 @@ export function drawingCameraStep(state = LIVE_CAMERA, event = {}) {
   return state;
 }
 
-// 退出只能保留已 ready 的 preview 填 closing 的洞；freezing 副本尚未可见，必须丢弃。
+// 退出只在尚未对齐的 suspended 补 align；已 ready preview 可填 closing 的洞，freezing 副本必须丢弃。
 export function drawingCameraExitPolicy(state = LIVE_CAMERA) {
   const phase = state?.phase || 'live';
   return {
-    align: phase !== 'live',
+    align: phase === 'suspended',
     keepPreview: phase === 'suspended' || phase === 'resuming',
   };
+}
+
+// cameraStateRef 不参与 React render；输入盾只能由同 commit 可见的 live/preview 表征推导。
+export function drawingCameraPresentation({ active = false, visible = false, hasPreview = false } = {}) {
+  return { showShield: !!active && !visible && !!hasPreview };
 }
 
 const IDLE_COMPOSITION = Object.freeze({ cycle: 0, active: false, blocked: false, notified: false });

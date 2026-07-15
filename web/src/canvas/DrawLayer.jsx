@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 @excalidraw/excalidraw 与局部事务 elements/files；持久化主权由 FlowCanvas 的全量队列持有
- * [OUTPUT]: 对外提供仅在编辑态挂载的 DrawLayer；维护/flush/freeze 局部 draft、上报 IME 周期、识别新事务单次大底板落笔、capture 截断 Excal 缩放键，并仅在 opening/resume 同步对齐 RF viewport
+ * [OUTPUT]: 对外提供仅在编辑态挂载的 DrawLayer；维护/flush/freeze 局部 draft、上报 IME 周期、在手势跟踪前排除编辑器功能岛、识别新事务单次大底板落笔，并仅在 opening/resume 同步对齐 RF viewport
  * [POS]: 临时目标事务编辑器；绝不直接保存局部副本，普通态与未选目标始终不挂载
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -8,10 +8,9 @@ import React, { forwardRef, useEffect, useImperativeHandle, useRef } from 'react
 import { Excalidraw } from '@excalidraw/excalidraw';
 import '@excalidraw/excalidraw/index.css';
 import {
-  deleteDrawingElement, drawingAutoExitGestureStep, drawingEditorReadyStep, drawingSnapshot, hitDrawingElement,
+  deleteDrawingElement, DRAWING_HIT_BLOCK, drawingAutoExitGestureStep, drawingEditorReadyStep, drawingSnapshot, hitDrawingElement,
   setDrawingElementPlane, translateDrawingElements,
 } from './drawing.js';
-import { drawingZoomKeyRoute } from './gestures.js';
 
 export default forwardRef(function DrawLayer({ active, visible = true, initialElements, initialFiles, autoExitLargeNew = false, onToolChange, onReady, onDraftPageHide, onExitToCanvas, onAutoExitLargeNew, onCompositionChange }, ref) {
   const apiRef = useRef(null);
@@ -135,6 +134,10 @@ export default forwardRef(function DrawLayer({ active, visible = true, initialEl
 
   const onDown = e => {
     if (!active || !visible || !e.isPrimary || e.button !== 0) return;
+    if (e.target.closest?.(DRAWING_HIT_BLOCK)) {
+      downRef.current = null;
+      return;
+    }
     cancelAutoExit();
     const s = apiRef.current?.getAppState();
     const elements = scene();
@@ -176,22 +179,9 @@ export default forwardRef(function DrawLayer({ active, visible = true, initialEl
     downRef.current = null;
     cancelAutoExit(down.token);
   };
-  const blockZoomKey = e => {
-    const target = e.target;
-    const editable = target?.tagName === 'TEXTAREA' || target?.tagName === 'INPUT' || target?.isContentEditable;
-    const route = drawingZoomKeyRoute({
-      code: e.code, editable, shiftKey: e.shiftKey, altKey: e.altKey,
-      metaKey: e.metaKey, ctrlKey: e.ctrlKey,
-    });
-    if (route === 'pass') return;
-    if (route === 'block') e.preventDefault();
-    e.stopPropagation();
-  };
-
   return (
     <div ref={rootRef} className={`draw-layer draw-active${visible ? '' : ' draw-pending'}`}
       onPointerDownCapture={onDown} onPointerUpCapture={onUp} onPointerCancelCapture={onPointerCancel}
-      onKeyDownCapture={blockZoomKey}
       onCompositionStartCapture={() => { composingRef.current = true; onCompositionChange?.(true); }}
       onCompositionEndCapture={() => { composingRef.current = false; onCompositionChange?.(false); }}
       style={{ position: 'absolute', inset: 0, zIndex: 6, transformOrigin: '0 0', pointerEvents: visible ? 'auto' : 'none' }}>

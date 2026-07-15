@@ -3,9 +3,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import {
-  advanceDrawingTransaction, anchoredDrawingIds, autoSinkLargeNewDrawingDraft, canvasGeometryAllowed, canvasGeometryPreparation, committedDrawingElements, createDrawingArrangeUndoTicket, createDrawingCommitQueue, deleteDrawingElement, DRAWING_HIT_BLOCK, drawingBounds, drawingCameraExitPolicy, drawingCameraStep, drawingCompositionStep,
+  advanceDrawingTransaction, anchoredDrawingIds, autoSinkLargeNewDrawingDraft, canvasGeometryAllowed, canvasGeometryPreparation, committedDrawingElements, createDrawingArrangeUndoTicket, createDrawingCommitQueue, deleteDrawingElement, DRAWING_HIT_BLOCK, drawingBounds, drawingCameraExitPolicy, drawingCameraPresentation, drawingCameraStep, drawingCompositionStep,
   createDrawingTransaction, drawingEditorReadyStep, drawingTransactionClosure, drawingTransactionVisibleElements,
   drawingAutoExitGestureStep, drawingClosingHandoffStep, drawingExitAction, drawingExitFailureNotice, drawingFilesSignature, drawingFontSignature, drawingFontSignaturesEqual, drawingFontWorkRoute, drawingFrameHitElements, drawingFrameRetryDecision, drawingFrameTruthStep, drawingOpeningRequestCurrent, drawingPlaneDirtyPlan, drawingPlaneGroupPlan, drawingPlaneGroups, drawingPlaneSignature, drawingPlaneSignaturesEqual, drawingPlaneSettledInFlight, drawingPlaneWorkRoute, drawingRestoredWorldOverride, drawingSnapshot, drawingWorldInputStep, drawingWorldSyncStep, hitDrawingElement, isLargeFilledDrawingElement, setDrawingElementPlane, splitDrawingPlanes,
   mergeDrawingTransaction, translateDrawingElements,
@@ -15,6 +16,22 @@ import { createCanvasAcceptanceElements, mutateBelowPlane } from './fixtures/can
 
 const image = id => ({ id: `element-${id}`, type: 'image', fileId: id });
 const binary = id => ({ id, mimeType: 'image/png', dataURL: 'data:image/png;base64,c3ludGhldGlj', created: 1 });
+
+const readNamedFunction = (source, name) => {
+  const start = source.indexOf(`function ${name}`);
+  assert.ok(start >= 0, `缺少具名纯 helper ${name}`);
+  const bodyStart = source.indexOf('{', start);
+  let depth = 0;
+  for (let index = bodyStart; index < source.length; index++) {
+    if (source[index] === '{') depth++;
+    if (source[index] !== '}') continue;
+    depth--;
+    if (depth === 0) {
+      return Function(`"use strict"; return (${source.slice(start, index + 1)});`)();
+    }
+  }
+  throw new Error(`无法读取具名纯 helper ${name}`);
+};
 
 const driveEditorHandshake = events => {
   let state = {};
@@ -435,22 +452,98 @@ test('camera token 状态机：迟到 preview/失败回 live/resume 被新手势
   state = drawingCameraStep(state, { type: 'preview-ready', token: freeze2 });
   assert.deepEqual(state, { phase: 'suspended', token: freeze2 });
   const resume1 = {};
-  state = drawingCameraStep(state, { type: 'resume', token: resume1 });
+  state = drawingCameraStep(state, { type: 'resume-aligned', token: resume1 });
   assert.deepEqual(state, { phase: 'resuming', token: resume1 });
   const gesture2 = {};
   state = drawingCameraStep(state, { type: 'navigate', token: gesture2 });
   assert.deepEqual(state, { phase: 'suspended', token: gesture2 });
   assert.equal(drawingCameraStep(state, { type: 'resume-ready', token: resume1 }), state, '迟到 resume 不得显现 live');
   const resume2 = {};
-  state = drawingCameraStep(state, { type: 'resume', token: resume2 });
+  state = drawingCameraStep(state, { type: 'resume-aligned', token: resume2 });
   state = drawingCameraStep(state, { type: 'resume-ready', token: resume2 });
   assert.deepEqual(state, { phase: 'live', token: null });
 
   const freeze3 = {}, resume3 = {};
   state = drawingCameraStep(undefined, { type: 'navigate', token: freeze3 });
   state = drawingCameraStep(state, { type: 'preview-ready', token: freeze3 });
-  state = drawingCameraStep(state, { type: 'resume', token: resume3 });
+  state = drawingCameraStep(state, { type: 'resume-aligned', token: resume3 });
   assert.deepEqual(drawingCameraStep(state, { type: 'resume-error', token: resume3 }), { phase: 'live', token: null });
+});
+
+test('相机尾部先成功 align 才进入 resuming，期间退出不得重复 align', () => {
+  const freeze = {};
+  let state = drawingCameraStep(undefined, { type: 'navigate', token: freeze });
+  state = drawingCameraStep(state, { type: 'preview-ready', token: freeze });
+  assert.deepEqual(state, { phase: 'suspended', token: freeze });
+
+  let alignCount = 0;
+  const align = () => { alignCount++; return true; };
+  const resume = {};
+  assert.equal(align(), true, '本尾部必须先完成唯一一次真实 align');
+  state = drawingCameraStep(state, { type: 'resume-aligned', token: resume });
+  assert.deepEqual(state, { phase: 'resuming', token: resume }, 'resuming 只表示已 align、仅等双 rAF');
+
+  const policy = drawingCameraExitPolicy(state);
+  if (policy.align) align();
+  assert.deepEqual(policy, { align: false, keepPreview: true });
+  assert.equal(alignCount, 1, '同一尾部在双 rAF 前退出也只能真实 align 一次');
+});
+
+test('相机呈现策略只在 live 隐藏且 preview 在场时挂输入盾', () => {
+  assert.deepEqual(drawingCameraPresentation({ active: true, visible: true, hasPreview: false }), {
+    showShield: false,
+  });
+  assert.deepEqual(drawingCameraPresentation({ active: true, visible: true, hasPreview: true }), {
+    showShield: false,
+  }, 'freezing 期 live editor 自己持有输入');
+  assert.deepEqual(drawingCameraPresentation({ active: true, visible: false, hasPreview: true }), {
+    showShield: true,
+  }, 'suspended/resuming 以及保留 preview 的 closing 期必须遮挡 RF');
+  assert.deepEqual(drawingCameraPresentation({ active: false, visible: false, hasPreview: true }), {
+    showShield: false,
+  });
+});
+
+test('生产 FlowCanvas 真正消费相机呈现策略，快捷键不再归 DrawLayer 双重持有', () => {
+  const flowCanvas = fs.readFileSync(path.resolve('web/src/canvas/FlowCanvas.jsx'), 'utf8');
+  const drawLayer = fs.readFileSync(path.resolve('web/src/canvas/DrawLayer.jsx'), 'utf8');
+  const css = fs.readFileSync(path.resolve('web/src/theme.css'), 'utf8');
+  assert.match(flowCanvas, /drawingCameraPresentation\(\{[\s\S]*active:\s*penActive[\s\S]*visible:\s*drawVisible[\s\S]*hasPreview:\s*!!draftPreview/);
+  assert.match(flowCanvas, /cameraPresentation\.showShield\s*&&[\s\S]*data-drawing-camera-shield/);
+  assert.match(flowCanvas, /target\s*===\s*document\.body\s*\|\|\s*target\s*===\s*document\.documentElement/,
+    '画布点击后焦点回 body 时快捷键仍必须归 RF');
+  assert.doesNotMatch(flowCanvas, /target\?\.closest\?\.\(CAMERA_EXTERNAL_EXCLUDE\)\) return;[\s\S]{0,300}drawingZoomKeyCommand/,
+    '焦点留在 z:7 缩放岛时不得把快捷键放给 Excal');
+  const fitDefinition = flowCanvas.indexOf('const navigateDrawingFit = useCallback');
+  const keyboardOwner = flowCanvas.indexOf('drawingZoomKeyCommand({');
+  assert.ok(fitDefinition >= 0 && keyboardOwner > fitDefinition,
+    '键盘 owner 必须在 navigateDrawingFit 定义后安装，不得在 render 依赖求值时触发 TDZ');
+  assert.match(flowCanvas, /command\s*===\s*['"]fit['"]\s*\?\s*navigateDrawingFit\(null\)\s*:\s*navigateDrawingZoom\(command\)/,
+    'Shift+Digit1/2/3 必须分流到已有 RF 全景事务');
+  assert.match(css, /\.drawing-camera-shield\s*\{[^}]*z-index:\s*6[^}]*pointer-events:\s*auto/s);
+  assert.doesNotMatch(drawLayer, /drawingZoomKeyRoute|onKeyDownCapture=/,
+    'DrawLayer 不得保留第二套缩放键 owner');
+});
+
+test('生产 FlowCanvas 只经唯一 align wrapper 与只读完整计数暴露真实资源生命周期', () => {
+  const flowCanvas = fs.readFileSync(path.resolve('web/src/canvas/FlowCanvas.jsx'), 'utf8');
+  const interactionFixture = fs.readFileSync(path.resolve('tests/fixtures/canvas-acceptance/interaction-data.js'), 'utf8');
+  assert.match(flowCanvas, /const alignDrawingViewport\s*=\s*useCallback\(\(controller,\s*vp\)\s*=>/);
+  assert.equal((flowCanvas.match(/\.alignViewport\(/g) || []).length, 1,
+    '除唯一 wrapper 内真实调用外不得绕过计数直接 align');
+  assert.equal((flowCanvas.match(/alignDrawingViewport\(/g) || []).length, 3,
+    'opening、尾部、suspended exit 三个生产点必须全部且只能走 wrapper');
+  assert.match(flowCanvas, /cameraAlignCount:\s*drawingViewportAlignCountRef\.current/);
+  assert.doesNotMatch(flowCanvas, /cameraResumeAlignCount|cameraResumeAlignCountRef/,
+    '只读 snapshot 不得继续暴露只统计尾部的误导字段');
+  assert.match(flowCanvas, /pointerAcquisitionCount:\s*pointerAcquisitionCountRef\.current/);
+  assert.match(flowCanvas, /pointerCleanupCount:\s*pointerCleanupCountRef\.current/);
+  assert.match(flowCanvas, /if\s*\(resource\.attach\(\)\)\s*\{\s*pointerAcquisitionCountRef\.current\+\+/s);
+  assert.match(flowCanvas, /if\s*\(resource\?\.cleanup\(\)\)\s*pointerCleanupCountRef\.current\+\+/s);
+  assert.match(interactionFixture, /alignCount:\s*state\?\.cameraAlignCount/);
+  assert.match(interactionFixture, /pointerAcquisitionCount:\s*state\?\.pointerAcquisitionCount/);
+  assert.match(interactionFixture, /pointerCleanupCount:\s*state\?\.pointerCleanupCount/);
+  assert.doesNotMatch(interactionFixture, /resumeAlignCount|cameraResumeAlignCount/);
 });
 
 test('exit 抢占 freezing：未 ready preview 必须清掉，迟到 ready 不得再挂双影', async () => {
@@ -465,7 +558,7 @@ test('exit 抢占 freezing：未 ready preview 必须清掉，迟到 ready 不�
   });
 
   const policy = drawingCameraExitPolicy(state);
-  assert.deepEqual(policy, { align: true, keepPreview: false });
+  assert.deepEqual(policy, { align: false, keepPreview: false });
   if (!policy.keepPreview) preview = null;
   state = drawingCameraStep(state, { type: 'reset' });
   release();
@@ -474,7 +567,7 @@ test('exit 抢占 freezing：未 ready preview 必须清掉，迟到 ready 不�
   assert.equal(preview, null, '迟到 preview-ready 不得恢复已清理的静态副本');
 
   assert.deepEqual(drawingCameraExitPolicy({ phase: 'suspended', token: {} }), { align: true, keepPreview: true });
-  assert.deepEqual(drawingCameraExitPolicy({ phase: 'resuming', token: {} }), { align: true, keepPreview: true });
+  assert.deepEqual(drawingCameraExitPolicy({ phase: 'resuming', token: {} }), { align: false, keepPreview: true });
   assert.deepEqual(drawingCameraExitPolicy({ phase: 'live', token: null }), { align: false, keepPreview: false });
 });
 
@@ -679,10 +772,31 @@ test('连续整理只保留最近一步撤销，R0→R1→R2 后一次撤销使�
   assert.equal(restored[0].x, 110);
 });
 
-test('绘图命中功能件排除表覆盖 nodrag 与 React Flow 连接点', () => {
+test('绘图命中功能件排除表覆盖 nodrag、React Flow 连接点与 Excalidraw 功能岛', () => {
   const selectors = new Set(DRAWING_HIT_BLOCK.split(',').map(selector => selector.trim()));
   assert.equal(selectors.has('.nodrag'), true);
   assert.equal(selectors.has('.react-flow__handle'), true);
+  assert.equal(selectors.has('.Island'), true, '锁定版 Excalidraw 的功能岛类名区分大小写');
+  assert.equal(selectors.has('.excalidraw'), false, '真实 Excalidraw canvas 空白仍必须允许退场');
+});
+
+test('DrawLayer 在建立空点退场与大底板手势前先排除编辑器功能岛', () => {
+  const source = fs.readFileSync(path.resolve('web/src/canvas/DrawLayer.jsx'), 'utf8');
+  const start = source.indexOf('const onDown = e => {');
+  const end = source.indexOf('const onUp = e => {', start);
+  assert.ok(start >= 0 && end > start, 'DrawLayer 必须保留可审计的 onDown/onUp 边界');
+  const onDown = source.slice(start, end);
+  const guard = onDown.indexOf('e.target.closest?.(DRAWING_HIT_BLOCK)');
+  const clear = onDown.indexOf('downRef.current = null', guard);
+  const cancel = onDown.indexOf('cancelAutoExit()');
+  const begin = onDown.indexOf("type: 'begin'");
+  const track = onDown.indexOf('downRef.current = {');
+  assert.ok(guard >= 0, 'DrawLayer onDown 必须复用共享 DRAWING_HIT_BLOCK');
+  assert.ok(clear > guard, '功能岛 pointerdown 必须清理任何旧 downRef');
+  assert.match(onDown.slice(guard, cancel), /downRef\.current = null;\s*return;/,
+    '功能岛必须立即退出 onDown');
+  assert.ok(guard < cancel && guard < begin && guard < track,
+    '功能岛门必须早于 auto-exit 状态和空点退场候选建立');
 });
 
 test('双平面分流：customData.below 沉层与浮层各归各，顺序保留', () => {
@@ -845,6 +959,106 @@ test('4518 帧探针只能驱动真实 open/exit，故障只能从 InkWorld expo
     '导出故障 seam 必须位于真实 InkWorld exporter 边界');
 });
 
+test('4518 尾窗证伪只由可见按钮武装只读 rAF+timer 双时钟，不自造输入', () => {
+  const fixture = fs.readFileSync(path.resolve('tests/fixtures/canvas-acceptance/interaction-data.js'), 'utf8');
+  const checkNamesSource = fixture.match(/const CHECK_NAMES\s*=\s*Object\.freeze\(\[([^\]]+)]\)/)?.[1] || '';
+  const tailHarnessSource = fixture.match(/const writeCameraTailProof[\s\S]+?(?=\n  const publish)/)?.[0] || '';
+  const cleanupSource = fixture.match(/const cleanupCameraTailRun[\s\S]+?(?=\n  const failCameraTailRun)/)?.[0] || '';
+  const cancelSource = fixture.match(/function cancelCameraTailObservation[\s\S]+?(?=\n}\n\nfunction cameraTailCallForRun)/)?.[0] || '';
+  const observeSource = tailHarnessSource.match(/const observe = \(activeRun, source\)[\s\S]+?(?=\n    const scheduleRaf)/)?.[0] || '';
+
+  assert.match(fixture, /data-camera-tail-exit-arm/,
+    '必须有始终可见、可由 Computer Use 点击的尾窗证伪按钮');
+  assert.match(tailHarnessSource, /requestAnimationFrame\([\s\S]+?observe\(run,\s*['"]raf['"]\)/,
+    '必须持续预注册 run-scoped rAF 观察 resuming');
+  assert.match(tailHarnessSource, /setTimeout\([\s\S]+?observe\(run,\s*['"]timer['"]\)/,
+    '必须同时预注册 run-scoped timer 补足后台 rAF 盲窗');
+  assert.doesNotMatch(fixture, /cameraTailWatcherRafRef/,
+    '观察句柄必须全部归当前 run，不得再跨 run 共享全局 rAF ref');
+  assert.match(cleanupSource, /cancelCameraTailObservation\(run\)/,
+    'cleanup 必须统一取消当前 run 的 rafId、pollId 与 waitTimeoutId');
+  assert.match(cancelSource, /cancelAnimationFrame\(run\.rafId\)/, 'cleanup 必须取消当前 run rafId');
+  assert.match(cancelSource, /clearTimeout\(run\.pollId\)/, 'cleanup 必须取消当前 run pollId');
+  assert.match(cancelSource, /clearTimeout\(run\.waitTimeoutId\)/, 'cleanup 必须取消等待 resuming 的 watchdog');
+  assert.doesNotMatch(observeSource, /shieldSamples/,
+    'timer/rAF observe 只能捕获 phase，不得生成 shield 帧样本');
+  assert.match(tailHarnessSource, /await nextFrame\(\);[\s\S]+?shieldSamples\.push/,
+    'shieldSamples 必须仍只由真实 rAF 帧生成');
+  assert.match(tailHarnessSource, /frameTestProbeRef\.current\?\.snapshot\(\)/,
+    'watcher 只读 production frameTestProbe snapshot');
+  assert.match(tailHarnessSource, /current\?\.pointerResourceActive[\s\S]+?writeCameraTailProof\(run, \{ pointerActiveObserved: true \}\)/,
+    'pointer active 仍必须采样并保留为诊断字段');
+  assert.match(tailHarnessSource, /frameTestProbeRef\.current\?\.exitDrawing\(\)/,
+    '观察到 resuming 后必须调用唯一 production exitDrawing');
+  assert.match(tailHarnessSource, /configure\(['"]delay['"],\s*run\.scenario,\s*run\.runToken\)/,
+    'selection closing 必须使用本轮唯一 scenario/runToken 注入 dirty export delay');
+  assert.match(fixture, /releaseDelayed\(\)/,
+    '尾窗取样后必须释放 delayed export');
+  assert.match(fixture, /manualProof[\s\S]*cameraTailExit/,
+    '报告必须独立暴露 manualProof.cameraTailExit');
+  assert.doesNotMatch(checkNamesSource, /cameraTailExit/,
+    '人工尾窗 proof 不得混入七项自动 CHECK_NAMES');
+  assert.doesNotMatch(tailHarnessSource, /\.openDrawing\s*\(|\.setViewport\s*\(/,
+    '尾窗按钮/watcher 不得打开事务或直写 viewport');
+  assert.doesNotMatch(fixture, /dispatchEvent\s*\(|new\s+PointerEvent\s*\(|\.click\s*\(|\.focus\s*\(/,
+    'fixture 不得派发合成输入、程序点击或焦点切换');
+});
+
+test('4518 尾窗双时钟：零 rAF 时 timer 可捕获 resuming，紧邻回调不得双 exit', () => {
+  const fixture = fs.readFileSync(path.resolve('tests/fixtures/canvas-acceptance/interaction-data.js'), 'utf8');
+  const cameraTailObservationStep = readNamedFunction(fixture, 'cameraTailObservationStep');
+  const initial = { resumingHandled: false, observerSource: null, rafTicks: 0, timerTicks: 0 };
+
+  const capturedByTimer = cameraTailObservationStep(initial, 'timer', 'resuming');
+  assert.deepEqual(capturedByTimer, {
+    resumingHandled: true,
+    observerSource: 'timer',
+    rafTicks: 0,
+    timerTicks: 1,
+    capture: true,
+  }, 'rAF 一次都未运行时，timer 仍必须捕获且先锁住 handled');
+
+  const adjacentRaf = cameraTailObservationStep(capturedByTimer, 'raf', 'resuming');
+  const adjacentTimer = cameraTailObservationStep(adjacentRaf, 'timer', 'resuming');
+  assert.equal(adjacentRaf.capture, false, '紧邻 rAF 不得第二次 exit');
+  assert.equal(adjacentTimer.capture, false, '紧邻 timer 不得第二次 exit');
+  assert.equal(adjacentTimer.observerSource, 'timer', '首个捕获时钟是唯一证据主权');
+  assert.deepEqual({ rafTicks: adjacentTimer.rafTicks, timerTicks: adjacentTimer.timerTicks },
+    { rafTicks: 1, timerTicks: 2 }, '两种时钟只累计各自观察次数');
+});
+
+test('4518 尾窗证据按 call 起点、run token 与 closing revision 三重隔离', () => {
+  const fixture = fs.readFileSync(path.resolve('tests/fixtures/canvas-acceptance/interaction-data.js'), 'utf8');
+  const cameraTailCallForRun = readNamedFunction(fixture, 'cameraTailCallForRun');
+  const cameraTailRunCurrent = readNamedFunction(fixture, 'cameraTailRunCurrent');
+  const active = {
+    runToken: 2,
+    scenario: 'camera-tail-exit-2',
+    callStartIndex: 1,
+    closingRevision: 22,
+  };
+  const calls = [
+    { callIndex: 0, runToken: 1, scenario: 'camera-tail-exit-1', revision: 11, mode: 'delay', kind: 'group' },
+    { callIndex: 1, runToken: 1, scenario: active.scenario, revision: 22, mode: 'delay', kind: 'group' },
+    { callIndex: 2, runToken: active.runToken, scenario: active.scenario, revision: 11, mode: 'delay', kind: 'group' },
+  ];
+  assert.equal(cameraTailCallForRun(calls, active), null,
+    '旧历史、旧 token 以及在新 configure 后才到的旧 revision 都不得命中新轮');
+  const exact = { callIndex: 3, runToken: 2, scenario: active.scenario, revision: 22, mode: 'delay', kind: 'group' };
+  assert.equal(cameraTailCallForRun([...calls, exact], active)?.callIndex, 3,
+    '只有本轮起点之后且 token/scenario/revision 精确一致的 call 可被接受');
+
+  const stale = { runToken: 1 };
+  assert.equal(cameraTailRunCurrent(active, active), true);
+  assert.equal(cameraTailRunCurrent(active, stale), false);
+  let status = 'armed';
+  const lateTimeout = () => { if (cameraTailRunCurrent(active, stale)) status = 'FAIL'; };
+  const lateFailAfterCleanup = () => { if (cameraTailRunCurrent(active, stale)) status = 'FAIL'; };
+  lateTimeout();
+  lateFailAfterCleanup();
+  assert.equal(status, 'armed', '旧 timeout/fail 在 await cleanup 后均不得覆盖新轮 UI');
+});
+
 test('4518 interaction fixture 必须被 focused gate 真正构建', async () => {
   const [{ build }, { default: react }] = await Promise.all([
     import('vite'),
@@ -915,6 +1129,803 @@ test('LE-009 Computer Use 原始证据可选注入 focused behavior log并绑定
     }
   }
   console.log(`LE009_COMPUTER_USE_EVIDENCE ${raw}`);
+});
+
+const LE010_CHECK_NAMES = Object.freeze(['concurrent', 'revision', 'opening', 'closing', 'coldError', 'warmError', 'lateIsolation']);
+const LE010_ACTION_NAMES = Object.freeze([
+  'hardRefresh', 'openDrawingSelection', 'keyboardZoom', 'zoomIsland', 'highFrequencyNavigation',
+  'reopenDrawingSelection', 'armTailWatcher', 'tailNavigation', 'readDiagnostics',
+]);
+const LE010_SNAPSHOT_STAGES = Object.freeze(['baseline', 'selectionLive', 'highFrequencyLive', 'tailPass', 'final']);
+const LE010_CANONICAL_URL = 'http://127.0.0.1:4518/?mode=interaction';
+const LE010_ARTIFACT_STAGES = Object.freeze(['address', 'selection', 'tail']);
+const LE010_ARTIFACT_KEYS = Object.freeze([
+  'id', 'round', 'stage', 'kind', 'relativePath', 'sha256', 'mimeType', 'byteLength', 'width', 'height',
+]);
+const isNonEmptyEvidenceValue = value => typeof value === 'string'
+  ? value.trim().length > 0
+  : Array.isArray(value) ? value.length > 0
+    : !!value && typeof value === 'object' && Object.keys(value).length > 0;
+const isFiniteEvidenceViewport = value => !!value
+  && ['x', 'y', 'zoom'].every(key => Number.isFinite(value[key]));
+
+function assertLe010ExactKeys(value, keys, label) {
+  assert.ok(value && typeof value === 'object' && !Array.isArray(value), `${label} 必须是对象`);
+  assert.deepEqual(Object.keys(value).sort(), [...keys].sort(), `${label} 字段必须精确匹配 schema`);
+}
+
+function le010PathInside(parent, child) {
+  const relative = path.relative(parent, child);
+  return relative !== '' && !relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative);
+}
+
+function le010EvidenceRoot() {
+  const commonDir = execFileSync('git', ['rev-parse', '--path-format=absolute', '--git-common-dir'], {
+    cwd: process.cwd(), encoding: 'utf8',
+  }).trim();
+  return path.join(path.dirname(commonDir), '.loop', 'v2', 'evidence', 'LE-010');
+}
+
+function assertLe010Png(buffer, artifact, label) {
+  const signature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  assert.ok(buffer.length >= 1024, `${label} PNG 字节过短，不是完整截图`);
+  assert.equal(buffer.subarray(0, 8).equals(signature), true, `${label} PNG signature 无效`);
+  assert.equal(buffer.readUInt32BE(8), 13, `${label} 首块必须是 13-byte IHDR`);
+  assert.equal(buffer.subarray(12, 16).toString('ascii'), 'IHDR', `${label} 首块必须是 IHDR`);
+  const width = buffer.readUInt32BE(16);
+  const height = buffer.readUInt32BE(20);
+  assert.ok(width >= 800 && height >= 600, `${label} 必须是至少 800x600 的全屏截图`);
+  assert.equal(width, artifact.width, `${label} PNG width 必须匹配 raw`);
+  assert.equal(height, artifact.height, `${label} PNG height 必须匹配 raw`);
+  const iendOffset = buffer.length - 12;
+  assert.equal(buffer.readUInt32BE(iendOffset), 0, `${label} 末块 IEND 长度必须为 0`);
+  assert.equal(buffer.subarray(iendOffset + 4, iendOffset + 8).toString('ascii'), 'IEND', `${label} 必须以 IEND 结束`);
+}
+
+function assertLe010Artifacts(evidence, candidateSha, evidencePath, evidenceRoot) {
+  assert.match(candidateSha, /^[0-9a-f]{40}$/, 'candidate SHA 必须是 40 位小写十六进制');
+  assert.ok(typeof evidencePath === 'string' && path.isAbsolute(evidencePath), 'evidencePath 必须是绝对路径');
+  const root = path.resolve(evidenceRoot || le010EvidenceRoot());
+  const candidateDir = path.join(root, candidateSha);
+  const expectedEvidencePath = path.join(candidateDir, 'computer-use.raw.json');
+  assert.equal(path.resolve(evidencePath), expectedEvidencePath, 'raw 必须位于当前 LE-010 candidate evidence 目录');
+  const evidenceStat = fs.lstatSync(evidencePath);
+  assert.equal(evidenceStat.isSymbolicLink(), false, 'raw 不得是 symlink');
+  assert.equal(evidenceStat.isFile(), true, 'raw 必须是普通文件');
+  const candidateReal = fs.realpathSync(candidateDir);
+  const evidenceReal = fs.realpathSync(evidencePath);
+  assert.equal(le010PathInside(candidateReal, evidenceReal), true, 'raw realpath 不得越出当前 candidate 目录');
+
+  const expectedIds = [1, 2, 3].flatMap(round => LE010_ARTIFACT_STAGES.map(stage => `round-${round}-${stage}`));
+  assert.ok(Array.isArray(evidence.computerUseArtifacts), 'computerUseArtifacts 必须是数组');
+  assert.equal(evidence.computerUseArtifacts.length, 9, '必须恰好保留九张 Computer Use 截图');
+  assert.deepEqual(evidence.computerUseArtifacts.map(artifact => artifact?.id), expectedIds,
+    '截图 artifact 必须严格按三轮 address/selection/tail 排列');
+  const hashes = new Set();
+  const byId = new Map();
+  for (const artifact of evidence.computerUseArtifacts) {
+    const label = `artifact ${artifact?.id || '<missing>'}`;
+    assertLe010ExactKeys(artifact, LE010_ARTIFACT_KEYS, label);
+    const expectedId = `round-${artifact.round}-${artifact.stage}`;
+    const expectedRelativePath = `screenshots/${expectedId}.png`;
+    assert.ok([1, 2, 3].includes(artifact.round), `${label}.round 必须是 1/2/3`);
+    assert.ok(LE010_ARTIFACT_STAGES.includes(artifact.stage), `${label}.stage 必须是 address/selection/tail`);
+    assert.equal(artifact.id, expectedId, `${label}.id 必须由 round/stage 唯一决定`);
+    assert.equal(artifact.kind, 'computer-use-screenshot', `${label}.kind 必须固定`);
+    assert.equal(artifact.relativePath, expectedRelativePath, `${label}.relativePath 必须固定且不得穿越`);
+    assert.equal(artifact.mimeType, 'image/png', `${label}.mimeType 必须为 image/png`);
+    assert.match(artifact.sha256, /^[0-9a-f]{64}$/, `${label}.sha256 必须是 64 位小写十六进制`);
+    assert.ok(Number.isInteger(artifact.byteLength) && artifact.byteLength >= 1024, `${label}.byteLength 必须是完整截图字节数`);
+    assert.ok(Number.isInteger(artifact.width) && artifact.width >= 800, `${label}.width 必须至少 800`);
+    assert.ok(Number.isInteger(artifact.height) && artifact.height >= 600, `${label}.height 必须至少 600`);
+
+    const artifactPath = path.resolve(candidateDir, artifact.relativePath);
+    assert.equal(artifactPath, path.join(candidateDir, expectedRelativePath), `${label} resolve 路径必须精确匹配`);
+    assert.equal(le010PathInside(candidateDir, artifactPath), true, `${label} resolve 不得越出 candidate 目录`);
+    const stat = fs.lstatSync(artifactPath);
+    assert.equal(stat.isSymbolicLink(), false, `${label} 不得是 symlink`);
+    assert.equal(stat.isFile(), true, `${label} 必须是普通文件`);
+    const realPath = fs.realpathSync(artifactPath);
+    assert.equal(le010PathInside(candidateReal, realPath), true, `${label} realpath 不得越出 candidate 目录`);
+    const buffer = fs.readFileSync(realPath);
+    assert.equal(buffer.length, artifact.byteLength, `${label} byteLength 必须匹配文件`);
+    assert.equal(createHash('sha256').update(buffer).digest('hex'), artifact.sha256, `${label} sha256 必须匹配文件`);
+    assertLe010Png(buffer, artifact, label);
+    assert.equal(hashes.has(artifact.sha256), false, `${label} 不得复用其他阶段的截图字节`);
+    hashes.add(artifact.sha256);
+    byId.set(artifact.id, artifact);
+  }
+  return byId;
+}
+
+function assertLe010Checks(checks, label) {
+  assert.deepEqual(Object.keys(checks || {}).sort(), [...LE010_CHECK_NAMES].sort(),
+    `${label} checks 必须且只能包含七个生产判准`);
+  for (const name of LE010_CHECK_NAMES) assert.equal(checks[name], true, `${label}.${name} 必须为 true`);
+}
+
+function assertLe010DragCoordinates(coordinates, label) {
+  assert.ok(Array.isArray(coordinates) && coordinates.length > 0, `${label}.coordinates 必须非空`);
+  const isPoint = point => Array.isArray(point) && point.length === 2 && point.every(Number.isFinite);
+  const segments = coordinates.length === 2 && coordinates.every(isPoint) ? [coordinates] : coordinates;
+  assert.ok(segments.length > 0, `${label}.coordinates 必须至少有一段`);
+  for (const [segmentIndex, segment] of segments.entries()) {
+    assert.ok(Array.isArray(segment) && segment.length === 2 && segment.every(isPoint),
+      `${label}.coordinates[${segmentIndex}] 必须是两个有限数坐标点`);
+  }
+}
+
+function assertLe010ProductionSnapshot(snapshot, stage, label) {
+  const production = snapshot?.production;
+  assert.ok(production && typeof production === 'object', `${label}.${stage}.production 必须保留生产快照`);
+  assert.ok(Number.isFinite(production.requestedRevision), `${label}.${stage} requestedRevision 必须有限`);
+  assert.ok(Number.isFinite(production.renderedRevision), `${label}.${stage} renderedRevision 必须有限`);
+  assert.ok(isNonEmptyEvidenceValue(production.framePhase), `${label}.${stage} framePhase 必须非空`);
+  assert.ok(isNonEmptyEvidenceValue(production.cameraPhase), `${label}.${stage} cameraPhase 必须非空`);
+  for (const key of ['opening', 'penActive', 'drawVisible', 'cameraShield', 'pointerResourceActive']) {
+    assert.equal(typeof production[key], 'boolean', `${label}.${stage}.production.${key} 必须是布尔生产观测`);
+  }
+  assert.ok(isFiniteEvidenceViewport(production.viewport), `${label}.${stage} viewport 必须全为有限数`);
+  if (stage === 'baseline' || stage === 'tailPass' || stage === 'final') {
+    assert.equal(production.opening, false, `${label}.${stage} 不得残留 opening`);
+    assert.equal(production.cameraPhase, 'live', `${label}.${stage} 相机必须是 live`);
+  }
+  if (stage === 'selectionLive' || stage === 'highFrequencyLive') {
+    assert.equal(production.penActive, true, `${label}.${stage} 必须在真实绘图事务中`);
+    assert.equal(production.drawVisible, true, `${label}.${stage} live editor 必须可见`);
+    assert.equal(production.opening, false, `${label}.${stage} opening 必须已收口`);
+    assert.equal(production.cameraPhase, 'live', `${label}.${stage} 取样时相机必须已恢复 live`);
+  }
+}
+
+function assertLe010ComputerUseEvidence(evidence, candidateSha, evidencePath, { evidenceRoot } = {}) {
+  assert.equal(evidence.candidateSha, candidateSha, 'Computer Use 证据必须绑定当前 candidate SHA');
+  assert.equal(evidence.fixtureOnly, true, '只允许 4518 synthetic fixture');
+  assert.equal(evidence.fixtureUrl, LE010_CANONICAL_URL, 'fixtureUrl 必须逐字绑定 4518 interaction fixture');
+  assert.equal(evidence.realCanvasCoordinateDrag, false, '不得在真实画布做坐标拖拽');
+  assert.equal(evidence.overallPassed, true, '顶层 overallPassed 必须为 true');
+  assert.equal(evidence.verdict, 'PASS', '顶层 verdict 必须为 PASS');
+  for (const name of ['errors', 'validationErrors']) {
+    assert.ok(Array.isArray(evidence[name]), `顶层 ${name} 必须保留原始数组`);
+    assert.equal(evidence[name].length, 0, `顶层 ${name} 必须为零`);
+  }
+  assert.ok(Array.isArray(evidence.runs), 'runs 必须是数组');
+  assert.equal(evidence.runs.length, 3, '必须恰好保留三轮 fresh Computer Use 原始结果');
+  assert.deepEqual(evidence.runs.map(run => run?.round), [1, 2, 3], 'round 必须严格为唯一有序的 1/2/3');
+  const artifactsById = assertLe010Artifacts(evidence, candidateSha, evidencePath, evidenceRoot);
+
+  for (const [index, run] of evidence.runs.entries()) {
+    const label = `run ${index + 1}`;
+    assert.equal(run?.passed, true, `${label} passed 必须为 true`);
+    assert.ok(Array.isArray(run?.errors), `${label} errors 必须保留原始数组`);
+    assert.equal(run.errors.length, 0, `${label} errors 必须为零`);
+
+    assert.ok(Array.isArray(run?.actions) && run.actions.length > 0, `${label} actions 必须非空`);
+    assert.deepEqual(run.actions.map(action => action?.action), [...LE010_ACTION_NAMES],
+      `${label} action 必须严格按九步 UI 顺序`);
+    const [hardRefresh, openSelection, keyboardAction, zoomAction, highFrequencyAction,
+      reopenAction, armAction, tailAction, diagnosticsAction] = run.actions;
+    const addressId = `round-${run.round}-address`;
+    const selectionId = `round-${run.round}-selection`;
+    const tailId = `round-${run.round}-tail`;
+    assert.equal(artifactsById.get(addressId)?.round, run.round, `${label} address artifact 必须属于本轮`);
+    assert.equal(artifactsById.get(selectionId)?.round, run.round, `${label} selection artifact 必须属于本轮`);
+    assert.equal(artifactsById.get(tailId)?.round, run.round, `${label} tail artifact 必须属于本轮`);
+
+    assertLe010ExactKeys(hardRefresh, ['action', 'input', 'observed'], `${label}.hardRefresh`);
+    assertLe010ExactKeys(hardRefresh.input, ['shortcut', 'url', 'artifactId'], `${label}.hardRefresh.input`);
+    assertLe010ExactKeys(hardRefresh.observed, ['status', 'requestedRevision', 'renderedRevision'], `${label}.hardRefresh.observed`);
+    assert.deepEqual(hardRefresh.input, { shortcut: 'super+shift+r', url: LE010_CANONICAL_URL, artifactId: addressId },
+      `${label} hardRefresh 必须逐字绑定本轮 4518 地址截图`);
+    assert.equal(hardRefresh.observed.status, 'pass', `${label} hardRefresh status 必须为 pass`);
+    assert.ok(Number.isFinite(hardRefresh.observed.requestedRevision), `${label} hardRefresh requestedRevision 必须有限`);
+    assert.ok(Number.isFinite(hardRefresh.observed.renderedRevision), `${label} hardRefresh renderedRevision 必须有限`);
+
+    assertLe010ExactKeys(openSelection, ['action', 'input', 'observed'], `${label}.openDrawingSelection`);
+    assertLe010ExactKeys(openSelection.input, ['product', 'strokeClick', 'source', 'artifactId'], `${label}.openDrawingSelection.input`);
+    assertLe010ExactKeys(openSelection.observed, ['requestedRevision', 'renderedRevision', 'zoomControlCount'], `${label}.openDrawingSelection.observed`);
+    assert.equal(openSelection.input.product, '选绘图', `${label} 必须从产品“选绘图”入口进入`);
+    assert.equal(openSelection.input.source, 'current screenshot', `${label} selection source 必须是当前截图`);
+    assert.equal(openSelection.input.artifactId, selectionId, `${label} selection 必须引用本轮截图`);
+    assert.ok(Array.isArray(openSelection.input.strokeClick) && openSelection.input.strokeClick.length === 2
+      && openSelection.input.strokeClick.every(Number.isFinite), `${label} strokeClick 必须是有限坐标点`);
+    assert.ok(Number.isFinite(openSelection.observed.requestedRevision), `${label} selection requestedRevision 必须有限`);
+    assert.ok(Number.isFinite(openSelection.observed.renderedRevision), `${label} selection renderedRevision 必须有限`);
+    assert.ok(Number.isInteger(openSelection.observed.zoomControlCount) && openSelection.observed.zoomControlCount >= 5,
+      `${label} selection 必须看到至少五个缩放控件`);
+
+    assertLe010ExactKeys(keyboardAction, ['action', 'input', 'observed'], `${label}.keyboardZoom`);
+    assertLe010ExactKeys(keyboardAction.observed, ['fitSamples'], `${label}.keyboardZoom.observed`);
+    assert.deepEqual(keyboardAction.input,
+      ['super+plus', 'super+minus', 'super+0', 'Shift+Digit1', 'Shift+Digit2', 'Shift+Digit3'],
+      `${label} keyboardZoom.input 必须严格按六个快捷键顺序`);
+
+    assertLe010ExactKeys(zoomAction, ['action', 'input', 'observed'], `${label}.zoomIsland`);
+    assertLe010ExactKeys(zoomAction.observed, ['viewports'], `${label}.zoomIsland.observed`);
+    assert.deepEqual(zoomAction.input, ['minus', 'plus', '100%', 'fit'], `${label} zoomIsland.input 必须严格有序`);
+    assert.ok(Array.isArray(zoomAction.observed.viewports) && zoomAction.observed.viewports.length === 4
+      && zoomAction.observed.viewports.every(isFiniteEvidenceViewport), `${label} zoomIsland 必须保留四个有限 viewport`);
+
+    assertLe010ExactKeys(highFrequencyAction, ['action', 'input', 'coordinates', 'observed'], `${label}.highFrequencyNavigation`);
+    assertLe010ExactKeys(highFrequencyAction.input, ['sequence', 'gestureCount'], `${label}.highFrequencyNavigation.input`);
+    assertLe010ExactKeys(highFrequencyAction.observed,
+      ['delta', 'pointerAcquisitionDelta', 'pointerCleanupDelta'], `${label}.highFrequencyNavigation.observed`);
+    assertLe010ExactKeys(highFrequencyAction.observed.delta,
+      ['performed', 'gestureCount', 'shieldFrameDelta', 'viewportWriteDelta', 'nodePointerDelta'],
+      `${label}.highFrequencyNavigation.observed.delta`);
+    assert.deepEqual(highFrequencyAction.input, { sequence: ['hand', '产品选绘图', 'hand'], gestureCount: 3 },
+      `${label} 高频导航 input 必须是三次真实手工具序列`);
+    assertLe010DragCoordinates(highFrequencyAction.coordinates, `${label}.highFrequencyNavigation`);
+
+    assertLe010ExactKeys(reopenAction, ['action', 'input', 'observed'], `${label}.reopenDrawingSelection`);
+    assertLe010ExactKeys(reopenAction.input, ['product'], `${label}.reopenDrawingSelection.input`);
+    assertLe010ExactKeys(reopenAction.observed, ['editorLive', 'zoomControlCount'], `${label}.reopenDrawingSelection.observed`);
+    assert.deepEqual(reopenAction.input, { product: '选绘图' }, `${label} reopen 必须只走产品入口`);
+    assert.equal(reopenAction.observed.editorLive, true, `${label} reopen 后 editor 必须 live`);
+    assert.ok(Number.isInteger(reopenAction.observed.zoomControlCount) && reopenAction.observed.zoomControlCount >= 5,
+      `${label} reopen 必须看到至少五个缩放控件`);
+
+    assertLe010ExactKeys(armAction, ['action', 'input', 'observed'], `${label}.armTailWatcher`);
+    assertLe010ExactKeys(armAction.input, ['visibleButton'], `${label}.armTailWatcher.input`);
+    assertLe010ExactKeys(armAction.observed, ['status', 'runToken', 'armVisibility'], `${label}.armTailWatcher.observed`);
+    assert.deepEqual(armAction.input, { visibleButton: '尾窗证伪：idle' }, `${label} 必须由可见按钮武装`);
+    assert.equal(armAction.observed.status, 'armed', `${label} watcher 必须进入 armed`);
+
+    assertLe010ExactKeys(tailAction, ['action', 'input', 'coordinates', 'observed'], `${label}.tailNavigation`);
+    assertLe010ExactKeys(tailAction.input, ['sequence', 'attempt'], `${label}.tailNavigation.input`);
+    assertLe010ExactKeys(tailAction.observed,
+      ['status', 'observerSource', 'acquisitionDelta', 'cleanupDelta', 'viewportWriteDelta'],
+      `${label}.tailNavigation.observed`);
+    assert.deepEqual(tailAction.input, { sequence: ['hand', 'left drag'], attempt: 1 },
+      `${label} tail 必须是一次真实手工具左拖`);
+    assertLe010DragCoordinates(tailAction.coordinates, `${label}.tailNavigation`);
+
+    assertLe010ExactKeys(diagnosticsAction, ['action', 'input', 'observed'], `${label}.readDiagnostics`);
+    assertLe010ExactKeys(diagnosticsAction.input, ['source', 'artifactId'], `${label}.readDiagnostics.input`);
+    assertLe010ExactKeys(diagnosticsAction.observed, ['status', 'proof', 'errors'], `${label}.readDiagnostics.observed`);
+    assert.deepEqual(diagnosticsAction.input,
+      { source: 'read-only CDP window.__CANVAS_INTERACTION__', artifactId: tailId },
+      `${label} diagnostics 必须来自只读 production seam 并引用本轮 tail 截图`);
+    assert.deepEqual(diagnosticsAction.observed, { status: 'pass', proof: 'PASS', errors: [0, 0, 0, 0] },
+      `${label} diagnostics observed 必须精确为 production PASS`);
+
+    assert.ok(Array.isArray(run?.fitViewportSamples), `${label} fitViewportSamples 必须是数组`);
+    assert.equal(run.fitViewportSamples.length, 3, `${label} 必须保留三个 fit 数值样本`);
+    assert.deepEqual(run.fitViewportSamples.map(sample => sample?.code), ['Shift+Digit1', 'Shift+Digit2', 'Shift+Digit3'],
+      `${label} fit 样本 code 必须严格有序`);
+    assert.deepEqual(keyboardAction.observed.fitSamples, run.fitViewportSamples,
+      `${label} keyboard observed 必须与 production fit 样本同源`);
+    for (const [sampleIndex, sample] of run.fitViewportSamples.entries()) {
+      for (const key of ['before', 'after', 'target']) {
+        assert.ok(isFiniteEvidenceViewport(sample?.[key]), `${label} fit sample ${sampleIndex + 1}.${key} 必须全为有限数`);
+      }
+      assert.ok(['x', 'y', 'zoom'].some(key => Math.abs(sample.before[key] - sample.after[key]) > 1e-9),
+        `${label} fit sample ${sampleIndex + 1} 必须真实改变 RF viewport`);
+      for (const key of ['x', 'y', 'zoom']) {
+        const tolerance = 1e-6 * Math.max(1, Math.abs(sample.target[key]));
+        assert.ok(Math.abs(sample.after[key] - sample.target[key]) <= tolerance,
+          `${label} fit sample ${sampleIndex + 1}.after.${key} 必须约等于 production target`);
+      }
+    }
+
+    assert.ok(Array.isArray(run?.snapshots) && run.snapshots.length > 0, `${label} snapshots 必须非空`);
+    assert.deepEqual(run.snapshots.map(snapshot => snapshot?.stage), [...LE010_SNAPSHOT_STAGES],
+      `${label} snapshots.stage 必须严格覆盖五个生产阶段`);
+    run.snapshots.forEach((snapshot, snapshotIndex) => {
+      assertLe010ProductionSnapshot(snapshot, LE010_SNAPSHOT_STAGES[snapshotIndex], label);
+    });
+    const finalSnapshot = run.snapshots.at(-1);
+    assert.equal(finalSnapshot?.suiteStatus, 'pass', `${label} final snapshot suiteStatus 必须为 pass`);
+    assertLe010Checks(finalSnapshot?.checks, `${label}.snapshots.final`);
+
+    assert.equal(run?.handToolDrag, true, `${label} 必须真实选择 Excalidraw 手工具并左拖`);
+    assert.equal(typeof run?.pointerActiveObserved, 'boolean', `${label} pointer active 诊断必须是布尔值`);
+    assert.ok(run?.pointerAcquisitionDelta > 0, `${label} 必须真实获取 pointer 监听资源`);
+    assert.equal(run?.pointerCleanupDelta, run?.pointerAcquisitionDelta, `${label} pointer 获取与有效 cleanup 必须配平`);
+    assert.equal(run?.shieldObserved, true, `${label} 必须观察到输入盾`);
+    assert.equal(run?.nodePointerDelta, 0, `${label} 尾窗不得穿透节点`);
+    assert.deepEqual(run?.shortcuts, { in: true, out: true, reset: true }, `${label} 三个 mod 快捷键必须只改 RF viewport`);
+    assert.ok(Number.isInteger(run?.zoomControls?.visible) && run.zoomControls.visible >= 5, `${label} 必须至少看到 5 个缩放控件`);
+    assert.ok(Array.isArray(run?.zoomControls?.clickable), `${label} clickable 必须保留控件名数组`);
+    for (const control of ['minus', 'plus', '100%', 'fit']) {
+      assert.ok(run.zoomControls.clickable.includes(control), `${label} 缩放岛必须可点 ${control}`);
+    }
+    assert.equal(run?.highFrequency?.performed, true, `${label} 必须执行高频真实导航`);
+    assert.ok(Number.isInteger(run?.highFrequency?.gestureCount) && run.highFrequency.gestureCount >= 3, `${label} 高频导航必须至少 3 次手势`);
+    assert.ok(Number.isFinite(run?.highFrequency?.shieldFrameDelta) && run.highFrequency.shieldFrameDelta >= 3, `${label} 高频导航必须观察多帧输入盾`);
+    assert.ok(Number.isFinite(run?.highFrequency?.viewportWriteDelta) && run.highFrequency.viewportWriteDelta >= 3, `${label} 高频导航必须产生多次 RF viewport 写入`);
+    assert.equal(run?.highFrequency?.nodePointerDelta, 0, `${label} 高频尾窗不得穿透节点`);
+    assert.deepEqual(highFrequencyAction.observed.delta, run.highFrequency,
+      `${label} 高频 action observed 必须与本轮 production delta 同源`);
+    assert.equal(highFrequencyAction.observed.pointerAcquisitionDelta, run.pointerAcquisitionDelta,
+      `${label} 高频 action acquisition 必须与本轮同源`);
+    assert.equal(highFrequencyAction.observed.pointerCleanupDelta, run.pointerCleanupDelta,
+      `${label} 高频 action cleanup 必须与本轮同源`);
+    assert.equal(run?.cameraAlignDelta, 1, `${label} 整段导航所有真实 align 总增量必须恰好为 1`);
+    assert.ok(run?.viewportWriteDelta >= 1, `${label} 必须有 RF viewport 写入`);
+
+    const tail = run?.manualProof?.cameraTailExit;
+    assert.equal(tail?.status, 'PASS', `${label} 尾窗证伪状态必须为 PASS`);
+    assert.equal(tail?.passed, true, `${label} 尾窗证伪必须通过`);
+    assert.equal(tail?.buttonArmed, true, `${label} 必须由可见按钮武装 watcher`);
+    assert.equal(tail?.fixtureDispatchedInput, false, `${label} fixture 不得自造输入`);
+    assert.equal(tail?.phaseAtExit, 'resuming', `${label} 必须在 resuming 同步 exit`);
+    assert.equal(tail?.resumingObserved, true, `${label} watcher 必须真实观察到 resuming`);
+    assert.ok(['raf', 'timer'].includes(tail?.observerSource), `${label} observerSource 只能是 raf 或 timer`);
+    for (const visibilityField of ['armVisibility', 'captureVisibility']) {
+      const visibility = tail?.[visibilityField];
+      assert.ok(visibility && typeof visibility === 'object', `${label} ${visibilityField} 必须保留原始可见性`);
+      assert.ok(['visible', 'hidden', 'prerender'].includes(visibility.visibilityState),
+        `${label} ${visibilityField}.visibilityState 必须是浏览器原始值`);
+      assert.equal(typeof visibility.hasFocus, 'boolean', `${label} ${visibilityField}.hasFocus 必须是布尔值`);
+    }
+    assert.ok(Number.isInteger(tail?.rafTicks) && tail.rafTicks >= 0, `${label} rafTicks 必须是非负整数`);
+    assert.ok(Number.isInteger(tail?.timerTicks) && tail.timerTicks >= 0, `${label} timerTicks 必须是非负整数`);
+    assert.ok(tail.rafTicks + tail.timerTicks > 0, `${label} rAF/timer 至少真实观察一次`);
+    assert.ok(tail.observerSource === 'raf' ? tail.rafTicks > 0 : tail.timerTicks > 0,
+      `${label} observerSource 必须对应非零 tick`);
+    assert.equal(tail?.exitBeforeResumeReady, true, `${label} exit 必须抢在 resume-ready 前`);
+    assert.equal(tail?.exportDelayed, true, `${label} selection closing 必须真实触发 dirty export delay`);
+    assert.equal(tail?.exportReleased, true, `${label} delayed export 必须恢复并释放`);
+    assert.ok(Number.isInteger(tail?.runToken) && tail.runToken > 0, `${label} 必须保留本轮单调 runToken`);
+    assert.ok(Number.isInteger(tail?.callStartIndex) && tail.callStartIndex >= 0, `${label} 必须保留本轮 callStartIndex`);
+    assert.ok(Number.isFinite(tail?.closingRevision), `${label} 必须保留 production closing revision`);
+    assert.equal(tail?.export?.callIndex >= tail.callStartIndex, true, `${label} export.callIndex 必须在本轮起点后`);
+    assert.equal(tail?.export?.runToken, tail.runToken, `${label} export.runToken 必须精确属于本轮`);
+    assert.equal(tail?.export?.scenario, tail.scenario, `${label} export.scenario 必须精确属于本轮`);
+    assert.equal(tail?.export?.revision, tail.closingRevision, `${label} export.revision 必须精确匹配 closing generation`);
+    assert.equal(tail?.cameraAlignDelta, 1, `${label} resuming exit 不得产生第二次 align`);
+    assert.ok(Number.isFinite(tail?.viewportWriteDelta) && tail.viewportWriteDelta > 0, `${label} 真实手工具导航必须写入 RF viewport`);
+    assert.ok(Array.isArray(tail?.shieldSamples) && tail.shieldSamples.length >= 3 && tail.shieldSamples.every(value => value === true), `${label} delayed closing 必须至少连续 3 帧 shield=true`);
+    assert.equal(tail?.nodePointerDelta, 0, `${label} delayed closing 不得穿透节点`);
+    assert.equal(typeof tail?.pointerActiveObserved, 'boolean', `${label} 尾窗 pointer active 诊断必须是布尔值`);
+    assert.ok(tail?.acquisitionDelta > 0, `${label} 必须真实获取 pointer 资源`);
+    assert.equal(tail?.cleanupDelta, tail?.acquisitionDelta, `${label} 尾窗 pointer 获取与 cleanup 必须配平`);
+    assert.equal(tail?.final?.penActive, false, `${label} 尾窗退出后 penActive 必须为 false`);
+    assert.equal(tail?.final?.opening, false, `${label} 尾窗退出后 opening 必须为 false`);
+    assert.equal(tail?.final?.phase, 'live', `${label} 尾窗退出后必须恢复 live`);
+    assert.equal(tail?.final?.shield, false, `${label} 尾窗退出后不得残留输入盾`);
+    assert.equal(tail?.final?.pointerResourceActive, false, `${label} 尾窗退出后不得残留 pointer 资源`);
+    assert.equal(tail?.final?.viewportFinite, true, `${label} 尾窗退出后 viewport 必须全为有限数`);
+    assert.ok(isFiniteEvidenceViewport(tail?.final?.viewport), `${label} 尾窗最终 viewport 必须有限`);
+    assert.equal(armAction.observed.runToken, tail.runToken, `${label} arm action 必须引用本轮 runToken`);
+    assert.deepEqual(armAction.observed.armVisibility, tail.armVisibility, `${label} arm visibility 必须与 proof 同源`);
+    assert.deepEqual(tailAction.observed, {
+      status: tail.status,
+      observerSource: tail.observerSource,
+      acquisitionDelta: tail.acquisitionDelta,
+      cleanupDelta: tail.cleanupDelta,
+      viewportWriteDelta: tail.viewportWriteDelta,
+    }, `${label} tail action observed 必须与 proof 同源`);
+
+    assert.equal(run?.final?.phase, 'live', `${label} 最终必须恢复 live`);
+    assert.equal(run?.final?.shield, false, `${label} 最终不得残留输入盾`);
+    assert.equal(run?.final?.pointerResourceActive, false, `${label} 不得残留 window pointer 资源`);
+    assert.ok(isFiniteEvidenceViewport(run?.final?.viewport), `${label} 必须保留最终有限 RF viewport`);
+    assert.equal(run?.final?.suiteStatus, 'pass', `${label} final.suiteStatus 必须为 pass`);
+    assertLe010Checks(run?.final?.checks, `${label}.final`);
+    for (const name of ['consoleErrors', 'consoleWarnings', 'pageErrors', 'apiResources']) {
+      assert.ok(Array.isArray(run?.final?.[name]), `${label} final.${name} 必须保留原始数组`);
+      assert.equal(run.final[name].length, 0, `${label} final.${name} 必须为零`);
+    }
+  }
+  assert.ok(evidence.runs.some(run => run?.highFrequency?.performed === true && run.highFrequency.viewportWriteDelta >= 3),
+    '至少一轮必须用连续导航证明多次 RF 写入仍只 tail align 一次');
+  for (const name of ['consoleErrors', 'consoleWarnings', 'pageErrors', 'apiResources']) {
+    assert.ok(Array.isArray(evidence[name]), `${name} 必须保留原始数组`);
+    assert.equal(evidence[name].length, 0, `${name} 必须为零`);
+  }
+}
+
+test('LE-010 Computer Use 原始证据可选注入 focused behavior log 并绑定相机 candidate', () => {
+  const evidencePath = process.env.LE010_COMPUTER_USE_EVIDENCE;
+  if (!evidencePath) return;
+  assert.equal(path.isAbsolute(evidencePath), true, 'evidence 必须使用绝对路径');
+  const raw = fs.readFileSync(evidencePath, 'utf8').trim();
+  assert.equal(raw.split(/\r?\n/).length, 1, 'evidence JSON 必须为单行原始 transcript');
+  const evidence = JSON.parse(raw);
+  const candidateSha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  assertLe010ComputerUseEvidence(evidence, candidateSha, evidencePath);
+  console.log(`LE010_COMPUTER_USE_EVIDENCE ${raw}`);
+});
+
+const validLe010Checks = () => Object.fromEntries(LE010_CHECK_NAMES.map(name => [name, true]));
+const validLe010Production = (active = false, revision = 20) => ({
+  requestedRevision: revision,
+  renderedRevision: revision,
+  framePhase: 'ready',
+  opening: false,
+  penActive: active,
+  drawVisible: active,
+  cameraPhase: 'live',
+  cameraShield: false,
+  pointerResourceActive: false,
+  viewport: { x: 10, y: 20, zoom: 1 },
+});
+const validLe010Run = round => {
+  const runToken = round;
+  const scenario = `camera-tail-exit-${runToken}`;
+  const callStartIndex = round * 10;
+  const closingRevision = 30 + round;
+  const fitViewportSamples = ['Shift+Digit1', 'Shift+Digit2', 'Shift+Digit3'].map((code, index) => ({
+    code,
+    before: { x: index, y: index, zoom: 1 },
+    after: { x: 10 + index, y: 20 + index, zoom: 0.8 },
+    target: { x: 10 + index, y: 20 + index, zoom: 0.8 },
+  }));
+  const highFrequency = { performed: true, gestureCount: 3, shieldFrameDelta: 3, viewportWriteDelta: 3, nodePointerDelta: 0 };
+  const finalViewport = { x: 30, y: 40, zoom: 0.8 };
+  const tailFinal = {
+    penActive: false,
+    opening: false,
+    phase: 'live',
+    shield: false,
+    pointerResourceActive: false,
+    viewport: finalViewport,
+    viewportFinite: true,
+  };
+  const tail = {
+    status: 'PASS',
+    passed: true,
+    buttonArmed: true,
+    fixtureDispatchedInput: false,
+    phaseAtExit: 'resuming',
+    resumingObserved: true,
+    observerSource: 'timer',
+    armVisibility: { visibilityState: 'visible', hasFocus: true },
+    captureVisibility: { visibilityState: 'hidden', hasFocus: false },
+    rafTicks: 0,
+    timerTicks: 2,
+    exitBeforeResumeReady: true,
+    exportDelayed: true,
+    exportReleased: true,
+    runToken,
+    scenario,
+    callStartIndex,
+    closingRevision,
+    export: {
+      callIndex: callStartIndex,
+      runToken,
+      scenario,
+      revision: closingRevision,
+      mode: 'delay',
+      kind: 'group',
+    },
+    cameraAlignDelta: 1,
+    viewportWriteDelta: 3,
+    nodePointerDelta: 0,
+    pointerActiveObserved: true,
+    acquisitionDelta: 1,
+    cleanupDelta: 1,
+    shieldSamples: [true, true, true],
+    final: tailFinal,
+  };
+  const actions = [
+    {
+      action: 'hardRefresh',
+      input: { shortcut: 'super+shift+r', url: LE010_CANONICAL_URL, artifactId: `round-${round}-address` },
+      observed: { status: 'pass', requestedRevision: 20, renderedRevision: 20 },
+    },
+    {
+      action: 'openDrawingSelection',
+      input: { product: '选绘图', strokeClick: [688, 225], source: 'current screenshot', artifactId: `round-${round}-selection` },
+      observed: { requestedRevision: 21, renderedRevision: 21, zoomControlCount: 5 },
+    },
+    {
+      action: 'keyboardZoom',
+      input: ['super+plus', 'super+minus', 'super+0', 'Shift+Digit1', 'Shift+Digit2', 'Shift+Digit3'],
+      observed: { fitSamples: fitViewportSamples },
+    },
+    {
+      action: 'zoomIsland',
+      input: ['minus', 'plus', '100%', 'fit'],
+      observed: { viewports: [0, 1, 2, 3].map(index => ({ x: index, y: index + 1, zoom: 0.8 + index / 10 })) },
+    },
+    {
+      action: 'highFrequencyNavigation',
+      input: { sequence: ['hand', '产品选绘图', 'hand'], gestureCount: 3 },
+      coordinates: [[[10, 10], [20, 20]], [[20, 20], [30, 25]], [[30, 25], [40, 30]]],
+      observed: { delta: highFrequency, pointerAcquisitionDelta: 1, pointerCleanupDelta: 1 },
+    },
+    {
+      action: 'reopenDrawingSelection',
+      input: { product: '选绘图' },
+      observed: { editorLive: true, zoomControlCount: 5 },
+    },
+    {
+      action: 'armTailWatcher',
+      input: { visibleButton: '尾窗证伪：idle' },
+      observed: { status: 'armed', runToken, armVisibility: tail.armVisibility },
+    },
+    {
+      action: 'tailNavigation',
+      input: { sequence: ['hand', 'left drag'], attempt: 1 },
+      coordinates: [[50, 50], [70, 60]],
+      observed: {
+        status: 'PASS', observerSource: tail.observerSource, acquisitionDelta: 1, cleanupDelta: 1, viewportWriteDelta: 3,
+      },
+    },
+    {
+      action: 'readDiagnostics',
+      input: { source: 'read-only CDP window.__CANVAS_INTERACTION__', artifactId: `round-${round}-tail` },
+      observed: { status: 'pass', proof: 'PASS', errors: [0, 0, 0, 0] },
+    },
+  ];
+  return {
+    round,
+    passed: true,
+    errors: [],
+    handToolDrag: true,
+    pointerActiveObserved: true,
+    pointerAcquisitionDelta: 1,
+    pointerCleanupDelta: 1,
+    shieldObserved: true,
+    nodePointerDelta: 0,
+    shortcuts: { in: true, out: true, reset: true },
+    zoomControls: { visible: 5, clickable: ['minus', 'plus', '100%', 'fit'] },
+    highFrequency,
+    cameraAlignDelta: 1,
+    viewportWriteDelta: 3,
+    actions,
+    fitViewportSamples,
+    snapshots: [
+      { stage: 'baseline', production: validLe010Production(false, 20) },
+      { stage: 'selectionLive', production: validLe010Production(true, 21) },
+      { stage: 'highFrequencyLive', production: validLe010Production(true, 21) },
+      { stage: 'tailPass', production: validLe010Production(false, closingRevision), manualProof: { cameraTailExit: tail } },
+      { stage: 'final', production: validLe010Production(false, closingRevision), suiteStatus: 'pass', checks: validLe010Checks() },
+    ],
+    manualProof: { cameraTailExit: tail },
+    final: {
+      ...tailFinal,
+      suiteStatus: 'pass',
+      checks: validLe010Checks(),
+      consoleErrors: [],
+      consoleWarnings: [],
+      pageErrors: [],
+      apiResources: [],
+    },
+  };
+};
+const LE010_TEST_CANDIDATE_SHA = 'a'.repeat(40);
+const validLe010Evidence = () => ({
+  candidateSha: LE010_TEST_CANDIDATE_SHA,
+  fixtureOnly: true,
+  fixtureUrl: LE010_CANONICAL_URL,
+  realCanvasCoordinateDrag: false,
+  overallPassed: true,
+  verdict: 'PASS',
+  errors: [],
+  validationErrors: [],
+  runs: [1, 2, 3].map(validLe010Run),
+  consoleErrors: [],
+  consoleWarnings: [],
+  pageErrors: [],
+  apiResources: [],
+});
+
+const le010PngChunk = (type, data = Buffer.alloc(0)) => {
+  const length = Buffer.alloc(4);
+  length.writeUInt32BE(data.length);
+  return Buffer.concat([length, Buffer.from(type, 'ascii'), data, Buffer.alloc(4)]);
+};
+
+function validLe010Png(seed, width = 800, height = 600) {
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr.set([8, 6, 0, 0, 0], 8);
+  const marker = Buffer.alloc(1024, seed);
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    le010PngChunk('IHDR', ihdr),
+    le010PngChunk('tEXt', marker),
+    le010PngChunk('IEND'),
+  ]);
+}
+
+function createValidLe010EvidenceFixture(t) {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'le010-evidence-'));
+  t.after(() => fs.rmSync(tempRoot, { recursive: true, force: true }));
+  const evidenceRoot = path.join(tempRoot, '.loop', 'v2', 'evidence', 'LE-010');
+  const candidateDir = path.join(evidenceRoot, LE010_TEST_CANDIDATE_SHA);
+  const screenshotDir = path.join(candidateDir, 'screenshots');
+  fs.mkdirSync(screenshotDir, { recursive: true });
+  const evidence = validLe010Evidence();
+  evidence.computerUseArtifacts = [1, 2, 3].flatMap(round => LE010_ARTIFACT_STAGES.map((stage, stageIndex) => {
+    const id = `round-${round}-${stage}`;
+    const buffer = validLe010Png(round * 10 + stageIndex);
+    const relativePath = `screenshots/${id}.png`;
+    fs.writeFileSync(path.join(candidateDir, relativePath), buffer);
+    return {
+      id,
+      round,
+      stage,
+      kind: 'computer-use-screenshot',
+      relativePath,
+      sha256: createHash('sha256').update(buffer).digest('hex'),
+      mimeType: 'image/png',
+      byteLength: buffer.length,
+      width: 800,
+      height: 600,
+    };
+  }));
+  const evidencePath = path.join(candidateDir, 'computer-use.raw.json');
+  fs.writeFileSync(evidencePath, JSON.stringify(evidence));
+  return { tempRoot, evidenceRoot, candidateDir, evidencePath, evidence };
+}
+
+const assertLe010Fixture = (fixture, evidence = fixture.evidence, candidateSha = LE010_TEST_CANDIDATE_SHA,
+  evidencePath = fixture.evidencePath) => assertLe010ComputerUseEvidence(
+  evidence, candidateSha, evidencePath, { evidenceRoot: fixture.evidenceRoot },
+);
+
+test('LE-010 evidence gate 接受当前 candidate 内完整九图并形成 behavior-log 可传递绑定', t => {
+  const fixture = createValidLe010EvidenceFixture(t);
+  assert.doesNotThrow(() => assertLe010Fixture(fixture));
+  assert.equal(fixture.evidence.computerUseArtifacts.length, 9);
+  assert.equal(new Set(fixture.evidence.computerUseArtifacts.map(artifact => artifact.sha256)).size, 9,
+    '九个 round/stage 必须绑定九份不同截图字节');
+});
+
+test('LE-010 evidence gate 拒绝 4517、伪 source/proof 与 action 额外字段', t => {
+  const fixture = createValidLe010EvidenceFixture(t);
+  const cases = [
+    ['顶层 4517', evidence => { evidence.fixtureUrl = 'http://127.0.0.1:4517/?mode=interaction'; }, /fixtureUrl/],
+    ['hard refresh 4517', evidence => { evidence.runs[0].actions[0].input.url = 'http://127.0.0.1:4517/?mode=interaction'; }, /hardRefresh/],
+    ['fabricated selection source', evidence => { evidence.runs[0].actions[1].input.source = 'fabricated'; }, /source/],
+    ['forged diagnostics proof', evidence => { evidence.runs[0].actions[8].observed.proof = 'forged'; }, /diagnostics observed/],
+    ['额外 action 字段', evidence => { evidence.runs[0].actions[3].observed.recoveredLatestAxIndex = true; }, /schema/],
+  ];
+  for (const [label, mutate, expected] of cases) {
+    const evidence = structuredClone(fixture.evidence);
+    mutate(evidence);
+    assert.throws(() => assertLe010Fixture(fixture, evidence), expected, `${label} 必须被拒绝`);
+  }
+});
+
+test('LE-010 evidence gate 拒绝跨目录、旧 candidate、hash 与 byteLength 伪造', t => {
+  const fixture = createValidLe010EvidenceFixture(t);
+  const pathEscape = structuredClone(fixture.evidence);
+  pathEscape.computerUseArtifacts[0].relativePath = '../round-1-address.png';
+  assert.throws(() => assertLe010Fixture(fixture, pathEscape), /relativePath/, '../ 必须被拒绝');
+
+  const badHash = structuredClone(fixture.evidence);
+  badHash.computerUseArtifacts[0].sha256 = '0'.repeat(64);
+  assert.throws(() => assertLe010Fixture(fixture, badHash), /sha256/, '伪 hash 必须被拒绝');
+
+  const badBytes = structuredClone(fixture.evidence);
+  badBytes.computerUseArtifacts[0].byteLength++;
+  assert.throws(() => assertLe010Fixture(fixture, badBytes), /byteLength/, '伪 byteLength 必须被拒绝');
+
+  const oldCandidate = 'b'.repeat(40);
+  const stale = structuredClone(fixture.evidence);
+  stale.candidateSha = oldCandidate;
+  assert.throws(() => assertLe010Fixture(fixture, stale, oldCandidate), /当前 LE-010 candidate/,
+    '旧 candidate 目录不得复用当前九图');
+});
+
+test('LE-010 evidence gate 拒绝缺图、symlink、伪 PNG 与维度不符', t => {
+  const fixture = createValidLe010EvidenceFixture(t);
+  const artifact = fixture.evidence.computerUseArtifacts[0];
+  const artifactPath = path.join(fixture.candidateDir, artifact.relativePath);
+  const original = fs.readFileSync(artifactPath);
+
+  const missingPath = `${artifactPath}.missing`;
+  fs.renameSync(artifactPath, missingPath);
+  try {
+    assert.throws(() => assertLe010Fixture(fixture), /ENOENT/, '缺图必须被拒绝');
+  } finally {
+    fs.renameSync(missingPath, artifactPath);
+  }
+
+  const targetPath = `${artifactPath}.target`;
+  fs.renameSync(artifactPath, targetPath);
+  fs.symlinkSync(targetPath, artifactPath);
+  try {
+    assert.throws(() => assertLe010Fixture(fixture), /symlink/, '截图 symlink 必须被拒绝');
+  } finally {
+    fs.unlinkSync(artifactPath);
+    fs.renameSync(targetPath, artifactPath);
+  }
+
+  const rawTargetPath = `${fixture.evidencePath}.target`;
+  fs.renameSync(fixture.evidencePath, rawTargetPath);
+  fs.symlinkSync(rawTargetPath, fixture.evidencePath);
+  try {
+    assert.throws(() => assertLe010Fixture(fixture), /raw 不得是 symlink/, 'raw symlink 必须被拒绝');
+  } finally {
+    fs.unlinkSync(fixture.evidencePath);
+    fs.renameSync(rawTargetPath, fixture.evidencePath);
+  }
+
+  const fakeMagic = Buffer.alloc(original.length);
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(fakeMagic);
+  const fakeEvidence = structuredClone(fixture.evidence);
+  fakeEvidence.computerUseArtifacts[0].sha256 = createHash('sha256').update(fakeMagic).digest('hex');
+  fs.writeFileSync(artifactPath, fakeMagic);
+  try {
+    assert.throws(() => assertLe010Fixture(fixture, fakeEvidence), /IHDR/, '只有 PNG magic 的伪图必须被拒绝');
+  } finally {
+    fs.writeFileSync(artifactPath, original);
+  }
+
+  const missingIend = Buffer.from(original);
+  missingIend.write('NOPE', missingIend.length - 8, 'ascii');
+  const missingIendEvidence = structuredClone(fixture.evidence);
+  missingIendEvidence.computerUseArtifacts[0].sha256 = createHash('sha256').update(missingIend).digest('hex');
+  fs.writeFileSync(artifactPath, missingIend);
+  try {
+    assert.throws(() => assertLe010Fixture(fixture, missingIendEvidence), /IEND/, '缺失 IEND 的伪图必须被拒绝');
+  } finally {
+    fs.writeFileSync(artifactPath, original);
+  }
+
+  const wrongDimensions = structuredClone(fixture.evidence);
+  wrongDimensions.computerUseArtifacts[0].width = 801;
+  assert.throws(() => assertLe010Fixture(fixture, wrongDimensions), /width/, 'raw 与 IHDR 维度不符必须被拒绝');
+});
+
+test('LE-010 evidence gate 拒绝重复 round，不允许用三份同轮记录冒充 fresh 三轮', t => {
+  const fixture = createValidLe010EvidenceFixture(t);
+  const evidence = fixture.evidence;
+  evidence.runs[1].round = 1;
+  assert.throws(() => assertLe010Fixture(fixture), /round/);
+});
+
+test('LE-010 evidence gate 拒绝空 actions，不允许只用自写 passed 布尔值过门', t => {
+  const fixture = createValidLe010EvidenceFixture(t);
+  const evidence = fixture.evidence;
+  evidence.runs[1].actions = [];
+  assert.throws(() => assertLe010Fixture(fixture), /actions/);
+});
+
+test('LE-010 evidence gate 拒绝缺失双时钟来源、可见性与 tick 原始观测', t => {
+  const fixture = createValidLe010EvidenceFixture(t);
+  for (const field of ['observerSource', 'armVisibility', 'captureVisibility', 'rafTicks', 'timerTicks']) {
+    const evidence = structuredClone(fixture.evidence);
+    delete evidence.runs[0].manualProof.cameraTailExit[field];
+    assert.throws(() => assertLe010Fixture(fixture, evidence), new RegExp(field),
+      `缺少 ${field} 必须被证据门拒绝`);
+  }
+  const evidence = structuredClone(fixture.evidence);
+  evidence.runs[0].manualProof.cameraTailExit.observerSource = 'synthetic';
+  assert.throws(() => assertLe010Fixture(fixture, evidence), /observerSource/,
+    'observerSource 只允许 raf 或 timer');
+});
+
+test('LE-010 pointer active 只是瞬时诊断，资源获取、写入、配平与零穿透才是硬门', t => {
+  const fixture = fs.readFileSync(path.resolve('tests/fixtures/canvas-acceptance/interaction-data.js'), 'utf8');
+  assert.doesNotMatch(fixture, /!proof\.pointerActiveObserved\s*&&/,
+    'fixture 不得因为定时采样没撞见瞬时 active 就判失败');
+
+  const evidenceFixture = createValidLe010EvidenceFixture(t);
+  const evidence = evidenceFixture.evidence;
+  for (const run of evidence.runs) {
+    run.pointerActiveObserved = false;
+    run.manualProof.cameraTailExit.pointerActiveObserved = false;
+  }
+  assert.doesNotThrow(() => assertLe010Fixture(evidenceFixture, evidence),
+    'down/move/up 落在两次 poll 之间时，完整单调计数应允许 active 诊断为 false');
+
+  const invalidCases = [
+    ['run active 诊断非布尔', run => { run.pointerActiveObserved = 'false'; }, /布尔值/],
+    ['tail active 诊断非布尔', run => { run.manualProof.cameraTailExit.pointerActiveObserved = null; }, /布尔值/],
+    ['run acquisition=0', run => { run.pointerAcquisitionDelta = 0; }, /获取 pointer/],
+    ['run write=0', run => { run.viewportWriteDelta = 0; }, /viewport 写入/],
+    ['run cleanup mismatch', run => { run.pointerCleanupDelta = 2; }, /cleanup/],
+    ['run node>0', run => { run.nodePointerDelta = 1; }, /穿透节点/],
+    ['tail acquisition=0', run => { run.manualProof.cameraTailExit.acquisitionDelta = 0; }, /获取 pointer/],
+    ['tail write=0', run => { run.manualProof.cameraTailExit.viewportWriteDelta = 0; }, /RF viewport/],
+    ['tail cleanup mismatch', run => { run.manualProof.cameraTailExit.cleanupDelta = 2; }, /cleanup/],
+    ['tail node>0', run => { run.manualProof.cameraTailExit.nodePointerDelta = 1; }, /穿透节点/],
+  ];
+  for (const [label, mutate, expected] of invalidCases) {
+    const invalid = structuredClone(evidence);
+    mutate(invalid.runs[0]);
+    assert.throws(() => assertLe010Fixture(evidenceFixture, invalid), expected,
+      `${label} 仍必须被证据门拒绝`);
+  }
 });
 
 test('props 先追上 closing override 后再撤桥：persisted world 只在激活时分配严格递增 revision', () => {
