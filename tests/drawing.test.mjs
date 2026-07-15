@@ -161,6 +161,31 @@ test('selection merge 在原槽替换/删除局部元素，新增元素随事务
   assert.deepEqual(retried.elements.map(el => el.id), ['before', 'host', 'added-in-edit', 'between', 'after'], '交接失败重试不重复插入 draft 新元素');
 });
 
+test('非连续 selection 闭包保留全局 z-order；删除/新增/显式重排与重试均确定', () => {
+  const host = { ...rect('host', 0, 0, 100, 80), boundElements: [{ id: 'label', type: 'text' }] };
+  const cover = rect('cover', 20, 10, 40, 40);
+  const label = { id: 'label', type: 'text', x: 10, y: 10, width: 40, height: 20, containerId: 'host' };
+  const base = { elements: [host, cover, label], files: {} };
+  const tx = createDrawingTransaction(base, 'host');
+  const ids = snapshot => snapshot.elements.map(element => element.id);
+
+  assert.deepEqual(ids(mergeDrawingTransaction(base, tx, { elements: [host, label], files: {} })),
+    ['host', 'cover', 'label'], '未显式重排不能把非连续闭包压成连续块');
+  assert.deepEqual(ids(mergeDrawingTransaction(base, tx, { elements: [host], files: {} })),
+    ['host', 'cover'], 'draft 缺失 original 就删除原槽');
+
+  const added = rect('new', 60, 30, 20, 20);
+  const withNew = mergeDrawingTransaction(base, tx, { elements: [host, added, label], files: {} });
+  assert.deepEqual(ids(withNew), ['host', 'new', 'cover', 'label'], 'new ID 跟随最近前置 surviving original');
+  assert.deepEqual(ids(mergeDrawingTransaction(withNew, tx, { elements: [host, added, label], files: {} })),
+    ['host', 'new', 'cover', 'label'], '同一 draft 重试不得重复插入');
+
+  const reordered = mergeDrawingTransaction(base, tx, { elements: [label, host], files: {} });
+  assert.deepEqual(ids(reordered), ['label', 'cover', 'host'], '显式重排只填 owned slots，无关 cover 保持原槽');
+  assert.deepEqual(ids(mergeDrawingTransaction(reordered, tx, { elements: [label, host], files: {} })),
+    ['label', 'cover', 'host'], '显式重排重试同样幂等');
+});
+
 test('new merge 追加到世界末尾；base+draft 文件只合并一次并由最终全量快照裁剪', () => {
   const base = {
     elements: [image('kept'), rect('base', 0, 0, 20, 20)],
@@ -859,6 +884,39 @@ test('LE-008 Computer Use 原始证据可选注入 focused behavior log 并绑�
   console.log(`LE008_COMPUTER_USE_EVIDENCE ${raw}`);
 });
 
+test('LE-009 Computer Use 原始证据可选注入 focused behavior log并绑定局部分组 candidate', () => {
+  const evidencePath = process.env.LE009_COMPUTER_USE_EVIDENCE;
+  if (!evidencePath) return;
+  assert.equal(path.isAbsolute(evidencePath), true, 'evidence 必须使用绝对路径');
+  const raw = fs.readFileSync(evidencePath, 'utf8').trim();
+  assert.equal(raw.split(/\r?\n/).length, 1, 'evidence JSON 必须为单行原始 transcript');
+  const evidence = JSON.parse(raw);
+  const candidateSha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  assert.equal(evidence.candidateSha, candidateSha, 'Computer Use 证据必须绑定当前 candidate SHA');
+  assert.ok(Array.isArray(evidence.runs) && evidence.runs.length >= 3, '至少保留三轮 Computer Use 原始结果');
+  for (const name of ['consoleErrors', 'consoleWarnings', 'pageErrors', 'apiResources']) {
+    assert.ok(Array.isArray(evidence[name]), `${name} 必须保留原始数组`);
+    assert.equal(evidence[name].length, 0, `${name} 必须为零`);
+  }
+  for (const [runIndex, run] of evidence.runs.entries()) {
+    for (const [size, reused] of [[300, 3], [800, 8]]) {
+      const report = run?.[String(size)];
+      assert.equal(report?.size, size, `run ${runIndex + 1} 必须包含 ${size} report`);
+      assert.equal(report?.secondSlotStable, true, `run ${runIndex + 1} ${size} 第二槽首 ID 必须稳定`);
+      for (const kind of ['holeOpen', 'holeClose']) {
+        const below = report?.[kind]?.metrics?.groupCounts?.below;
+        assert.equal(below?.exported, 1, `run ${runIndex + 1} ${size} ${kind} 只导出目标槽`);
+        assert.equal(below?.reused, reused, `run ${runIndex + 1} ${size} ${kind} 复用其余槽`);
+      }
+      assert.equal(report?.holeOpen?.renderedElementCount, size - 1,
+        `run ${runIndex + 1} ${size} opening rendered 数必须扣除 excluded`);
+      assert.equal(report?.holeClose?.renderedElementCount, size,
+        `run ${runIndex + 1} ${size} closing rendered 数必须恢复全量`);
+    }
+  }
+  console.log(`LE009_COMPUTER_USE_EVIDENCE ${raw}`);
+});
+
 test('props 先追上 closing override 后再撤桥：persisted world 只在激活时分配严格递增 revision', () => {
   const oldElements = [rect('old', 0, 0, 20, 20)];
   const mergedElements = [rect('merged', 40, 0, 20, 20)];
@@ -932,6 +990,33 @@ test('连续 z-order group 严格按边界切分并保留元素顺序，空面�
   assert.deepEqual(groups.map(group => group.index), [0, 1, 2]);
   assert.deepEqual(drawingPlaneGroups([], {}, 2), []);
   assert.deepEqual(drawingPlaneGroupPlan([], [], []), []);
+});
+
+test('opening hole 只脏固定 committed 槽：300/800 首个沉层元素均只导出一组', () => {
+  for (const [size, reused] of [[300, 3], [800, 8]]) {
+    const below = splitDrawingPlanes(createCanvasAcceptanceElements(size)).below;
+    const target = below.find(element => element.type !== 'text');
+    const baseline = drawingPlaneGroups(below);
+    const ready = baseline.map(group => ({ signature: group.signature, snapshot: { id: group.index } }));
+    const opened = drawingPlaneGroups(below, {}, 48, [target.id]);
+    const plan = drawingPlaneGroupPlan(ready, [], opened);
+
+    assert.equal(plan.filter(group => group.route === 'export').length, 1, `${size} opening 只导出目标槽`);
+    assert.equal(plan.filter(group => group.route === 'ready').length, reused, `${size} 其余槽全部复用`);
+    assert.equal(opened[1].elements[0].id, baseline[1].elements[0].id, `${size} 第二槽首 ID 不漂移`);
+  }
+});
+
+test('hole 排空整组仍保留 slot 并走 clear，后续槽继续 ready', () => {
+  const elements = ['a', 'b', 'c', 'd', 'e'].map((id, index) => rect(id, index * 10, 0, 8, 8));
+  const baseline = drawingPlaneGroups(elements, {}, 2);
+  const ready = baseline.map(group => ({ signature: group.signature, snapshot: { id: group.index } }));
+  const opened = drawingPlaneGroups(elements, {}, 2, ['a', 'b']);
+  const plan = drawingPlaneGroupPlan(ready, [], opened);
+
+  assert.equal(opened.length, baseline.length);
+  assert.deepEqual(opened.map(group => group.elements.map(element => element.id)), [[], ['c', 'd'], ['e']]);
+  assert.deepEqual(plan.map(group => group.route), ['clear', 'ready', 'ready']);
 });
 
 test('frame font signature 合并多字体字符集且与文字顺序/重复无关，纯几何不入签名', () => {

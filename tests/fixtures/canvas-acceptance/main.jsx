@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 4518 query(mode=performance|interaction, size=300|800, autorun=0|1) 与真实画布组件
- * [OUTPUT]: 性能报告/探针（含 DOM/rendered world revision 原子交接）；interaction 动态加载真实 FlowCanvas 全内存验收页并共享 console/page error 原始 transcript
+ * [OUTPUT]: 性能报告/探针（含 DOM/rendered world revision 原子交接与 300/800 hole 开合局部分组指标）；interaction 动态加载真实 FlowCanvas 全内存验收页并共享 console/page error 原始 transcript
  * [POS]: 无 API/无持久化的画布验收路由；performance 首屏闭包不静态引入 FlowCanvas
  * [PROTOCOL]: 变更时更新此头部，然后检查 README/web/CLAUDE.md
  */
@@ -98,7 +98,7 @@ async function measureViewportDrift(instance) {
 
 function AcceptanceCanvas() {
   const initialElements = useMemo(() => createCanvasAcceptanceElements(SIZE), []);
-  const initialWorld = useRef({ elements: initialElements, files: {}, revision: 1 });
+  const initialWorld = useRef({ elements: initialElements, files: {}, excludedIds: [], revision: 1 });
   const worldRef = useRef(initialWorld.current);
   const revisionRef = useRef(1);
   const waitersRef = useRef(new Map());
@@ -126,9 +126,9 @@ function AcceptanceCanvas() {
     }
   }, []);
 
-  const requestSnapshot = useCallback((elements, kind, started = performance.now()) => {
+  const requestSnapshot = useCallback((elements, kind, started = performance.now(), excludedIds = []) => {
     const revision = ++revisionRef.current;
-    const next = { elements, files: {}, revision };
+    const next = { elements, files: {}, excludedIds, revision };
     worldRef.current = next;
     return new Promise(resolve => {
       waitersRef.current.set(revision, { kind, started, resolve });
@@ -169,6 +169,9 @@ function AcceptanceCanvas() {
     startedRef.current = true;
     publish('running', { size: SIZE, phase: 'warm snapshots' });
     const readyReuse = await requestSnapshot(worldRef.current.elements, 'ready-reuse');
+    const holeTarget = worldRef.current.elements.find(element => element.customData?.below && element.type !== 'text');
+    const holeOpen = await requestSnapshot(worldRef.current.elements, 'hole-open', performance.now(), [holeTarget.id]);
+    const holeClose = await requestSnapshot(worldRef.current.elements, 'hole-close');
     const warm = [];
     let elements = worldRef.current.elements;
     for (let index = 0; index < ACCEPTANCE_SAMPLES; index++) {
@@ -213,8 +216,15 @@ function AcceptanceCanvas() {
         && readyGroups?.below?.reused === readyGroups?.below?.total
         && readyGroups?.above?.reused === readyGroups?.above?.total
         && readyReuse.metrics?.font?.reused === 1,
-      renderedRevisionAtomic: [cold, readyReuse, ...warm, fontChange, fontReadyReuse]
+      renderedRevisionAtomic: [cold, readyReuse, holeOpen, holeClose, ...warm, fontChange, fontReadyReuse]
         .every(sample => sample.atomic && sample.renderedRevision === sample.revision && sample.domRevision === sample.revision),
+      holeOpenCloseLocal: [holeOpen, holeClose].every(sample => {
+        const below = sample.metrics?.groupCounts?.below;
+        const above = sample.metrics?.groupCounts?.above;
+        return below?.exported === 1 && below?.joined === 0 && below?.reused === below?.total - 1
+          && above?.exported === 0 && above?.joined === 0 && above?.reused === above?.total
+          && sample.metrics?.font?.reused === 1;
+      }) && holeOpen.renderedElementCount === SIZE - 1 && holeClose.renderedElementCount === SIZE,
       singleDirtyPlane: metricsCorrect,
       singleDirtyGroup: groupMetricsCorrect,
       fontCapsuleDirty: fontChange.metrics?.font?.exported === 1
@@ -238,12 +248,16 @@ function AcceptanceCanvas() {
       redline,
       cold: { duration: cold.duration, metrics: cold.metrics, longTasks: coldLongTasks },
       readyReuse: { duration: readyReuse.duration, metrics: readyReuse.metrics },
+      holeOpen: { duration: holeOpen.duration, metrics: holeOpen.metrics, renderedElementCount: holeOpen.renderedElementCount },
+      holeClose: { duration: holeClose.duration, metrics: holeClose.metrics, renderedElementCount: holeClose.renderedElementCount },
       fontChange: { duration: fontChange.duration, metrics: fontChange.metrics },
       fontReadyReuse: { duration: fontReadyReuse.duration, metrics: fontReadyReuse.metrics },
       warm: { ...warmSummary, samples: warm.map(sample => ({ duration: sample.duration, metrics: sample.metrics })), longTasks: warmLongTasks },
       groupCounts: {
         cold: cold.metrics?.groupCounts,
         readyReuse: readyReuse.metrics?.groupCounts,
+        holeOpen: holeOpen.metrics?.groupCounts,
+        holeClose: holeClose.metrics?.groupCounts,
         warm: warm.map(sample => sample.metrics?.groupCounts),
       },
       viewport: drift,
@@ -286,6 +300,7 @@ function AcceptanceCanvas() {
           <InkWorldLayer
             elements={world.elements}
             files={world.files}
+            excludedIds={world.excludedIds}
             revision={world.revision}
             onSnapshotReady={onSnapshotReady}
             onSnapshotError={onSnapshotError}

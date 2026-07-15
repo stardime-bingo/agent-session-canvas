@@ -1,7 +1,7 @@
 /**
  * [INPUT]: Excalidraw 的元素数组与 BinaryFiles 字典
  * [OUTPUT]: 提供已提交绘图的过滤/删除/沉浮/平移纯变换、整理的单步墨迹撤销票据、唯一功能件命中排除表、首次新建大底板共享判定/落笔退场状态机/自动沉层、目标关系闭包/局部编辑事务/全量合并、
- *           可稳定排空且按成功代际守卫撤销的串行提交队列、屏幕override/外部props/队列三真相同步门、opening request 身份门/相机事务与退出策略/IME 周期状态机/隐藏 opening 取消/退出回执/closing 收口步、编辑器就绪与几何互斥纯门、资产快照/命中/已 paint 帧真相与有界重试、双平面连续 z-order 分组签名与 ready/in-flight 工作路由/包围盒与承载判定
+ *           可稳定排空且按成功代际守卫撤销的串行提交队列、屏幕override/外部props/队列三真相同步门、opening request 身份门/相机事务与退出策略/IME 周期状态机/隐藏 opening 取消/退出回执/closing 收口步、编辑器就绪与几何互斥纯门、资产快照/命中/已 paint 帧真相与有界重试、双平面固定 z-order 槽内 hole 分组签名与 ready/in-flight 工作路由/包围盒与承载判定
  * [POS]: 绘图的纯数据内核；静态世界层、临时编辑器与普通态动作共用，全部可由 node:test 证伪
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -85,11 +85,12 @@ export function drawingPlaneDirtyPlan(previous = {}, next = {}) {
 
 export const DRAWING_PLANE_GROUP_SIZE = 48;
 
-// 只按当前平面的绘制顺序连续切片；槽位就是 z-order 真相，插入/重排自然让后续签名失效。
-export function drawingPlaneGroups(elements = [], files = {}, groupSize = DRAWING_PLANE_GROUP_SIZE) {
+// 先按完整 committed 平面确定槽位，再只在槽内 hole-punch；临时隐藏不能让后续 z-order 槽左移。
+export function drawingPlaneGroups(elements = [], files = {}, groupSize = DRAWING_PLANE_GROUP_SIZE, excludedIds = []) {
+  const hidden = excludedIds instanceof Set ? excludedIds : new Set(excludedIds || []);
   const groups = [];
   for (let offset = 0; offset < elements.length; offset += groupSize) {
-    const groupElements = elements.slice(offset, offset + groupSize);
+    const groupElements = elements.slice(offset, offset + groupSize).filter(element => !hidden.has(element.id));
     groups.push({
       index: groups.length,
       elements: groupElements,
@@ -139,7 +140,7 @@ export function drawingPlaneGroupPlan(readyGroups = [], inFlightGroups = [], nex
       ...group,
       ready,
       inFlight,
-      route: drawingPlaneWorkRoute(ready?.signature, inFlight?.signature, group.signature, true),
+      route: drawingPlaneWorkRoute(ready?.signature, inFlight?.signature, group.signature, !!group.elements.length),
     };
   });
 }
@@ -517,15 +518,58 @@ export function mergeDrawingTransaction(baseSnapshot = {}, transaction, draftSna
   const prepared = autoSinkLargeNewDrawingDraft(base, transaction, draftSnapshot).snapshot;
   const originalIds = new Set(transaction.originalIds || []);
   const draftElements = prepared.elements;
-  const draftIds = new Set(draftElements.map(element => element.id));
-  const unaffected = base.elements.filter(element => !originalIds.has(element.id) && !draftIds.has(element.id));
-  const anchorIndex = Math.max(0, Math.min(transaction.anchorIndex ?? base.elements.length, base.elements.length));
-  let insertionIndex = 0;
-  for (let index = 0; index < anchorIndex; index++) {
-    if (!originalIds.has(base.elements[index]?.id)) insertionIndex++;
+  const draftById = new Map(draftElements.map(element => [element.id, element]));
+  const survivingOriginals = draftElements.filter(element => originalIds.has(element.id));
+  const survivingIds = new Set(survivingOriginals.map(element => element.id));
+  const newElements = draftElements.filter(element => !originalIds.has(element.id));
+  const newIds = new Set(newElements.map(element => element.id));
+  const baselineOrder = (transaction.elements || [])
+    .filter(element => survivingIds.has(element.id))
+    .map(element => element.id);
+  const draftOrder = survivingOriginals.map(element => element.id);
+  const explicitlyReordered = baselineOrder.length === draftOrder.length
+    && baselineOrder.some((id, index) => id !== draftOrder[index]);
+
+  let ownedIndex = 0;
+  let elements = [];
+  for (const element of base.elements) {
+    if (newIds.has(element.id)) continue; // 重试先移除上一轮已插入的新 ID。
+    if (!originalIds.has(element.id)) {
+      elements.push(element);
+      continue;
+    }
+    if (!survivingIds.has(element.id)) continue;
+    elements.push(explicitlyReordered ? survivingOriginals[ownedIndex++] : draftById.get(element.id));
   }
-  const elements = [...unaffected];
-  elements.splice(insertionIndex, 0, ...draftElements);
+
+  if (newElements.length && survivingOriginals.length) {
+    const beforeFirst = [];
+    const after = new Map();
+    let previousOriginalId = null;
+    for (const element of draftElements) {
+      if (survivingIds.has(element.id)) {
+        previousOriginalId = element.id;
+      } else if (!originalIds.has(element.id)) {
+        if (previousOriginalId) {
+          const siblings = after.get(previousOriginalId) || [];
+          siblings.push(element);
+          after.set(previousOriginalId, siblings);
+        } else {
+          beforeFirst.push(element);
+        }
+      }
+    }
+    const firstOriginalId = survivingOriginals[0].id;
+    const withNew = [];
+    for (const element of elements) {
+      if (element.id === firstOriginalId) withNew.push(...beforeFirst);
+      withNew.push(element, ...(after.get(element.id) || []));
+    }
+    elements = withNew;
+  } else if (newElements.length) {
+    const anchorIndex = Math.max(0, Math.min(transaction.anchorIndex ?? elements.length, elements.length));
+    elements.splice(anchorIndex, 0, ...newElements);
+  }
   return drawingSnapshot(elements, { ...base.files, ...prepared.files });
 }
 
