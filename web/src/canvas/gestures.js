@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 无外部依赖，只读 Wheel/Keyboard/GestureEvent 形状的普通对象与 EventTarget
- * [OUTPUT]: 对外提供 wheel/缩放键/Safari gesture 路由、锚定缩放/平移数学与幂等 pointer listener 资源
+ * [OUTPUT]: 对外提供 wheel/缩放键/Safari gesture 路由（Shift+1/2/3 产出全景 fit）、RF 中心锚定键盘缩放/平移数学与幂等 pointer listener 资源
  * [POS]: canvas 的导航手势纯内核——所有缩放/平移只产出 RF viewport，可由 node:test 直接证伪
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -48,18 +48,36 @@ export function scaleViewport(vp, scale, e, rect, { min = 0.1, max = 1.8 } = {})
   return { zoom, x: px - (px - vp.x) * ratio, y: py - (py - vp.y) * ratio };
 }
 
-// 精确复制 Excal camera keyTest；文字区的 Shift 字符只断传播，mod 组合与非文字区则连默认行为一起阻断。
-export function drawingZoomKeyRoute({ code = '', editable = false, shiftKey = false, altKey = false, metaKey = false, ctrlKey = false } = {}) {
+// FlowCanvas 是唯一缩放键 owner：mod 组合产出 RF command；文字区 Shift 字符只断 Excal 传播。
+export function drawingZoomKeyCommand({ code = '', editable = false, shiftKey = false, altKey = false, metaKey = false, ctrlKey = false } = {}) {
   const mod = metaKey || ctrlKey;
-  const step = code === 'Equal' || code === 'NumpadAdd'
-    || code === 'Minus' || code === 'NumpadSubtract';
+  const zoomIn = code === 'Equal' || code === 'NumpadAdd';
+  const zoomOut = code === 'Minus' || code === 'NumpadSubtract';
+  const step = zoomIn || zoomOut;
   const reset = code === 'Digit0' || code === 'Numpad0';
   const fit = (code === 'Digit1' || code === 'Digit2' || code === 'Digit3')
     && shiftKey && !altKey && !mod;
   const camera = ((step || reset) && (mod || shiftKey)) || fit;
-  if (!camera) return 'pass';
-  if (!editable || mod) return 'block';
-  return 'stop';
+  if (!camera) return { route: 'pass', command: null };
+  if (editable && !mod) return { route: 'stop', command: null };
+  const command = mod || (!editable && shiftKey)
+    ? (fit ? 'fit' : zoomIn ? 'in' : zoomOut ? 'out' : reset ? 'reset' : null)
+    : null;
+  return { route: 'block', command };
+}
+
+export const drawingZoomKeyRoute = input => drawingZoomKeyCommand(input).route;
+
+// 键盘/按钮缩放锚住 root 可见中心；只返回 RF viewport，不触碰 Excal scene。
+export function keyboardViewport(vp, command, rect, { min = 0.1, max = 1.8, step = 1.2 } = {}) {
+  const targetZoom = command === 'in' ? vp.zoom * step
+    : command === 'out' ? vp.zoom / step
+      : command === 'reset' ? 1 : vp.zoom;
+  const zoom = Math.min(max, Math.max(min, targetZoom));
+  if (!Number.isFinite(zoom) || zoom === vp.zoom) return vp;
+  const px = rect.width / 2, py = rect.height / 2;
+  const ratio = zoom / vp.zoom;
+  return { zoom, x: px - (px - vp.x) * ratio, y: py - (py - vp.y) * ratio };
 }
 
 // 编辑态 wheel 在 root capture 分三路：应用外部功能件放行，Excal UI 仅断传播，绘图面进 RF 相机。

@@ -570,6 +570,27 @@ input.inline-edit {
 /* opening 时先在幕后水合局部 draft；hole SVG 进入 DOM 的 layout effect 才同步显现，杜绝双影/白洞。 */
 .draw-pending { opacity: 0; pointer-events: none !important; }
 
+/* live editor 隐藏的相机尾窗：同层透明盾阻断 RF 节点，root capture 仍可接管 wheel/平移。 */
+.drawing-camera-shield {
+  position: absolute; inset: 0; z-index: 6; pointer-events: auto;
+  background: transparent; cursor: grab;
+}
+
+/* 编辑态导航必须是 RF/DrawLayer 的 z:7 sibling，所有按钮只进统一相机事务。 */
+.drawing-zoom-island {
+  position: absolute; left: 14px; bottom: 14px; z-index: 7;
+  display: flex; align-items: stretch; overflow: hidden; pointer-events: auto;
+}
+.drawing-zoom-island button {
+  min-width: 34px; height: 34px; padding: 0 9px; border: 0; border-right: 1px solid var(--line);
+  background: transparent; color: var(--ink-dim); font: 600 12px/1 var(--sans); cursor: pointer;
+  transition: background 120ms, color 120ms, transform 120ms var(--ease-panel);
+}
+.drawing-zoom-island button:last-child { border-right: 0; }
+.drawing-zoom-island button:hover { background: var(--bg-hover); color: var(--accent); }
+.drawing-zoom-island button:active { transform: scale(0.92); }
+.drawing-zoom-island svg { width: 15px; height: 15px; }
+
 /* 绘图编辑激活：保留原生选择与属性面板；汉堡菜单/帮助钮/杂项工具不进屋。 */
 .draw-active .excalidraw .main-menu-trigger,
 .draw-active .excalidraw .help-icon,

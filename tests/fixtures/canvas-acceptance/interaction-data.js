@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖真实 FlowCanvas/UIHost、4518 synthetic 数据与只替换 Ink exporter 的故障探针
- * [OUTPUT]: 无 fetch 全内存交互画布；真实 cold/warm/late export、Suspense 并发、open/exit handoff 的具名可机读合约
+ * [OUTPUT]: 无 fetch 全内存交互画布；七项自动链与按 run token/call 起点/closing revision 隔离的只读 rAF+timer 双时钟相机尾窗人工证伪
  * [POS]: 仅由 ?mode=interaction 动态加载；不进入 performance 模式首屏闭包，不触碰真实 4517 数据
  * [PROTOCOL]: 变更时更新此头部，然后检查 main.jsx/README/web/CLAUDE.md
  */
@@ -18,6 +18,8 @@ const SESSION_KEY = 'codex:fixture-ops-session';
 const BOARD_ID = 'fixture-automation-board';
 const FIXED_TIME = '2026-07-15T04:00:00.000Z';
 const CHECK_NAMES = Object.freeze(['concurrent', 'revision', 'opening', 'closing', 'coldError', 'warmError', 'lateIsolation']);
+const CAMERA_TAIL_PROOF_TIMEOUT_MS = 20000;
+const CAMERA_TAIL_OBSERVER_POLL_MS = 25;
 
 const element = (id, x, y, width, height, extra = {}) => ({
   id, type: 'rectangle', x, y, width, height, angle: 0,
@@ -95,17 +97,20 @@ function SpeculativeGenerationBarrier({ active, onRender }) {
 function createExporterController() {
   let mode = 'fail';
   let scenario = 'cold-error';
+  let runToken = null;
   let delayed = [];
   const calls = [];
   return {
-    configure(nextMode, nextScenario) {
+    configure(nextMode, nextScenario, nextRunToken = null) {
       mode = nextMode;
       scenario = nextScenario;
+      runToken = nextRunToken;
     },
     calls: () => calls.map(call => ({ ...call })),
     exportToSvg({ revision, attempt, kind, elements, options, delegate }) {
       const call = {
-        scenario, mode, revision, attempt, kind,
+        callIndex: calls.length,
+        scenario, runToken, mode, revision, attempt, kind,
         elementIds: elements.map(item => item.id),
         at: performance.now(),
       };
@@ -126,6 +131,43 @@ function createExporterController() {
   };
 }
 
+function cameraTailRunCurrent(current, run) {
+  return !!current && current === run && current.runToken === run?.runToken;
+}
+
+function cameraTailObservationStep(state, source, phase) {
+  const validSource = source === 'raf' || source === 'timer' ? source : null;
+  const rafTicks = (Number.isInteger(state?.rafTicks) ? state.rafTicks : 0) + (source === 'raf' ? 1 : 0);
+  const timerTicks = (Number.isInteger(state?.timerTicks) ? state.timerTicks : 0) + (source === 'timer' ? 1 : 0);
+  const capture = !!validSource && phase === 'resuming' && state?.resumingHandled !== true;
+  return {
+    resumingHandled: state?.resumingHandled === true || capture,
+    observerSource: capture ? validSource : state?.observerSource || null,
+    rafTicks,
+    timerTicks,
+    capture,
+  };
+}
+
+function cancelCameraTailObservation(run) {
+  if (!run) return;
+  if (run.rafId != null) window.cancelAnimationFrame(run.rafId);
+  run.rafId = null;
+  if (run.pollId != null) window.clearTimeout(run.pollId);
+  run.pollId = null;
+  if (run.waitTimeoutId != null) window.clearTimeout(run.waitTimeoutId);
+  run.waitTimeoutId = null;
+}
+
+function cameraTailCallForRun(calls, run) {
+  if (!run || !Number.isInteger(run.callStartIndex) || !Number.isFinite(run.closingRevision)) return null;
+  return calls.slice(run.callStartIndex).find(call => call.scenario === run.scenario
+    && call.runToken === run.runToken
+    && call.mode === 'delay'
+    && call.kind === 'group'
+    && call.revision === run.closingRevision) || null;
+}
+
 const apiResources = () => performance.getEntriesByType('resource')
   .map(entry => entry.name)
   .filter(name => {
@@ -138,6 +180,33 @@ const retryEvidence = calls => ({
 });
 const retryTimingObserved = trace => trace.attempts.join(',') === '1,2,3'
   && trace.delaysMs.length === 2 && trace.delaysMs[0] >= 30 && trace.delaysMs[1] >= 65;
+const finiteViewport = viewport => !!viewport
+  && ['x', 'y', 'zoom'].every(key => Number.isFinite(viewport[key]));
+const initialCameraTailProof = (status = 'idle', error = null) => ({
+  status,
+  passed: false,
+  buttonArmed: false,
+  fixtureDispatchedInput: false,
+  phaseAtExit: null,
+  resumingObserved: false,
+  observerSource: null,
+  armVisibility: null,
+  captureVisibility: null,
+  rafTicks: 0,
+  timerTicks: 0,
+  exitBeforeResumeReady: false,
+  exportDelayed: false,
+  exportReleased: false,
+  cameraAlignDelta: 0,
+  viewportWriteDelta: 0,
+  shieldSamples: [],
+  nodePointerDelta: 0,
+  pointerActiveObserved: false,
+  acquisitionDelta: 0,
+  cleanupDelta: 0,
+  final: null,
+  error,
+});
 
 function InteractionCanvas() {
   const [canvas, setCanvas] = useState(INITIAL_CANVAS);
@@ -146,6 +215,7 @@ function InteractionCanvas() {
   const [expanded, setExpanded] = useState(new Set());
   const [renderGeneration, setRenderGeneration] = useState('live');
   const [suiteResult, setSuiteResult] = useState(null);
+  const [cameraTailStatus, setCameraTailStatus] = useState('idle');
   const shellRef = useRef(null);
   const frameTestProbeRef = useRef(null);
   const exporterControllerRef = useRef(null);
@@ -158,6 +228,12 @@ function InteractionCanvas() {
   const openingTimerRef = useRef(null);
   const openingLatencyRef = useRef(null);
   const viewportRef = useRef('');
+  const cameraShieldFramesRef = useRef(0);
+  const nodePointerDownRef = useRef(0);
+  const cameraTailProofRef = useRef(initialCameraTailProof());
+  const cameraTailRunRef = useRef(null);
+  const cameraTailRunTokenRef = useRef(0);
+  const cameraTailMountedRef = useRef(true);
   const focusRef = useRef(() => {});
   const actionsRef = useRef({});
   const geometryPendingRef = useRef(false);
@@ -411,6 +487,286 @@ function InteractionCanvas() {
     return () => { cancelled = true; };
   }, []);
 
+  const writeCameraTailProof = useCallback((run, patch, status = null, replace = false) => {
+    if (!cameraTailRunCurrent(cameraTailRunRef.current, run)) return false;
+    const nextStatus = status || cameraTailProofRef.current.status;
+    cameraTailProofRef.current = { ...(replace ? {} : cameraTailProofRef.current), ...patch, status: nextStatus };
+    if (status && cameraTailMountedRef.current) setCameraTailStatus(status);
+    return true;
+  }, []);
+
+  const cleanupCameraTailRun = useCallback(run => {
+    if (!run) return Promise.resolve();
+    if (run.cleanupPromise) return run.cleanupPromise;
+    run.cancelled = true;
+    run.cancelResolve?.();
+    cancelCameraTailObservation(run);
+    const controller = exporterControllerRef.current;
+    controller.configure('pass', `${run.scenario}-cleanup`, run.runToken);
+    run.cleanupPromise = Promise.resolve()
+      .then(() => controller.releaseDelayed())
+      .catch(error => { run.cleanupError = error?.message || String(error); });
+    return run.cleanupPromise;
+  }, []);
+
+  const failCameraTailRun = useCallback(async (run, error) => {
+    if (!run || run.finished) return;
+    run.finished = true;
+    await cleanupCameraTailRun(run);
+    if (!cameraTailMountedRef.current || !cameraTailRunCurrent(cameraTailRunRef.current, run)) return;
+    writeCameraTailProof(run, { passed: false, error: error?.message || String(error) }, 'FAIL');
+  }, [cleanupCameraTailRun, writeCameraTailProof]);
+
+  const finishCameraTailRun = useCallback(async run => {
+    try {
+      if (!cameraTailRunCurrent(cameraTailRunRef.current, run)) return;
+      const controller = exporterControllerRef.current;
+      const delayedCall = await (async () => {
+        while (!run.cancelled && cameraTailRunCurrent(cameraTailRunRef.current, run)) {
+          const production = frameTestProbeRef.current?.snapshot();
+          if (production?.handoffPhase === 'closing' && Number.isFinite(production.handoffRevision)) {
+            run.closingRevision = production.handoffRevision;
+          }
+          const call = cameraTailCallForRun(controller.calls(), run);
+          if (call) return call;
+          await nextFrame();
+        }
+        return null;
+      })();
+      if (!delayedCall || run.cancelled || !cameraTailRunCurrent(cameraTailRunRef.current, run)) return;
+      const dirtySelectionExport = run.selectionHoleIds.some(id => delayedCall.elementIds.includes(id));
+      if (!dirtySelectionExport) throw new Error(`${run.scenario} 未导出 selection closing 恢复的目标元素`);
+
+      writeCameraTailProof(run, {
+        exportDelayed: true,
+        export: delayedCall,
+        runToken: run.runToken,
+        scenario: run.scenario,
+        callStartIndex: run.callStartIndex,
+        closingRevision: run.closingRevision,
+      }, 'closing');
+      const shieldSamples = [];
+      for (let index = 0; index < 3; index++) {
+        await nextFrame();
+        if (run.cancelled || !cameraTailRunCurrent(cameraTailRunRef.current, run)) return;
+        shieldSamples.push(frameTestProbeRef.current?.snapshot()?.cameraShield === true);
+      }
+      const held = frameTestProbeRef.current?.snapshot();
+      const cameraAlignDelta = (held?.cameraAlignCount || 0) - run.baseline.cameraAlignCount;
+      const viewportWriteDelta = (held?.cameraViewportWriteCount || 0) - run.baseline.cameraViewportWriteCount;
+      const nodePointerDelta = nodePointerDownRef.current - run.baselineNodePointerDown;
+      writeCameraTailProof(run, {
+        shieldSamples,
+        cameraAlignDelta,
+        viewportWriteDelta,
+        nodePointerDelta,
+        pointerActiveObserved: cameraTailProofRef.current.pointerActiveObserved,
+        acquisitionDelta: (held?.pointerAcquisitionCount || 0) - run.baseline.pointerAcquisitionCount,
+        cleanupDelta: (held?.pointerCleanupCount || 0) - run.baseline.pointerCleanupCount,
+      });
+      if (!shieldSamples.every(Boolean)) throw new Error('delayed closing 未连续保持 3 帧输入盾');
+
+      if (!cameraTailRunCurrent(cameraTailRunRef.current, run)) return;
+      controller.configure('pass', `${run.scenario}-release`, run.runToken);
+      await controller.releaseDelayed();
+      if (run.cancelled || !cameraTailRunCurrent(cameraTailRunRef.current, run)) return;
+      writeCameraTailProof(run, { exportReleased: true });
+
+      const exitSettled = await Promise.race([run.exitPromise, run.cancelPromise]);
+      if (run.cancelled || exitSettled?.cancelled || !cameraTailRunCurrent(cameraTailRunRef.current, run)) return;
+      if (!exitSettled?.ok) throw exitSettled?.error || new Error('production exitDrawing rejected');
+      if (exitSettled.value !== true) throw new Error('production exitDrawing 未成功收口');
+
+      const final = await (async () => {
+        while (!run.cancelled && cameraTailRunCurrent(cameraTailRunRef.current, run)) {
+          const state = frameTestProbeRef.current?.snapshot();
+          if (state && !state.penActive && !state.opening && state.cameraPhase === 'live'
+            && state.cameraShield === false && state.pointerResourceActive === false
+            && finiteViewport(state.viewport)) return state;
+          await nextFrame();
+        }
+        return null;
+      })();
+      if (!final || run.cancelled || !cameraTailRunCurrent(cameraTailRunRef.current, run)) return;
+
+      const finalAlignDelta = final.cameraAlignCount - run.baseline.cameraAlignCount;
+      const finalViewportWriteDelta = final.cameraViewportWriteCount - run.baseline.cameraViewportWriteCount;
+      const acquisitionDelta = final.pointerAcquisitionCount - run.baseline.pointerAcquisitionCount;
+      const cleanupDelta = final.pointerCleanupCount - run.baseline.pointerCleanupCount;
+      const finalNodePointerDelta = nodePointerDownRef.current - run.baselineNodePointerDown;
+      const finalSnapshot = {
+        penActive: final.penActive,
+        opening: final.opening,
+        phase: final.cameraPhase,
+        shield: final.cameraShield,
+        pointerResourceActive: final.pointerResourceActive,
+        viewport: final.viewport,
+        viewportFinite: finiteViewport(final.viewport),
+      };
+      const proof = {
+        ...cameraTailProofRef.current,
+        cameraAlignDelta: finalAlignDelta,
+        viewportWriteDelta: finalViewportWriteDelta,
+        nodePointerDelta: finalNodePointerDelta,
+        acquisitionDelta,
+        cleanupDelta,
+        final: finalSnapshot,
+      };
+      const failures = [
+        proof.phaseAtExit !== 'resuming' && 'exit phase 不是 resuming',
+        !proof.resumingObserved && '未观察到 resuming',
+        !proof.exitBeforeResumeReady && 'exit 未抢在 resume-ready 前',
+        proof.cameraAlignDelta !== 1 && 'camera align 增量不是 1',
+        !(proof.viewportWriteDelta > 0) && '没有 RF viewport 写入',
+        proof.nodePointerDelta !== 0 && '输入穿透到节点',
+        !(proof.acquisitionDelta > 0) && '没有真实 pointer 资源获取',
+        proof.cleanupDelta !== proof.acquisitionDelta && 'pointer 获取与 cleanup 未配平',
+        proof.shieldSamples.length < 3 || !proof.shieldSamples.every(Boolean) ? '输入盾连续帧不足' : false,
+        !proof.exportDelayed && 'dirty closing export 未 delay',
+        !proof.exportReleased && 'delayed export 未 release',
+        !proof.final?.viewportFinite && '最终 viewport 非有限数',
+      ].filter(Boolean);
+      if (failures.length) throw new Error(failures.join('；'));
+
+      run.finished = true;
+      writeCameraTailProof(run, { ...proof, passed: true, error: null }, 'PASS');
+      await cleanupCameraTailRun(run);
+    } catch (error) {
+      await failCameraTailRun(run, error);
+    }
+  }, [cleanupCameraTailRun, failCameraTailRun, writeCameraTailProof]);
+
+  const armCameraTailProof = useCallback(async () => {
+    const previous = cameraTailRunRef.current;
+    if (previous) await cleanupCameraTailRun(previous);
+    const controller = exporterControllerRef.current;
+    const runToken = ++cameraTailRunTokenRef.current;
+    const run = {
+      runToken,
+      scenario: `camera-tail-exit-${runToken}`,
+      callStartIndex: controller.calls().length,
+      closingRevision: null,
+      cancelled: false,
+      finished: false,
+      resumingHandled: false,
+      observerSource: null,
+      rafTicks: 0,
+      timerTicks: 0,
+      rafId: null,
+      pollId: null,
+      waitTimeoutId: null,
+      cleanupPromise: null,
+    };
+    run.cancelPromise = new Promise(resolve => { run.cancelResolve = () => resolve({ cancelled: true }); });
+    cameraTailRunRef.current = run;
+    const state = frameTestProbeRef.current?.snapshot();
+    const renderedIds = new Set(state?.renderedElementIds || []);
+    const selectionHoleIds = (canvas.drawing || [])
+      .filter(item => !item.isDeleted && !renderedIds.has(item.id))
+      .map(item => item.id);
+    const baseSuitePassed = !!suiteResult
+      && CHECK_NAMES.every(name => suiteResult.checks?.[name] === true);
+    const eligible = baseSuitePassed && state?.penActive === true && state?.drawVisible === true
+      && state?.opening === false && state?.cameraPhase === 'live'
+      && state?.framePhase === 'ready' && selectionHoleIds.length > 0;
+    if (!eligible) {
+      run.finished = true;
+      writeCameraTailProof(run, {
+        ...initialCameraTailProof('FAIL',
+          '请先等七项基础验收 PASS，再用「选绘图」命中 synthetic 形状并等局部 selection 事务进入 live'),
+        runToken: run.runToken,
+        scenario: run.scenario,
+        callStartIndex: run.callStartIndex,
+      }, 'FAIL', true);
+      await cleanupCameraTailRun(run);
+      return;
+    }
+
+    run.baseline = state;
+    run.baselineNodePointerDown = nodePointerDownRef.current;
+    run.selectionHoleIds = selectionHoleIds;
+    run.armVisibility = {
+      visibilityState: document.visibilityState,
+      hasFocus: document.hasFocus(),
+    };
+    controller.configure('pass', `${run.scenario}-armed`, run.runToken);
+    writeCameraTailProof(run, {
+      ...initialCameraTailProof('armed'),
+      buttonArmed: true,
+      selectionHoleIds,
+      runToken: run.runToken,
+      scenario: run.scenario,
+      callStartIndex: run.callStartIndex,
+      armVisibility: run.armVisibility,
+    }, 'armed', true);
+    run.waitTimeoutId = window.setTimeout(() => {
+      if (!cameraTailRunCurrent(cameraTailRunRef.current, run)) return;
+      void failCameraTailRun(run, new Error('尾窗证伪超时：未在真实手工具导航后观察到 resuming/closing 收口'));
+    }, CAMERA_TAIL_PROOF_TIMEOUT_MS);
+
+    const observe = (activeRun, source) => {
+      if (activeRun !== run) return;
+      if (run.cancelled || run.finished || !cameraTailRunCurrent(cameraTailRunRef.current, run)) return;
+      const current = frameTestProbeRef.current?.snapshot();
+      const observation = cameraTailObservationStep(run, source, current?.cameraPhase);
+      run.rafTicks = observation.rafTicks;
+      run.timerTicks = observation.timerTicks;
+      if (current?.pointerResourceActive && !cameraTailProofRef.current.pointerActiveObserved) {
+        writeCameraTailProof(run, { pointerActiveObserved: true });
+      }
+      if (!observation.capture) return;
+      run.resumingHandled = observation.resumingHandled;
+      run.observerSource = observation.observerSource;
+      const captureVisibility = {
+        visibilityState: document.visibilityState,
+        hasFocus: document.hasFocus(),
+      };
+      cancelCameraTailObservation(run);
+      controller.configure('delay', run.scenario, run.runToken);
+      writeCameraTailProof(run, {
+        phaseAtExit: current.cameraPhase,
+        resumingObserved: true,
+        observerSource: run.observerSource,
+        armVisibility: run.armVisibility,
+        captureVisibility,
+        rafTicks: run.rafTicks,
+        timerTicks: run.timerTicks,
+        cameraAlignDelta: current.cameraAlignCount - run.baseline.cameraAlignCount,
+        viewportWriteDelta: current.cameraViewportWriteCount - run.baseline.cameraViewportWriteCount,
+      }, 'resuming');
+      const exitAttempt = frameTestProbeRef.current?.exitDrawing();
+      const afterExit = frameTestProbeRef.current?.snapshot();
+      run.exitPromise = Promise.resolve(exitAttempt).then(
+        value => ({ ok: true, value }),
+        error => ({ ok: false, error }),
+      );
+      writeCameraTailProof(run, {
+        exitBeforeResumeReady: current.cameraPhase === 'resuming'
+          && afterExit?.cameraPhase === 'live'
+          && afterExit?.cameraAlignCount === current.cameraAlignCount,
+      });
+      void finishCameraTailRun(run);
+    };
+    const scheduleRaf = () => {
+      run.rafId = requestAnimationFrame(() => {
+        run.rafId = null;
+        observe(run, 'raf');
+        if (!run.cancelled && !run.finished && !run.resumingHandled
+          && cameraTailRunCurrent(cameraTailRunRef.current, run)) scheduleRaf();
+      });
+    };
+    const schedulePoll = () => {
+      run.pollId = window.setTimeout(() => {
+        run.pollId = null;
+        observe(run, 'timer');
+        if (!run.cancelled && !run.finished && !run.resumingHandled
+          && cameraTailRunCurrent(cameraTailRunRef.current, run)) schedulePoll();
+      }, CAMERA_TAIL_OBSERVER_POLL_MS);
+    };
+    scheduleRaf();
+    schedulePoll();
+  }, [canvas.drawing, cleanupCameraTailRun, failCameraTailRun, finishCameraTailRun, suiteResult, writeCameraTailProof]);
+
   const publish = useCallback(() => {
     const drawing = canvas.drawing || [];
     const state = frameTestProbeRef.current?.snapshot();
@@ -452,6 +808,29 @@ function InteractionCanvas() {
       viewport: viewportRef.current,
       pointerUpAt: pointerUpAtRef.current,
       drawingOpeningLatencyMs: openingLatencyRef.current,
+      manualProof: {
+        cameraTailExit: cameraTailProofRef.current,
+      },
+      manualPassWhen: [
+        'cameraTailExit.status/passed === PASS/true',
+        'buttonArmed === true and fixtureDispatchedInput === false',
+        'phaseAtExit === resuming and exitBeforeResumeReady === true',
+        'dirty export delayed/released; >=3 consecutive shield samples are true',
+        'align delta === 1; pointer acquisition/cleanup balanced; final live and finite',
+      ],
+      camera: {
+        phase: state?.cameraPhase || null,
+        shield: !!state?.cameraShield,
+        shieldFrames: cameraShieldFramesRef.current,
+        alignCount: state?.cameraAlignCount || 0,
+        viewportWriteCount: state?.cameraViewportWriteCount || 0,
+        pointerAcquisitionCount: state?.pointerAcquisitionCount || 0,
+        pointerCleanupCount: state?.pointerCleanupCount || 0,
+        pointerResourceActive: !!state?.pointerResourceActive,
+        viewport: state?.viewport || null,
+        zoomControlCount: shellRef.current?.querySelectorAll('[data-drawing-zoom]').length || 0,
+        nodePointerDown: nodePointerDownRef.current,
+      },
     };
     window.__CANVAS_INTERACTION__ = report;
     const root = document.documentElement;
@@ -463,8 +842,9 @@ function InteractionCanvas() {
     root.dataset.interactionConsoleWarnings = String(report.consoleWarnings.length);
     root.dataset.interactionPageErrors = String(report.pageErrors.length);
     root.dataset.interactionApiResources = String(report.apiResources.length);
+    root.dataset.cameraTailStatus = cameraTailStatus;
     root.dataset.interactionReport = JSON.stringify(report);
-  }, [canvas, selectedKey, suiteResult]);
+  }, [cameraTailStatus, canvas, selectedKey, suiteResult]);
 
   useEffect(() => { publish(); });
   useEffect(() => {
@@ -477,6 +857,7 @@ function InteractionCanvas() {
     const readDom = () => {
       viewportRef.current = shell.querySelector('.react-flow__viewport')?.style.transform || '';
       const root = shell.querySelector('.canvas-root');
+      if (root?.querySelector('[data-drawing-camera-shield]')) cameraShieldFramesRef.current++;
       if (root?.classList.contains('drawing-opening') && pointerUpAtRef.current != null) {
         const latency = performance.now() - pointerUpAtRef.current;
         openingLatencyRef.current = latency <= 100 ? latency : null;
@@ -495,9 +876,15 @@ function InteractionCanvas() {
     readDom();
     return () => observer.disconnect();
   }, [publish]);
-  useEffect(() => () => {
-    if (openingTimerRef.current != null) window.clearTimeout(openingTimerRef.current);
-  }, []);
+  useEffect(() => {
+    cameraTailMountedRef.current = true;
+    return () => {
+      cameraTailMountedRef.current = false;
+      const run = cameraTailRunRef.current;
+      if (run) void cleanupCameraTailRun(run);
+      if (openingTimerRef.current != null) window.clearTimeout(openingTimerRef.current);
+    };
+  }, [cleanupCameraTailRun]);
 
   const onPointerUpCapture = useCallback(event => {
     if (!event.target.closest?.('.draw-layer')) return;
@@ -514,9 +901,14 @@ function InteractionCanvas() {
     publish();
   }, [publish]);
 
+  const onPointerDownCapture = useCallback(event => {
+    if (event.target.closest?.('.react-flow__node')) nodePointerDownRef.current++;
+  }, []);
+
   return h('div', {
     ref: shellRef,
     className: 'fixture-interaction',
+    onPointerDownCapture,
     onPointerUpCapture,
     style: { position: 'relative', width: '100%', height: '100%' },
   },
@@ -555,8 +947,22 @@ function InteractionCanvas() {
       }))),
   h(UIHost),
   h('aside', { className: 'interaction-panel', 'data-interaction-panel': 'true' },
-    h('strong', null, '4518 · LE-008 隔离审判'),
+    h('strong', null, '4518 · 绘图融合隔离审判'),
     h('span', null, suiteResult ? `结果：${Object.values(suiteResult.checks).every(Boolean) ? 'PASS' : 'FAIL'}` : '真实导出链运行中…'),
+    h('button', {
+      type: 'button',
+      'data-camera-tail-exit-arm': 'true',
+      disabled: ['armed', 'resuming', 'closing'].includes(cameraTailStatus),
+      onClick: armCameraTailProof,
+      style: { pointerEvents: 'auto', minHeight: 30 },
+    }, `尾窗证伪：${cameraTailStatus}`),
+    h('span', { 'data-camera-tail-status': cameraTailStatus },
+      cameraTailStatus === 'idle'
+        ? '先用选绘图打开 synthetic 形状，再武装并用真实手工具拖动'
+        : cameraTailStatus === 'armed' ? 'watcher 已武装，等待真实手工具导航'
+          : cameraTailStatus === 'resuming' ? '已捕捉 resuming，同步退出'
+            : cameraTailStatus === 'closing' ? 'dirty closing 已延迟，正在采样输入盾'
+              : cameraTailProofRef.current.error || `尾窗证伪 ${cameraTailStatus}`),
     h('span', null, `绘图 ${canvas.drawing.length} · commits ${commitLogRef.current.length}`),
     h('span', null, selectedKey ? `已选 ${selectedKey}` : '未选会话卡'),
   ));
@@ -567,10 +973,21 @@ export function mountInteractionFixture(target) {
   window.__CANVAS_INTERACTION_CONTRACT__ = Object.freeze({
     url: 'http://127.0.0.1:4518/?mode=interaction',
     read: 'window.__CANVAS_INTERACTION__',
+    computerUseEvidence: Object.freeze({
+      source: 'current screenshot',
+      diagnosticsSource: 'read-only CDP window.__CANVAS_INTERACTION__',
+      stagesPerRound: Object.freeze(['address', 'selection', 'tail']),
+      rounds: 3,
+      artifactKind: 'computer-use-screenshot',
+    }),
     passWhen: [
       'passed === true',
       'checks.concurrent/revision/opening/closing/coldError/warmError/lateIsolation === true',
       'consoleErrors/consoleWarnings/pageErrors/apiResources are empty arrays',
+    ],
+    manualPassWhen: [
+      'manualProof.cameraTailExit.status === PASS and passed === true',
+      'Computer Use opens selection and performs the real hand-tool drag; fixture dispatches no input',
     ],
   });
   createRoot(target).render(h(InteractionCanvas));

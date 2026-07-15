@@ -3,7 +3,7 @@
  * [OUTPUT]: 对外提供 FlowCanvas 组件：统一容器模型、弹性生长、拖放改归属、三系统边+手动边、
  *           增量成员防重叠、Figma 式框选/平移/触控板手势、滚轮双模（触控板平移/鼠标缩放+模式切换钮）、
  *           容器缩放定桩、全画布落空连线选择（含就地打开会话上下文）、缩放感知连接点、原生绘图选择/画笔、
- *           committed ink 与节点共用 ViewportPortal 唯一相机、commit-bound requested generation 与已 paint rendered world 统一像素/命中/MiniMap、cold/stale 可见回执、编辑态 wheel/key/Safari gesture/pointer 全入口 RF 相机事务、
+ *           committed ink 与节点共用 ViewportPortal 唯一相机、commit-bound requested generation 与已 paint rendered world 统一像素/命中/MiniMap、cold/stale 可见回执、编辑态 wheel/key/Safari gesture/pointer 全入口 RF 相机事务（Shift+1/2/3 统一全景 fit）、唯一 Excal 对齐入口与成功/acquire/cleanup 只读计数及 live 隐藏期同层输入盾/可见缩放岛、
  *           目标关系闭包局部事务、新建大底板落笔即退场/自动沉层与稳定排空撤销、屏幕/队列/持久化三真相收口、opening request 身份门与纯取消、无双影帧交接与真实阶段回执、
  *           普通模式绘图命中（pane/容器面同河、nodrag/连接点等功能件优先）与 Backspace 删除治理；4518 seam 只驱动真实 open/exit 动作并替换 Ink exporter
  * [POS]: canvas 的画布引擎。归属律：layout.d 手动指定 > 路径推断；容器永远生长包住成员；
@@ -11,7 +11,7 @@
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
 import React, { useMemo, useCallback, useRef, useEffect, useLayoutEffect, useState, lazy, Suspense } from 'react';
-import { ReactFlow, useNodesState, useEdgesState, Controls, ControlButton, MiniMap, Background, BackgroundVariant, Panel, MarkerType, ConnectionMode } from '@xyflow/react';
+import { ReactFlow, useNodesState, useEdgesState, Controls, ControlButton, MiniMap, Background, BackgroundVariant, Panel, MarkerType, ConnectionMode, getViewportForBounds } from '@xyflow/react';
 import WorkspaceNode from './WorkspaceNode.jsx';
 import SessionNode from './SessionNode.jsx';
 import DistrictNode from './DistrictNode.jsx';
@@ -22,13 +22,13 @@ import { sessionMenu, workspaceMenu, districtMenu, boardMenu, noteMenu, paneMenu
 import { connectionDrop, syncHandleHitArea } from './connections.js';
 import {
   advanceDrawingTransaction, anchoredDrawingIds, autoSinkLargeNewDrawingDraft, canvasGeometryAllowed, canvasGeometryPreparation, createDrawingCommitQueue, createDrawingTransaction,
-  deleteDrawingElement, DRAWING_HIT_BLOCK, drawingCameraExitPolicy, drawingCameraStep, drawingClosingHandoffStep, drawingCompositionStep, drawingExitAction, drawingExitFailureNotice, drawingFrameHitElements, drawingFrameTruthStep, drawingOpeningRequestCurrent, drawingRestoredWorldOverride, drawingTransactionVisibleElements, drawingWorldInputStep, drawingWorldSyncStep, hitDrawingElement, mergeDrawingTransaction,
+  deleteDrawingElement, DRAWING_HIT_BLOCK, drawingCameraExitPolicy, drawingCameraPresentation, drawingCameraStep, drawingClosingHandoffStep, drawingCompositionStep, drawingExitAction, drawingExitFailureNotice, drawingFrameHitElements, drawingFrameTruthStep, drawingOpeningRequestCurrent, drawingRestoredWorldOverride, drawingTransactionVisibleElements, drawingWorldInputStep, drawingWorldSyncStep, hitDrawingElement, mergeDrawingTransaction,
   setDrawingElementPlane, translateDrawingElements,
 } from './drawing.js';
 import InkWorldLayer from './InkWorldLayer.jsx';
 import MiniMapInk from './MiniMapInk.jsx';
 import {
-  createPointerListenerResource, drawingGestureCapture, drawingGestureRoute, drawingWheelRoute, panViewport, scaleViewport,
+  createPointerListenerResource, drawingGestureCapture, drawingGestureRoute, drawingWheelRoute, drawingZoomKeyCommand, keyboardViewport, panViewport, scaleViewport,
   wheelDevice, wheelViewport, zoomViewport, WHEEL_MODES, nextWheelMode,
 } from './gestures.js';
 import { Icon, toast, confirmPop } from '../ui.jsx';
@@ -258,11 +258,15 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   const cameraResumeTimerRef = useRef(null);
   const cameraRafOneRef = useRef(null);
   const cameraRafTwoRef = useRef(null);
+  const drawingViewportAlignCountRef = useRef(0);
+  const cameraViewportWriteCountRef = useRef(0);
   const gestureScaleRef = useRef(1);
   const compositionStateRef = useRef({ cycle: 0, active: false, blocked: false, notified: false });
   const spaceNavRef = useRef(false);
   const pointerNavRef = useRef(null);
   const pointerResourceRef = useRef(null);
+  const pointerAcquisitionCountRef = useRef(0);
+  const pointerCleanupCountRef = useRef(0);
   const dropHiRef = useRef(null);                   // 拖动中的投放目标高亮
   const rootRef = useRef(null);
   const clearSelectionRef = useRef(() => {});       // 进绘图前清 RF 选中——Delete 不许一键双雷（定义在下方，ref 解前向引用）
@@ -279,11 +283,17 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     setDrawVisible(visible);
   }, []);
 
+  const alignDrawingViewport = useCallback((controller, vp) => {
+    if (!controller || !vp || !controller.alignViewport(vp)) return false;
+    drawingViewportAlignCountRef.current++;
+    return true;
+  }, []);
+
   const clearPointerNavigation = useCallback(() => {
     const resource = pointerResourceRef.current;
     pointerResourceRef.current = null;
     pointerNavRef.current = null;
-    resource?.cleanup();
+    if (resource?.cleanup()) pointerCleanupCountRef.current++;
   }, []);
 
   // 三真相收口：编辑期不倒灌；override 在场时必须等 props 同引用追上，才同步队列并按身份撤桥。
@@ -355,18 +365,18 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       cameraResumeTimerRef.current = null;
       if (cameraStateRef.current.phase !== 'suspended') return;
       const token = {};
-      const next = drawingCameraStep(cameraStateRef.current, { type: 'resume', token });
-      if (next === cameraStateRef.current) return;
-      cameraStateRef.current = next;
       const vp = instRef.current?.getViewport();
-      if (!vp || !drawRef.current?.alignViewport(vp)) {
-        cameraStateRef.current = drawingCameraStep(cameraStateRef.current, { type: 'resume-error', token });
+      if (!alignDrawingViewport(drawRef.current, vp)) {
+        cameraStateRef.current = drawingCameraStep(cameraStateRef.current, { type: 'reset' });
         cameraPendingVpRef.current = null;
         setDraftPreview(null);
         updateDrawVisible(true);
         toast('绘图相机对齐失败，已恢复编辑现场', 'error');
         return;
       }
+      const next = drawingCameraStep(cameraStateRef.current, { type: 'resume-aligned', token });
+      if (next === cameraStateRef.current) return;
+      cameraStateRef.current = next;
       cameraRafOneRef.current = requestAnimationFrame(() => {
         cameraRafOneRef.current = null;
         cameraRafTwoRef.current = requestAnimationFrame(() => {
@@ -380,7 +390,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
         });
       });
     }, CAMERA_TAIL_MS);
-  }, [clearCameraTiming, updateDrawVisible]);
+  }, [alignDrawingViewport, clearCameraTiming, updateDrawVisible]);
 
   const failCameraFreeze = useCallback((token, message) => {
     const next = drawingCameraStep(cameraStateRef.current, { type: 'preview-error', token });
@@ -446,6 +456,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     cameraStateRef.current = drawingCameraStep(state, { type: 'navigate', token });
     cameraPendingVpRef.current = nextVp;
     inst.setViewport(nextVp);
+    cameraViewportWriteCountRef.current++;
     syncHandleHitArea(rootRef.current, nextVp.zoom);
     scheduleCameraResume();
     return true;
@@ -462,6 +473,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     const vp = cameraPendingVpRef.current || instRef.current?.getViewport();
     if (vp) {
       instRef.current?.setViewport(vp);
+      cameraViewportWriteCountRef.current++;
       syncHandleHitArea(rootRef.current, vp.zoom);
     }
     scheduleCameraResume();
@@ -525,6 +537,14 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     };
     root.addEventListener('wheel', onWheel, { capture: true, passive: false });
     return () => root.removeEventListener('wheel', onWheel, { capture: true });
+  }, [navigateDrawingCamera]);
+
+  const navigateDrawingZoom = useCallback(command => {
+    const root = rootRef.current;
+    if (!root) return false;
+    return navigateDrawingCamera(vp => keyboardViewport(
+      vp, command, root.getBoundingClientRect(), { min: MIN_ZOOM, max: MAX_ZOOM },
+    ));
   }, [navigateDrawingCamera]);
 
   useEffect(() => {
@@ -613,8 +633,12 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       clearPointerNavigation();
     };
     const resource = createPointerListenerResource(window, { onMove, onFinish: finish });
-    pointerResourceRef.current = resource;
-    resource.attach();
+    if (resource.attach()) {
+      pointerAcquisitionCountRef.current++;
+      pointerResourceRef.current = resource;
+    } else if (pointerNavRef.current === session) {
+      pointerNavRef.current = null;
+    }
   }, [clearPointerNavigation, navigateDrawingCamera]);
 
   // ---- 绘图编辑：静态 committed 世界常驻；局部 draft 只在 hole SVG 进入 DOM 后显现。 ----
@@ -764,7 +788,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     clearCameraTiming();
     if (cameraExit.align) {
       const vp = instRef.current?.getViewport();
-      if (vp) drawRef.current?.alignViewport(vp);
+      alignDrawingViewport(drawRef.current, vp);
     }
     // 退出抢占相机 token：只保留已 ready preview 填洞，freezing 的迟到副本立即卸载。
     cameraStateRef.current = drawingCameraStep(cameraStateRef.current, { type: 'reset' });
@@ -855,7 +879,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     } finally {
       exitingDrawRef.current = false;
     }
-  }, [clearCameraTiming, clearPointerNavigation, drawingCommitQueue, resetDrawingCamera, updateDrawVisible]);
+  }, [alignDrawingViewport, clearCameraTiming, clearPointerNavigation, drawingCommitQueue, resetDrawingCamera, updateDrawVisible]);
 
   const autoExitLargeNewDrawing = useCallback(() => {
     const transaction = editTransactionRef.current;
@@ -1457,11 +1481,65 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
 
   useEffect(() => { if (!selectedKey) clearSelection(); }, [selectedKey, clearSelection]);
 
+  const drawingFocusViewport = useCallback(path => {
+    const inst = instRef.current;
+    const root = rootRef.current;
+    if (!inst || !root?.clientWidth || !root?.clientHeight) return null;
+    if (path) {
+      const p = built.positions[path];
+      if (!p) return null;
+      const zoom = Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, 0.9));
+      return {
+        zoom,
+        x: root.clientWidth / 2 - (p.x + p.w / 2) * zoom,
+        y: root.clientHeight / 2 - (p.y + Math.min(p.h / 2, 280)) * zoom,
+      };
+    }
+    const visibleNodes = inst.getNodes().filter(node => !node.hidden);
+    if (!visibleNodes.length) return inst.getViewport();
+    return getViewportForBounds(
+      inst.getNodesBounds(visibleNodes), root.clientWidth, root.clientHeight,
+      MIN_ZOOM, 0.8, 0.1,
+    );
+  }, [built]);
+
+  const navigateDrawingFit = useCallback(path => {
+    const target = drawingFocusViewport(path);
+    return target ? navigateDrawingCamera(() => target) : false;
+  }, [drawingFocusViewport, navigateDrawingCamera]);
+
+  useEffect(() => {
+    const editable = target => target?.tagName === 'TEXTAREA' || target?.tagName === 'INPUT' || target?.isContentEditable;
+    const onKey = e => {
+      if (!penActiveRef.current) return;
+      const root = rootRef.current;
+      const target = e.target;
+      const canvasTarget = root?.contains(target)
+        || target === document.body || target === document.documentElement;
+      if (!canvasTarget) return;
+      const insideExcal = !!target?.closest?.('.excalidraw');
+      const isEditable = editable(target);
+      if (isEditable && !insideExcal) return;
+      const { route, command } = drawingZoomKeyCommand({
+        code: e.code, editable: isEditable, shiftKey: e.shiftKey, altKey: e.altKey,
+        metaKey: e.metaKey, ctrlKey: e.ctrlKey,
+      });
+      if (route === 'pass') return;
+      if (route === 'block') e.preventDefault();
+      e.stopPropagation();
+      if (command && !openingRef.current && !exitingDrawRef.current) {
+        command === 'fit' ? navigateDrawingFit(null) : navigateDrawingZoom(command);
+      }
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [navigateDrawingFit, navigateDrawingZoom]);
+
   useEffect(() => {
     focusRef.current = path => {
-      if (penActiveRef.current) exitDrawing();   // 绘图激活时定位：退出编辑跟人走，视口不分家
       const inst = instRef.current;
       if (!inst) return;
+      if (penActiveRef.current) return navigateDrawingFit(path);
       if (!path) return inst.fitView({ padding: 0.1, duration: 700, maxZoom: 0.8 });
       const p = built.positions[path];
       if (p) inst.setCenter(p.x + p.w / 2, p.y + Math.min(p.h / 2, 280), { zoom: 0.9, duration: 650 });
@@ -1471,7 +1549,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       geometryLocked, opening, prepareGeometry,
       containerRects, followDrawings: followAnchoredDrawings,   // 容器承载律：整理/撤销的墨迹跟随出口
     };
-  }, [built, focusRef, actionsRef, addNote, addBoard, togglePen, exitDrawing, clearSelection, geometryLocked, opening, prepareGeometry, containerRects, followAnchoredDrawings]);
+  }, [built, focusRef, actionsRef, addNote, addBoard, togglePen, navigateDrawingFit, clearSelection, geometryLocked, opening, prepareGeometry, containerRects, followAnchoredDrawings]);
 
   const onNodeClick = useCallback((e, node) => {
     const hit = drawingHitFromEvent(e);   // 视觉最上层者赢：描边带上的点击优先归绘图，空心区照常穿透给卡片
@@ -1589,6 +1667,9 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
           : framePhase === 'cold' && requestedHasInk ? '绘图正在显现…'
             : null
   );
+  const cameraPresentation = drawingCameraPresentation({
+    active: penActive, visible: drawVisible, hasPreview: !!draftPreview,
+  });
 
   // 4518 隔离夹具的动作 seam：只暴露只读快照与真实 open/exit；故障仅从 Ink exporter 边界注入。
   // 发布放在 layout effect，speculative render 被丢弃时不会篡改探针主权。
@@ -1614,6 +1695,14 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
         openingResolverPending: !!openingReadyResolveRef.current,
         penActive: penActiveRef.current,
         drawVisible: drawVisibleRef.current,
+        cameraPhase: cameraStateRef.current.phase,
+        cameraShield: !!rootRef.current?.querySelector('[data-drawing-camera-shield]'),
+        cameraAlignCount: drawingViewportAlignCountRef.current,
+        cameraViewportWriteCount: cameraViewportWriteCountRef.current,
+        pointerAcquisitionCount: pointerAcquisitionCountRef.current,
+        pointerCleanupCount: pointerCleanupCountRef.current,
+        pointerResourceActive: !!pointerResourceRef.current,
+        viewport: instRef.current?.getViewport() || null,
         callbackEvents: [...frameTestEventsRef.current],
       };
     };
@@ -1781,6 +1870,9 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     )}
     {/* ===== 边悬浮说明牌 ===== */}
     {edgeTip && <div className="edge-tip" style={{ left: edgeTip.x, top: edgeTip.y }}>{edgeTip.text}</div>}
+    {cameraPresentation.showShield && (
+      <div className="drawing-camera-shield" data-drawing-camera-shield="true" aria-hidden="true" />
+    )}
     {penActive && editSeed && (
       <Suspense fallback={null}>
         <DrawLayer
@@ -1804,7 +1896,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
             const openingRequest = editSeed.openingRequest;
             if (!drawingOpeningRequestCurrent(openingRequestRef.current, openingRequest)) return;
             const vp = instRef.current?.getViewport();
-            if (vp) controller.alignViewport(vp);
+            alignDrawingViewport(controller, vp);
             controller.activateTool(drawToolRef.current);
             const selectId = pendingSelectRef.current;
             const selected = !selectId || controller.getElements()?.some(el => el.id === selectId);
@@ -1849,6 +1941,18 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
           }}
         />
       </Suspense>
+    )}
+    {penActive && (
+      <div className="island drawing-zoom-island" aria-label="绘图视图缩放">
+        <button type="button" data-drawing-zoom="out" onClick={() => navigateDrawingZoom('out')} title="缩小（⌘-）">−</button>
+        <button type="button" data-drawing-zoom="in" onClick={() => navigateDrawingZoom('in')} title="放大（⌘+）">+</button>
+        <button type="button" data-drawing-zoom="reset" onClick={() => navigateDrawingZoom('reset')} title="回到 100%">100%</button>
+        <button type="button" data-drawing-zoom="fit" onClick={() => navigateDrawingFit(null)} title="全景归位">全景</button>
+        <button type="button" data-drawing-zoom="wheel" onClick={cycleWheel}
+          title={`${WHEEL_MODES[wheelMode].label}：${WHEEL_MODES[wheelMode].hint}（点击切换）`}>
+          <Icon name={WHEEL_MODES[wheelMode].icon} />
+        </button>
+      </div>
     )}
     {/* 画布工具岛：顶部正中——绘图选择与画笔始终在场，激活后滑移让位给 Excalidraw 工具栏（.drawing-on 驱动）。
         必须是绘图层的兄弟(z:7)：React Flow 根自成层叠上下文，Panel 里的按钮会被画笔层截住 */}
