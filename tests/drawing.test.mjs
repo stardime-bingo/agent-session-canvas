@@ -3,10 +3,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import {
   advanceDrawingTransaction, anchoredDrawingIds, autoSinkLargeNewDrawingDraft, canvasGeometryAllowed, canvasGeometryPreparation, committedDrawingElements, createDrawingArrangeUndoTicket, createDrawingCommitQueue, deleteDrawingElement, DRAWING_HIT_BLOCK, drawingBounds, drawingCameraExitPolicy, drawingCameraStep, drawingCompositionStep,
   createDrawingTransaction, drawingEditorReadyStep, drawingTransactionClosure, drawingTransactionVisibleElements,
-  drawingAutoExitGestureStep, drawingClosingHandoffStep, drawingExitAction, drawingExitFailureNotice, drawingFilesSignature, drawingFontSignature, drawingFontSignaturesEqual, drawingFontWorkRoute, drawingOpeningRequestCurrent, drawingPlaneDirtyPlan, drawingPlaneGroupPlan, drawingPlaneGroups, drawingPlaneSignature, drawingPlaneSignaturesEqual, drawingPlaneSettledInFlight, drawingPlaneWorkRoute, drawingRestoredWorldOverride, drawingSnapshot, drawingWorldSyncStep, hitDrawingElement, isLargeFilledDrawingElement, setDrawingElementPlane, splitDrawingPlanes,
+  drawingAutoExitGestureStep, drawingClosingHandoffStep, drawingExitAction, drawingExitFailureNotice, drawingFilesSignature, drawingFontSignature, drawingFontSignaturesEqual, drawingFontWorkRoute, drawingFrameHitElements, drawingFrameRetryDecision, drawingFrameTruthStep, drawingOpeningRequestCurrent, drawingPlaneDirtyPlan, drawingPlaneGroupPlan, drawingPlaneGroups, drawingPlaneSignature, drawingPlaneSignaturesEqual, drawingPlaneSettledInFlight, drawingPlaneWorkRoute, drawingRestoredWorldOverride, drawingSnapshot, drawingWorldInputStep, drawingWorldSyncStep, hitDrawingElement, isLargeFilledDrawingElement, setDrawingElementPlane, splitDrawingPlanes,
   mergeDrawingTransaction, translateDrawingElements,
 } from '../web/src/canvas/drawing.js';
 import { loadDrawingFiles, normalizeDrawingFiles, saveDrawingFiles } from '../server/drawing-files.mjs';
@@ -753,6 +754,175 @@ test('plane 工作路由优先复用 ready，其次 join 同签名在途，旧 p
   const newer = { signature: changed, promise: newPromise };
   assert.equal(drawingPlaneSettledInFlight(newer, oldPromise), newer, '旧导出迟到不得清掉新世代');
   assert.equal(drawingPlaneSettledInFlight(newer, newPromise), null, '只有当前 promise 可清自己');
+});
+
+test('rendered frame 只接受当前 requested revision，cold 无命中且 stale 始终保留旧帧', () => {
+  const oldWorld = { elements: [rect('old-visible', 0, 0, 20, 20)], files: {}, revision: 7 };
+  const nextWorld = { elements: [rect('next-visible', 100, 0, 20, 20)], files: {}, revision: 8 };
+  let frame = drawingFrameTruthStep(undefined, { type: 'request', revision: 7 });
+
+  assert.equal(frame.phase, 'cold');
+  assert.deepEqual(drawingFrameHitElements(frame), [], 'cold export 前不得暴露隐形热区');
+  assert.equal(drawingFrameTruthStep(frame, { type: 'ready', revision: 6, world: oldWorld }), frame,
+    '迟到 ready 不得冒充当前帧');
+
+  frame = drawingFrameTruthStep(frame, { type: 'ready', revision: 7, world: oldWorld });
+  assert.equal(frame.phase, 'ready');
+  assert.deepEqual(drawingFrameHitElements(frame).map(element => element.id), ['old-visible']);
+
+  frame = drawingFrameTruthStep(frame, { type: 'request', revision: 8 });
+  assert.equal(frame.phase, 'updating');
+  assert.deepEqual(drawingFrameHitElements(frame).map(element => element.id), ['old-visible'],
+    '新 SVG 未 paint 前命中仍必须跟旧像素同代');
+  assert.equal(drawingFrameTruthStep(frame, { type: 'error', revision: 7, error: new Error('late') }), frame,
+    '迟到 error 不得污染新世代');
+
+  frame = drawingFrameTruthStep(frame, {
+    type: 'error', revision: 8, error: new Error('retry me'), attempt: 1, willRetry: true,
+  });
+  assert.equal(frame.phase, 'retrying');
+  assert.deepEqual(drawingFrameHitElements(frame).map(element => element.id), ['old-visible']);
+  frame = drawingFrameTruthStep(frame, {
+    type: 'error', revision: 8, error: new Error('final'), attempt: 3, willRetry: false,
+  });
+  assert.equal(frame.phase, 'stale');
+  assert.deepEqual(drawingFrameHitElements(frame).map(element => element.id), ['old-visible']);
+
+  frame = drawingFrameTruthStep(frame, { type: 'ready', revision: 8, world: nextWorld });
+  assert.equal(frame.phase, 'ready');
+  assert.equal(frame.renderedWorld.revision, 8);
+  assert.deepEqual(drawingFrameHitElements(frame).map(element => element.id), ['next-visible']);
+});
+
+test('frame export 重试固定最多三次并使用小幅退避', () => {
+  assert.deepEqual(drawingFrameRetryDecision(1), { retry: true, nextAttempt: 2, delayMs: 40 });
+  assert.deepEqual(drawingFrameRetryDecision(2), { retry: true, nextAttempt: 3, delayMs: 80 });
+  assert.deepEqual(drawingFrameRetryDecision(3), { retry: false, nextAttempt: 3, delayMs: 0 });
+  assert.deepEqual(drawingFrameRetryDecision(99), { retry: false, nextAttempt: 3, delayMs: 0 });
+});
+
+test('4518 帧探针只能驱动真实 open/exit，故障只能从 InkWorld exporter 注入', () => {
+  const fixture = fs.readFileSync(path.resolve('tests/fixtures/canvas-acceptance/interaction-data.js'), 'utf8');
+  const flowCanvas = fs.readFileSync(path.resolve('web/src/canvas/FlowCanvas.jsx'), 'utf8');
+  const inkWorld = fs.readFileSync(path.resolve('web/src/canvas/InkWorldLayer.jsx'), 'utf8');
+
+  assert.doesNotMatch(fixture, /beginHandoff|injectReady|injectError/,
+    'fixture 不得手工写 handoff 或伪造 ready/error');
+  assert.match(fixture, /frameTestProbeRef\.current\?*\.openDrawing\(/,
+    'opening 必须调用 production openDrawing');
+  assert.match(fixture, /frameTestProbeRef\.current\?*\.exitDrawing\(/,
+    'closing 必须调用 production exitDrawing');
+  assert.match(flowCanvas, /openDrawing:\s*\(tool, selectId\)\s*=>\s*openDrawing\(tool, selectId\)/);
+  assert.match(flowCanvas, /exitDrawing:\s*\(\)\s*=>\s*exitDrawing\(\)/);
+  assert.doesNotMatch(flowCanvas, /beginHandoff|injectReady|injectError/,
+    'production probe 不得直接触碰 callback reducer/handoff refs');
+  assert.match(inkWorld, /exporterProbe\?\.exportToSvg/,
+    '导出故障 seam 必须位于真实 InkWorld exporter 边界');
+});
+
+test('4518 interaction fixture 必须被 focused gate 真正构建', async () => {
+  const [{ build }, { default: react }] = await Promise.all([
+    import('vite'),
+    import('@vitejs/plugin-react'),
+  ]);
+  const fixtureRoot = path.resolve('tests/fixtures/canvas-acceptance');
+  const result = await build({
+    root: fixtureRoot,
+    configFile: false,
+    logLevel: 'silent',
+    plugins: [react()],
+    build: {
+      write: false,
+      rollupOptions: { input: path.join(fixtureRoot, 'index.html') },
+    },
+  });
+  assert.ok(result, 'fixture Vite build 必须产出 bundle');
+});
+
+test('LE-008 Computer Use 原始证据可选注入 focused behavior log 并绑定 candidate', () => {
+  const evidencePath = process.env.LE008_COMPUTER_USE_EVIDENCE;
+  if (!evidencePath) return;
+  assert.equal(path.isAbsolute(evidencePath), true, 'evidence 必须使用绝对路径');
+  const raw = fs.readFileSync(evidencePath, 'utf8').trim();
+  assert.equal(raw.split(/\r?\n/).length, 1, 'evidence JSON 必须为单行原始 transcript');
+  const evidence = JSON.parse(raw);
+  const candidateSha = execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
+  assert.equal(evidence.candidateSha, candidateSha, 'Computer Use 证据必须绑定当前 candidate SHA');
+  const checkNames = ['coldError', 'closing', 'concurrent', 'lateIsolation', 'opening', 'revision', 'warmError'];
+  assert.deepEqual(Object.keys(evidence.checks || {}).sort(), [...checkNames].sort(), 'checks 必须且只能包含七个具名判准');
+  for (const name of checkNames) assert.equal(evidence.checks[name], true, `${name} 必须为 true`);
+  assert.ok(Array.isArray(evidence.runs) && evidence.runs.length >= 3, '至少保留三轮 Computer Use 原始结果');
+  for (const name of ['consoleErrors', 'consoleWarnings', 'pageErrors', 'apiResources']) {
+    assert.ok(Array.isArray(evidence[name]), `${name} 必须保留原始数组`);
+    assert.equal(evidence[name].length, 0, `${name} 必须为零`);
+  }
+  console.log(`LE008_COMPUTER_USE_EVIDENCE ${raw}`);
+});
+
+test('props 先追上 closing override 后再撤桥：persisted world 只在激活时分配严格递增 revision', () => {
+  const oldElements = [rect('old', 0, 0, 20, 20)];
+  const mergedElements = [rect('merged', 40, 0, 20, 20)];
+  const files = {};
+  let persistedWorld = null;
+  let activeWorld = null;
+  let revision = 0;
+  const activate = (elements, override = null) => {
+    const step = drawingWorldInputStep({
+      persistedWorld, activeWorld, override, elements, files, revision,
+    });
+    persistedWorld = step.persistedWorld;
+    activeWorld = step.world;
+    revision = step.revision;
+    return step;
+  };
+
+  const initial = activate(oldElements);
+  const openingOverride = { elements: oldElements, files, excludedIds: ['old'], revision: ++revision };
+  const opening = activate(oldElements, openingOverride);
+  const propsCaughtUp = activate(mergedElements, openingOverride);
+  const closingOverride = { elements: mergedElements, files, excludedIds: [], revision: ++revision };
+  const closing = activate(mergedElements, closingOverride);
+  const unbridged = activate(mergedElements);
+  const stable = activate(mergedElements);
+
+  assert.deepEqual(
+    [initial.world.revision, opening.world.revision, closing.world.revision, unbridged.world.revision],
+    [1, 2, 3, 4],
+  );
+  assert.equal(propsCaughtUp.world, openingOverride, 'props 追上时不得抢走 active override');
+  assert.equal(propsCaughtUp.persistedWorld.revision, null, '未激活 persisted input 不得预分配过时 revision');
+  assert.equal(unbridged.world.elements, mergedElements);
+  assert.ok(unbridged.world.revision > closing.world.revision, '撤桥不得让 render input revision 回退');
+  assert.equal(stable.world, unbridged.world, '同一 active persisted world 重渲染不得虚增 revision');
+  assert.equal(stable.revision, unbridged.revision);
+});
+
+test('world input 的 speculative B 只是候选值，未 commit 前不能取得 authority', () => {
+  const elementsA = [rect('committed-a', 0, 0, 20, 20)];
+  const elementsB = [rect('speculative-b', 30, 0, 20, 20)];
+  const elementsC = [rect('committed-c', 60, 0, 20, 20)];
+  const files = {};
+  let authority = { persistedWorld: null, activeWorld: null, revision: 0 };
+  const render = elements => drawingWorldInputStep({ ...authority, elements, files });
+  const commit = step => {
+    authority = {
+      persistedWorld: step.persistedWorld,
+      activeWorld: step.world,
+      revision: step.revision,
+    };
+  };
+
+  const committedA = render(elementsA);
+  commit(committedA);
+  const speculativeB = render(elementsB);
+  assert.ok(speculativeB.world.revision > committedA.world.revision, 'B 必须是真正的新 speculative generation');
+  assert.equal(authority.activeWorld, committedA.world, 'B 未 commit 就不能取得 generation authority');
+
+  const committedC = render(elementsC);
+  commit(committedC);
+  assert.equal(authority.activeWorld.elements, elementsC);
+  assert.ok(authority.activeWorld.revision > committedA.world.revision);
+  assert.notEqual(authority.activeWorld, speculativeB.world, '同步 C 必须直接丢弃未 commit 的 B');
 });
 
 test('连续 z-order group 严格按边界切分并保留元素顺序，空面不制造占位组', () => {

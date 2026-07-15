@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 4518 query(mode=performance|interaction, size=300|800, autorun=0|1) 与真实画布组件
- * [OUTPUT]: 性能报告/探针；interaction 动态加载真实 FlowCanvas 全内存验收页
+ * [OUTPUT]: 性能报告/探针（含 DOM/rendered world revision 原子交接）；interaction 动态加载真实 FlowCanvas 全内存验收页并共享 console/page error 原始 transcript
  * [POS]: 无 API/无持久化的画布验收路由；performance 首屏闭包不静态引入 FlowCanvas
  * [PROTOCOL]: 变更时更新此头部，然后检查 README/web/CLAUDE.md
  */
@@ -20,6 +20,35 @@ const SIZE = Number(params.get('size')) === 800 ? 800 : 300;
 const AUTORUN = params.get('autorun') !== '0';
 const LONG_TASKS = [];
 const PAGE_ERRORS = [];
+const CONSOLE_ERRORS = [];
+const CONSOLE_WARNINGS = [];
+const CONSOLE_TRANSCRIPT = [];
+window.__CANVAS_PAGE_ERRORS__ = PAGE_ERRORS;
+window.__CANVAS_CONSOLE_ERRORS__ = CONSOLE_ERRORS;
+window.__CANVAS_CONSOLE_WARNINGS__ = CONSOLE_WARNINGS;
+window.__CANVAS_CONSOLE_TRANSCRIPT__ = CONSOLE_TRANSCRIPT;
+const originalConsoleError = console.error.bind(console);
+const originalConsoleWarn = console.warn.bind(console);
+const notifyDiagnosticsChanged = () => window.dispatchEvent(new Event('canvas-acceptance-diagnostics'));
+const consoleValue = value => {
+  if (value instanceof Error) return `${value.name}: ${value.message}`;
+  if (typeof value === 'string') return value;
+  try { return JSON.stringify(value); } catch { return String(value); }
+};
+const captureConsole = (level, args) => {
+  const entry = { level, at: performance.now(), args: args.map(consoleValue) };
+  CONSOLE_TRANSCRIPT.push(entry);
+  (level === 'error' ? CONSOLE_ERRORS : CONSOLE_WARNINGS).push(entry);
+  notifyDiagnosticsChanged();
+};
+console.error = (...args) => {
+  captureConsole('error', args);
+  originalConsoleError(...args);
+};
+console.warn = (...args) => {
+  captureConsole('warn', args);
+  originalConsoleWarn(...args);
+};
 const LONG_TASK_SUPPORTED = PerformanceObserver.supportedEntryTypes?.includes('longtask') === true;
 const probe = { status: 'booting', report: null, run: null };
 window.__CANVAS_ACCEPTANCE__ = probe;
@@ -29,8 +58,14 @@ if (LONG_TASK_SUPPORTED) {
     for (const entry of list.getEntries()) LONG_TASKS.push({ startTime: entry.startTime, duration: entry.duration });
   }).observe({ type: 'longtask', buffered: true });
 }
-window.addEventListener('error', event => PAGE_ERRORS.push(event.message || event.error?.message || 'window error'));
-window.addEventListener('unhandledrejection', event => PAGE_ERRORS.push(String(event.reason?.message || event.reason)));
+window.addEventListener('error', event => {
+  PAGE_ERRORS.push(event.message || event.error?.message || 'window error');
+  notifyDiagnosticsChanged();
+});
+window.addEventListener('unhandledrejection', event => {
+  PAGE_ERRORS.push(String(event.reason?.message || event.reason));
+  notifyDiagnosticsChanged();
+});
 
 const p95 = values => {
   if (!values.length) return 0;
@@ -101,11 +136,16 @@ function AcceptanceCanvas() {
     });
   }, []);
 
-  const onSnapshotReady = useCallback((revision, metrics) => {
+  const onSnapshotReady = useCallback((revision, metrics, renderedWorld) => {
     const ended = performance.now();
     const waiter = waitersRef.current.get(revision);
+    const domRevision = Number(document.querySelector('.ink-world')?.dataset.renderedRevision);
     const result = {
       revision, kind: waiter?.kind || 'untracked', metrics,
+      renderedRevision: renderedWorld?.revision,
+      domRevision,
+      renderedElementCount: renderedWorld?.elements?.length,
+      atomic: renderedWorld?.revision === revision && domRevision === revision,
       started: waiter?.started ?? ended, ended,
       duration: ended - (waiter?.started ?? ended),
     };
@@ -119,7 +159,8 @@ function AcceptanceCanvas() {
     }
   }, []);
 
-  const onSnapshotError = useCallback((revision, error) => {
+  const onSnapshotError = useCallback((revision, error, result) => {
+    if (result?.final === false) return;
     publish('error', { size: SIZE, revision, error: error.message, pageErrors: PAGE_ERRORS });
   }, [publish]);
 
@@ -172,6 +213,8 @@ function AcceptanceCanvas() {
         && readyGroups?.below?.reused === readyGroups?.below?.total
         && readyGroups?.above?.reused === readyGroups?.above?.total
         && readyReuse.metrics?.font?.reused === 1,
+      renderedRevisionAtomic: [cold, readyReuse, ...warm, fontChange, fontReadyReuse]
+        .every(sample => sample.atomic && sample.renderedRevision === sample.revision && sample.domRevision === sample.revision),
       singleDirtyPlane: metricsCorrect,
       singleDirtyGroup: groupMetricsCorrect,
       fontCapsuleDirty: fontChange.metrics?.font?.exported === 1

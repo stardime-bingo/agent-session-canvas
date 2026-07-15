@@ -3,9 +3,9 @@
  * [OUTPUT]: 对外提供 FlowCanvas 组件：统一容器模型、弹性生长、拖放改归属、三系统边+手动边、
  *           增量成员防重叠、Figma 式框选/平移/触控板手势、滚轮双模（触控板平移/鼠标缩放+模式切换钮）、
  *           容器缩放定桩、全画布落空连线选择（含就地打开会话上下文）、缩放感知连接点、原生绘图选择/画笔、
- *           committed ink 与节点共用 ViewportPortal 唯一相机、编辑态 wheel/key/Safari gesture/pointer 全入口 RF 相机事务、
+ *           committed ink 与节点共用 ViewportPortal 唯一相机、commit-bound requested generation 与已 paint rendered world 统一像素/命中/MiniMap、cold/stale 可见回执、编辑态 wheel/key/Safari gesture/pointer 全入口 RF 相机事务、
  *           目标关系闭包局部事务、新建大底板落笔即退场/自动沉层与稳定排空撤销、屏幕/队列/持久化三真相收口、opening request 身份门与纯取消、无双影帧交接与真实阶段回执、
- *           普通模式绘图命中（pane/容器面同河、nodrag/连接点等功能件优先）与 Backspace 删除治理
+ *           普通模式绘图命中（pane/容器面同河、nodrag/连接点等功能件优先）与 Backspace 删除治理；4518 seam 只驱动真实 open/exit 动作并替换 Ink exporter
  * [POS]: canvas 的画布引擎。归属律：layout.d 手动指定 > 路径推断；容器永远生长包住成员；
  *        每一次点击必有可感知的回应：选中态/菜单/提示三选一
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -22,7 +22,7 @@ import { sessionMenu, workspaceMenu, districtMenu, boardMenu, noteMenu, paneMenu
 import { connectionDrop, syncHandleHitArea } from './connections.js';
 import {
   advanceDrawingTransaction, anchoredDrawingIds, autoSinkLargeNewDrawingDraft, canvasGeometryAllowed, canvasGeometryPreparation, createDrawingCommitQueue, createDrawingTransaction,
-  deleteDrawingElement, DRAWING_HIT_BLOCK, drawingCameraExitPolicy, drawingCameraStep, drawingClosingHandoffStep, drawingCompositionStep, drawingExitAction, drawingExitFailureNotice, drawingOpeningRequestCurrent, drawingRestoredWorldOverride, drawingWorldSyncStep, hitDrawingElement, mergeDrawingTransaction,
+  deleteDrawingElement, DRAWING_HIT_BLOCK, drawingCameraExitPolicy, drawingCameraStep, drawingClosingHandoffStep, drawingCompositionStep, drawingExitAction, drawingExitFailureNotice, drawingFrameHitElements, drawingFrameTruthStep, drawingOpeningRequestCurrent, drawingRestoredWorldOverride, drawingTransactionVisibleElements, drawingWorldInputStep, drawingWorldSyncStep, hitDrawingElement, mergeDrawingTransaction,
   setDrawingElementPlane, translateDrawingElements,
 } from './drawing.js';
 import InkWorldLayer from './InkWorldLayer.jsx';
@@ -219,7 +219,7 @@ function hitContainer(node, all) {
 
 const EDGE_LABEL = { worktree: 'worktree 分支', family: '同族项目', handoff: '接力血缘', manual: '手动连线' };
 
-export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, canvas, onMoveNode, onCanvasAction, onRenameSession, onRenameWs, selectedKey, onSelect, onChanged, onArrange, focusRef, actionsRef, geometryPendingRef, expanded, searching, onToggleExpand }) {
+export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, canvas, onMoveNode, onCanvasAction, onRenameSession, onRenameWs, selectedKey, onSelect, onChanged, onArrange, focusRef, actionsRef, geometryPendingRef, expanded, searching, onToggleExpand, frameTestProbeRef, inkExporterProbe }) {
   const instRef = useRef(null);
   const [menu, setMenu] = useState(null);           // 右键快捷菜单 {x, y, items}
   const [edgeTip, setEdgeTip] = useState(null);     // 边悬浮说明牌 {x, y, text}
@@ -232,6 +232,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   const [editSeed, setEditSeed] = useState(null);
   const [worldOverride, setWorldOverride] = useState(null);
   const [draftPreview, setDraftPreview] = useState(null);
+  const [inkFrame, setInkFrame] = useState();
   const drawRef = useRef(null);
   const penActiveRef = useRef(false);
   const drawVisibleRef = useRef(false);
@@ -242,7 +243,10 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   const editBaseRef = useRef(null);
   const autoSinkUndoRef = useRef(null);
   const worldRevisionRef = useRef(0);
+  const persistedWorldRef = useRef(null);
+  const requestedWorldRef = useRef(null);
   const worldHandoffRef = useRef(null);
+  const frameTestEventsRef = useRef([]);
   const openingRef = useRef(false);
   const openingRequestRef = useRef(null);
   const openingPromiseRef = useRef(null);
@@ -463,8 +467,9 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     scheduleCameraResume();
   }, [draftPreview, scheduleCameraResume, updateDrawVisible]);
 
-  const onDraftPreviewError = useCallback((revision, error) => {
+  const onDraftPreviewError = useCallback((revision, error, result) => {
     if (!draftPreview || draftPreview.revision !== revision) return;
+    if (result?.final === false) return;
     failCameraFreeze(draftPreview.token, `绘图预览失败：${error.message}`);
   }, [draftPreview, failCameraFreeze]);
 
@@ -613,7 +618,20 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   }, [clearPointerNavigation, navigateDrawingCamera]);
 
   // ---- 绘图编辑：静态 committed 世界常驻；局部 draft 只在 hole SVG 进入 DOM 后显现。 ----
-  const onInkSnapshotReady = useCallback(revision => {
+  const onInkSnapshotReady = useCallback((revision, metrics, renderedWorld, source = 'ink-world') => {
+    if (!renderedWorld || requestedWorldRef.current?.revision !== revision) return;
+    if (frameTestProbeRef) frameTestEventsRef.current = [
+      ...frameTestEventsRef.current,
+      { type: 'ready', source, revision, attempt: metrics?.attempt || 1 },
+    ].slice(-24);
+    setInkFrame(current => {
+      const requested = current?.requestedRevision === revision
+        ? current
+        : drawingFrameTruthStep(current, { type: 'request', revision });
+      return drawingFrameTruthStep(requested, {
+        type: 'ready', revision, world: renderedWorld, attempt: metrics?.attempt,
+      });
+    });
     const handoff = worldHandoffRef.current;
     if (!handoff || handoff.revision !== revision) return;
     if (handoff.phase === 'opening'
@@ -653,9 +671,26 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     setPenActive(false);
     setDrawOpening(false);
     handoff.resolve?.(true);
-  }, [resetDrawingCamera, updateDrawVisible]);
+  }, [frameTestProbeRef, resetDrawingCamera, updateDrawVisible]);
 
-  const onInkSnapshotError = useCallback((revision, error) => {
+  const onInkSnapshotError = useCallback((revision, error, result = {}, source = 'ink-world') => {
+    if (requestedWorldRef.current?.revision !== revision) return;
+    if (frameTestProbeRef) frameTestEventsRef.current = [
+      ...frameTestEventsRef.current,
+      {
+        type: 'error', source, revision, message: error?.message || String(error),
+        attempt: result.attempt || 0, willRetry: !!result.willRetry, final: result.final !== false,
+      },
+    ].slice(-24);
+    setInkFrame(current => {
+      const requested = current?.requestedRevision === revision
+        ? current
+        : drawingFrameTruthStep(current, { type: 'request', revision });
+      return drawingFrameTruthStep(requested, {
+        type: 'error', revision, error, attempt: result.attempt, willRetry: !!result.willRetry,
+      });
+    });
+    if (result.final === false) return;
     const handoff = worldHandoffRef.current;
     if (!handoff || handoff.revision !== revision) return;
     if (handoff.phase === 'opening'
@@ -689,7 +724,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       revision: ++worldRevisionRef.current,
     });
     handoff.reject?.(error);
-  }, [resetDrawingCamera, updateDrawVisible]);
+  }, [frameTestProbeRef, resetDrawingCamera, updateDrawVisible]);
 
   const exitDrawing = useCallback(async () => {
     const openingRequest = openingRequestRef.current;
@@ -950,10 +985,10 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     drawToolRef.current = 'selection';
     setDrawTool('selection');
     if (!armed) return;
-    toast(canvas?.drawing?.length
+    toast(drawingFrameHitElements(inkFrame).length
       ? '请选择一段绘图；点空白会返回并继续操作底下对象'
       : '画布还没有绘图——点空白返回，或改用画笔开始绘制');
-  }, [openDrawing, canvas?.drawing]);
+  }, [openDrawing, inkFrame]);
 
   const onDrawToolChange = useCallback(tool => {
     if (!tool || tool === drawToolRef.current) return;
@@ -1245,7 +1280,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       : node.type === 'note' ? noteMenu(node.data.note, ctx)
       : [];
     openMenu(e, [...(hit ? drawingMenuItems(hit) : []), ...base]);
-  }, [onSelect, onChanged, onCanvasAction, onArrange, triggerRename, focusDistrict, openDrawing, canvas?.drawing]);
+  }, [onSelect, onChanged, onCanvasAction, onArrange, triggerRename, focusDistrict, openDrawing, inkFrame]);
 
   // ============================================================
   //  普通模式的绘图命中：pane 与容器空白面都是"画布空地"，视觉最上层者赢——
@@ -1255,7 +1290,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   // 平面感知命中：卡片/容器上只认浮层（沉层垫在它们下面，视觉都被盖住了）；
   // 纯空地(pane)先浮后沉——看得见谁就点得到谁
   const hitDrawingAt = (fx, fy, planes = 'above') => {
-    const els = penActiveRef.current ? (drawRef.current?.getElements?.() || []) : (canvas?.drawing || []);
+    const els = penActiveRef.current ? (drawRef.current?.getElements?.() || []) : drawingFrameHitElements(inkFrame);
     const tol = 8 / (instRef.current?.getZoom() || 1);
     const above = hitDrawingElement(els.filter(el => !el.customData?.below), fx, fy, tol);
     if (above || planes === 'above') return above;
@@ -1320,7 +1355,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     }
     onSelect(null);
     setMenu(null);
-  }, [onSelect, openDrawing, canvas?.drawing]);
+  }, [onSelect, openDrawing, inkFrame]);
 
   // 悬停绘图描边带 → 指针光标（rAF 节流，元素只有几个，成本可忽略）；移动中整体静默
   const overDrawRaf = useRef(0);
@@ -1337,7 +1372,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       const p = blocked ? null : instRef.current?.screenToFlowPosition({ x: clientX, y: clientY });
       rootRef.current?.classList.toggle('over-drawing', !!(p && hitDrawingAt(p.x, p.y, planes)));
     });
-  }, [canvas?.drawing]);
+  }, [inkFrame]);
   useEffect(() => () => cancelAnimationFrame(overDrawRaf.current), []);
 
   // 一切节点与 pane 同一条河：描边带悬停指示处处点亮（空心区/功能件由命中检测自己排除）
@@ -1348,7 +1383,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     const at = { x: Math.round(pos.x), y: Math.round(pos.y) };
     const hit = drawingHitFromEvent(e, 'all');
     openMenu(e, [...(hit ? drawingMenuItems(hit) : []), ...paneMenu(at, menuCtx())]);
-  }, [onCanvasAction, onArrange, openDrawing, canvas?.drawing]);
+  }, [onCanvasAction, onArrange, openDrawing, inkFrame]);
 
   const onEdgeContextMenu = useCallback((e, edge) => {
     e.preventDefault();
@@ -1447,7 +1482,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     }
     if (node.type === 'session') onSelect(node.id);
     // 其余类型：RF 原生选中态即回应（描边+手柄亮起）
-  }, [onSelect, openDrawing, canvas?.drawing]);
+  }, [onSelect, openDrawing, inkFrame]);
 
   // ---- 双击就地改名：会话卡/画板/工作区同一条信号线 ----
   const onNodeDoubleClick = useCallback((_, node) => {
@@ -1521,12 +1556,82 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   if (initVp.current === undefined) {
     try { initVp.current = JSON.parse(localStorage.vp); } catch { initVp.current = null; }
   }
-  const world = worldOverride || {
-    elements: canvas?.drawing, files: canvas?.drawingFiles, excludedIds: NO_DRAWING_IDS, revision: 0,
-  };
+  const worldInput = drawingWorldInputStep({
+    persistedWorld: persistedWorldRef.current,
+    activeWorld: requestedWorldRef.current,
+    override: worldOverride,
+    elements: canvas?.drawing,
+    files: canvas?.drawingFiles,
+    excludedIds: NO_DRAWING_IDS,
+    revision: worldRevisionRef.current,
+  });
+  const world = worldInput.world;
+  // render 只推导候选 world；帧主权随本次 React commit 发布。并发 render 若被丢弃，
+  // 绝不能让 speculative generation 拒收仍在屏幕上的 ready/error 或卡住交接门。
+  useLayoutEffect(() => {
+    persistedWorldRef.current = worldInput.persistedWorld;
+    worldRevisionRef.current = worldInput.revision;
+    requestedWorldRef.current = world;
+  }, [worldInput.persistedWorld, worldInput.revision, world]);
+  useEffect(() => {
+    setInkFrame(current => drawingFrameTruthStep(current, { type: 'request', revision: world.revision }));
+  }, [world.revision]);
+  const renderedWorld = inkFrame?.renderedWorld || null;
+  const requestedHasInk = drawingTransactionVisibleElements(world.elements || [], world.excludedIds).length > 0;
+  const framePhase = inkFrame?.requestedRevision === world.revision
+    ? inkFrame.phase
+    : (renderedWorld ? 'updating' : 'cold');
+  const inkStatus = !penActive && (
+    framePhase === 'retrying'
+      ? (renderedWorld ? '绘图更新失败，正在重试…' : '绘图载入失败，正在重试…')
+      : framePhase === 'stale' ? '绘图暂时显示上一帧·自动重试未成功'
+        : framePhase === 'failed' ? '绘图暂未显现·自动重试未成功'
+          : framePhase === 'cold' && requestedHasInk ? '绘图正在显现…'
+            : null
+  );
+
+  // 4518 隔离夹具的动作 seam：只暴露只读快照与真实 open/exit；故障仅从 Ink exporter 边界注入。
+  // 发布放在 layout effect，speculative render 被丢弃时不会篡改探针主权。
+  useLayoutEffect(() => {
+    if (!frameTestProbeRef) return undefined;
+    const snapshot = () => {
+      const requestedWorld = requestedWorldRef.current;
+      const rendered = inkFrame?.renderedWorld || null;
+      const hitElements = drawingFrameHitElements(inkFrame);
+      return {
+        requestedRevision: requestedWorld?.revision ?? null,
+        requestedElementIds: (requestedWorld?.elements || []).map(element => element.id),
+        renderedRevision: rendered?.revision ?? null,
+        renderedElementIds: (rendered?.elements || []).map(element => element.id),
+        hitRevision: hitElements === rendered?.elements ? (rendered?.revision ?? null) : null,
+        hitElementIds: hitElements.map(element => element.id),
+        framePhase: inkFrame?.phase || 'idle',
+        frameAttempt: inkFrame?.attempt || 0,
+        frameError: inkFrame?.error?.message || null,
+        handoffPhase: worldHandoffRef.current?.phase || null,
+        handoffRevision: worldHandoffRef.current?.revision ?? null,
+        opening: openingRef.current,
+        openingResolverPending: !!openingReadyResolveRef.current,
+        penActive: penActiveRef.current,
+        drawVisible: drawVisibleRef.current,
+        callbackEvents: [...frameTestEventsRef.current],
+      };
+    };
+    const probe = {
+      snapshot,
+      openDrawing: (tool, selectId) => openDrawing(tool, selectId),
+      exitDrawing: () => exitDrawing(),
+    };
+    frameTestProbeRef.current = probe;
+    return () => {
+      if (frameTestProbeRef.current === probe) frameTestProbeRef.current = null;
+    };
+  }, [exitDrawing, frameTestProbeRef, inkFrame, openDrawing, world.revision]);
 
   return (
     <div ref={rootRef} onPointerDownCapture={onCameraPointerDown}
+      data-rendered-revision={renderedWorld?.revision ?? ''}
+      data-requested-revision={world.revision}
       className={`canvas-root${penActive ? ' drawing-on' : ''}${drawOpening ? ' drawing-opening' : ''}${selectArmed ? ' drawing-armed' : ''}`} style={{ position: 'relative', width: '100%', height: '100%' }}>
     <ReactFlow
       nodes={nodes}
@@ -1603,6 +1708,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
         revision={world.revision}
         onSnapshotReady={onInkSnapshotReady}
         onSnapshotError={onInkSnapshotError}
+        exporterProbe={inkExporterProbe}
       />
       {draftPreview && <InkWorldLayer
         elements={draftPreview.elements}
@@ -1662,8 +1768,17 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
         maskColor="rgba(242, 244, 247, 0.85)"
       />}
       {/* 小地图墨迹层：缩略图是空间定向工具，区域底板是最有定向价值的地标 */}
-      {!penActive && <MiniMapInk elements={canvas?.drawing} rootRef={rootRef} />}
+      {!penActive && <MiniMapInk
+        elements={renderedWorld?.elements}
+        revision={renderedWorld?.revision}
+        rootRef={rootRef}
+      />}
     </ReactFlow>
+    {inkStatus && (
+      <div className={`ink-frame-status ${framePhase}`} role="status" aria-live="polite">
+        {inkStatus}
+      </div>
+    )}
     {/* ===== 边悬浮说明牌 ===== */}
     {edgeTip && <div className="edge-tip" style={{ left: edgeTip.x, top: edgeTip.y }}>{edgeTip.text}</div>}
     {penActive && editSeed && (
