@@ -1,6 +1,6 @@
 /**
  * [INPUT]: Excalidraw 的元素数组与 BinaryFiles 字典
- * [OUTPUT]: 提供已提交绘图的过滤/删除/沉浮/平移纯变换、首次新建大底板自动沉层、目标关系闭包/局部编辑事务/全量合并、
+ * [OUTPUT]: 提供已提交绘图的过滤/删除/沉浮/平移纯变换、整理的单步墨迹撤销票据、唯一功能件命中排除表、首次新建大底板自动沉层、目标关系闭包/局部编辑事务/全量合并、
  *           可稳定排空且按成功代际守卫撤销的串行提交队列、屏幕override/外部props/队列三真相同步门、opening request 身份门/相机事务与退出策略/IME 周期状态机/隐藏 opening 取消/退出回执/closing 收口步、编辑器就绪与几何互斥纯门、资产快照/命中/双平面/包围盒与承载判定
  * [POS]: 绘图的纯数据内核；静态世界层、临时编辑器与普通态动作共用，全部可由 node:test 证伪
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -16,6 +16,9 @@ export const splitDrawingPlanes = (elements = []) => ({
   below: committedDrawingElements(elements).filter(isBelow),
   above: committedDrawingElements(elements).filter(el => !isBelow(el)),
 });
+
+// 点击/右键/悬停共用的唯一功能件边界：功能件永远优先于覆盖它的墨迹。
+export const DRAWING_HIT_BLOCK = '.container-drag-handle, .react-flow__resize-control, .react-flow__handle, .nodrag, button, input, textarea, [contenteditable]';
 
 // 普通看板态不挂 Excalidraw：所有主权动作都是已提交数组上的不可变变换。
 // 宿主形状与它的绑定文字同生共死、同层移动，不留幽灵标签。
@@ -78,6 +81,18 @@ export function anchoredDrawingIds(elements = [], rect) {
   }
   for (const el of elements) if (el?.containerId && ids.has(el.containerId)) ids.add(el.id);
   return [...ids];
+}
+
+// 每次整理是一笔独立事务：只从本次终点逆回本次起点，不携带上一次整理的历史。
+export function createDrawingArrangeUndoTicket(snapshot = {}, moves = []) {
+  return {
+    snapshot,
+    undoMoves: moves.map(({ rect, dx = 0, dy = 0 }) => ({
+      rect: { x: rect.x + dx, y: rect.y + dy, w: rect.w, h: rect.h },
+      dx: dx ? -dx : 0,
+      dy: dy ? -dy : 0,
+    })),
+  };
 }
 
 export function drawingSnapshot(elements = [], files = {}) {

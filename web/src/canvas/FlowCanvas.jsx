@@ -5,7 +5,7 @@
  *           容器缩放定桩、全画布落空连线选择（含就地打开会话上下文）、缩放感知连接点、原生绘图选择/画笔、
  *           committed ink 与节点共用 ViewportPortal 唯一相机、编辑态 wheel/key/Safari gesture/pointer 全入口 RF 相机事务、
  *           目标关系闭包局部事务、新建大底板自动沉层与稳定排空撤销、屏幕/队列/持久化三真相收口、opening request 身份门与纯取消、无双影帧交接与真实阶段回执、
- *           普通模式绘图命中（pane/容器面同河）与 Backspace 删除治理
+ *           普通模式绘图命中（pane/容器面同河、nodrag/连接点等功能件优先）与 Backspace 删除治理
  * [POS]: canvas 的画布引擎。归属律：layout.d 手动指定 > 路径推断；容器永远生长包住成员；
  *        每一次点击必有可感知的回应：选中态/菜单/提示三选一
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -22,7 +22,7 @@ import { sessionMenu, workspaceMenu, districtMenu, boardMenu, noteMenu, paneMenu
 import { connectionDrop, syncHandleHitArea } from './connections.js';
 import {
   advanceDrawingTransaction, anchoredDrawingIds, autoSinkLargeNewDrawingDraft, canvasGeometryAllowed, canvasGeometryPreparation, createDrawingCommitQueue, createDrawingTransaction,
-  deleteDrawingElement, drawingCameraExitPolicy, drawingCameraStep, drawingClosingHandoffStep, drawingCompositionStep, drawingExitAction, drawingExitFailureNotice, drawingOpeningRequestCurrent, drawingRestoredWorldOverride, drawingWorldSyncStep, hitDrawingElement, mergeDrawingTransaction,
+  deleteDrawingElement, DRAWING_HIT_BLOCK, drawingCameraExitPolicy, drawingCameraStep, drawingClosingHandoffStep, drawingCompositionStep, drawingExitAction, drawingExitFailureNotice, drawingOpeningRequestCurrent, drawingRestoredWorldOverride, drawingWorldSyncStep, hitDrawingElement, mergeDrawingTransaction,
   setDrawingElementPlane, translateDrawingElements,
 } from './drawing.js';
 import InkWorldLayer from './InkWorldLayer.jsx';
@@ -1245,8 +1245,6 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   //  绘图层画在一切之上，点得到看得到的东西才叫融合。标题栏/按钮等功能件除外。
   // ============================================================
   // 功能件排除清单唯一真相：点击/悬停两条路径共用，永不分叉
-  const HIT_BLOCK = '.container-drag-handle, .react-flow__resize-control, button, input, textarea, [contenteditable]';
-
   // 平面感知命中：卡片/容器上只认浮层（沉层垫在它们下面，视觉都被盖住了）；
   // 纯空地(pane)先浮后沉——看得见谁就点得到谁
   const hitDrawingAt = (fx, fy, planes = 'above') => {
@@ -1259,7 +1257,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
 
   const drawingHitFromEvent = (e, planes) => {
     if (penActiveRef.current) return null;
-    if (e.target?.closest?.(HIT_BLOCK)) return null;
+    if (e.target?.closest?.(DRAWING_HIT_BLOCK)) return null;
     const p = instRef.current?.screenToFlowPosition({ x: e.clientX, y: e.clientY });
     return p ? hitDrawingAt(p.x, p.y, planes) : null;
   };
@@ -1325,7 +1323,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     if (penActiveRef.current) return;
     if (rootRef.current?.classList.contains('canvas-moving')) return;   // 平移/缩放中内容扫过光标，悬停态不许进出闪烁
     const { clientX, clientY } = e;
-    const blocked = !!e.target?.closest?.(HIT_BLOCK);
+    const blocked = !!e.target?.closest?.(DRAWING_HIT_BLOCK);
     const planes = e.target?.classList?.contains('react-flow__pane') ? 'all' : 'above';
     cancelAnimationFrame(overDrawRaf.current);
     overDrawRaf.current = requestAnimationFrame(() => {
