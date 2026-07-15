@@ -1,13 +1,14 @@
 /**
  * [INPUT]: 依赖 api 的数据通道、canvas/FlowCanvas 画布、panels 三件套、ui 的 UIHost/toast
  * [OUTPUT]: 对外提供 App 根组件：全局状态、过滤管道、SSE 订阅、岛屿布局（含绘图属性面板动态让位）、
- *           可等待且互斥的整理/撤销事务、落空连线原子动作分发、committed 绘图 elements/files 原子回写、画布终端框开合
+ *           可等待且互斥的整理/单步撤销事务、落空连线原子动作分发、committed 绘图 elements/files 原子回写、画布终端框开合
  * [POS]: web 的总装线——数据如河流单向流动：graph → 过滤 → 画布/面板
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
 import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { api, subscribeEvents } from './api.js';
 import FlowCanvas from './canvas/FlowCanvas.jsx';
+import { createDrawingArrangeUndoTicket } from './canvas/drawing.js';
 import { tidyLayoutEntries } from './canvas/layout.js';
 import TopBar from './panels/TopBar.jsx';
 import Sidebar from './panels/Sidebar.jsx';
@@ -98,7 +99,8 @@ export default function App() {
     const rectsBefore = actionsRef.current.containerRects?.() || {};
     try {
       await api.layoutBatch(tidyLayoutEntries(snapshot), true);
-      layoutUndoRef.current ||= { snapshot, undoMoves: [] };
+      // 成熟画布的 Cmd+Z 是一次撤一笔：新整理必须覆盖旧票据。
+      layoutUndoRef.current = createDrawingArrangeUndoTicket(snapshot);
       await reload();
       focusRef.current(null);
       // 容器承载律：新布局由瀑布算法在渲染时定型——等落定后量差，锚定墨迹随容器走
@@ -113,10 +115,7 @@ export default function App() {
       }
       if (moves.length) {
         await actionsRef.current.followDrawings?.(moves);
-        layoutUndoRef.current?.undoMoves?.push(...moves.map(m => ({
-          rect: { x: m.rect.x + m.dx, y: m.rect.y + m.dy, w: m.rect.w, h: m.rect.h },
-          dx: -m.dx, dy: -m.dy,
-        })));
+        layoutUndoRef.current = createDrawingArrangeUndoTicket(snapshot, moves);
       }
       toast('已整理位置，人工归属保持不变', 'ok', { label: '撤销', onClick: undoArrange });
     } catch (e) {
