@@ -1,7 +1,7 @@
 /**
  * [INPUT]: Excalidraw 的元素数组与 BinaryFiles 字典
  * [OUTPUT]: 提供已提交绘图的过滤/删除/沉浮/平移纯变换、整理的单步墨迹撤销票据、唯一功能件命中排除表、首次新建大底板自动沉层、目标关系闭包/局部编辑事务/全量合并、
- *           可稳定排空且按成功代际守卫撤销的串行提交队列、屏幕override/外部props/队列三真相同步门、opening request 身份门/相机事务与退出策略/IME 周期状态机/隐藏 opening 取消/退出回执/closing 收口步、编辑器就绪与几何互斥纯门、资产快照/命中/双平面/包围盒与承载判定
+ *           可稳定排空且按成功代际守卫撤销的串行提交队列、屏幕override/外部props/队列三真相同步门、opening request 身份门/相机事务与退出策略/IME 周期状态机/隐藏 opening 取消/退出回执/closing 收口步、编辑器就绪与几何互斥纯门、资产快照/命中/双平面连续 z-order 分组签名与 ready/in-flight 工作路由/包围盒与承载判定
  * [POS]: 绘图的纯数据内核；静态世界层、临时编辑器与普通态动作共用，全部可由 node:test 证伪
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -16,6 +16,137 @@ export const splitDrawingPlanes = (elements = []) => ({
   below: committedDrawingElements(elements).filter(isBelow),
   above: committedDrawingElements(elements).filter(el => !isBelow(el)),
 });
+
+// 签名不序列化元素或大 dataURL：本地几何标量捕获应用内同 version 变换，
+// version/nonce 捕获 Excal 编辑；不看 JS 引用身份，避免 API/JSON 同内容回读让全场变脏。
+export function drawingPlaneSignature(elements = [], files = {}) {
+  const elementEntries = [];
+  const imageFileIds = [];
+  const seenFiles = new Set();
+  for (const element of elements) {
+    elementEntries.push({
+      id: element?.id,
+      index: element?.index,
+      version: element?.version,
+      versionNonce: element?.versionNonce,
+      type: element?.type,
+      x: element?.x,
+      y: element?.y,
+      width: element?.width,
+      height: element?.height,
+      angle: element?.angle,
+      below: isBelow(element),
+      fileId: element?.fileId,
+    });
+    if (element?.type !== 'image' || typeof element.fileId !== 'string' || seenFiles.has(element.fileId)) continue;
+    seenFiles.add(element.fileId);
+    imageFileIds.push(element.fileId);
+  }
+  const fileEntries = imageFileIds.map(id => {
+    const file = files?.[id];
+    return {
+      id,
+      dataURL: file?.dataURL,
+      mimeType: file?.mimeType,
+      created: file?.created,
+      lastRetrieved: file?.lastRetrieved,
+    };
+  });
+  return { elements: elementEntries, files: fileEntries };
+}
+
+const sameSignatureEntries = (left = [], right = [], keys = []) => {
+  if (left.length !== right.length) return false;
+  for (let index = 0; index < left.length; index++) {
+    const a = left[index], b = right[index];
+    for (const key of keys) if (a[key] !== b[key]) return false;
+  }
+  return true;
+};
+
+const ELEMENT_SIGNATURE_KEYS = [
+  'id', 'index', 'version', 'versionNonce', 'type',
+  'x', 'y', 'width', 'height', 'angle', 'below', 'fileId',
+];
+const FILE_SIGNATURE_KEYS = ['id', 'dataURL', 'mimeType', 'created', 'lastRetrieved'];
+
+export function drawingPlaneSignaturesEqual(left, right) {
+  if (left === right) return true;
+  if (!left || !right) return false;
+  return sameSignatureEntries(left.elements, right.elements, ELEMENT_SIGNATURE_KEYS)
+    && sameSignatureEntries(left.files, right.files, FILE_SIGNATURE_KEYS);
+}
+
+export function drawingPlaneDirtyPlan(previous = {}, next = {}) {
+  const below = !drawingPlaneSignaturesEqual(previous.below, next.below);
+  const above = !drawingPlaneSignaturesEqual(previous.above, next.above);
+  return { below, above, count: Number(below) + Number(above) };
+}
+
+export const DRAWING_PLANE_GROUP_SIZE = 48;
+
+// 只按当前平面的绘制顺序连续切片；槽位就是 z-order 真相，插入/重排自然让后续签名失效。
+export function drawingPlaneGroups(elements = [], files = {}, groupSize = DRAWING_PLANE_GROUP_SIZE) {
+  const groups = [];
+  for (let offset = 0; offset < elements.length; offset += groupSize) {
+    const groupElements = elements.slice(offset, offset + groupSize);
+    groups.push({
+      index: groups.length,
+      elements: groupElements,
+      signature: drawingPlaneSignature(groupElements, files),
+    });
+  }
+  return groups;
+}
+
+export function drawingFontSignature(elements = []) {
+  const glyphsByFamily = new Map();
+  for (const element of committedDrawingElements(elements)) {
+    if (element.type !== 'text') continue;
+    const family = String(element.fontFamily ?? '');
+    const glyphs = glyphsByFamily.get(family) || new Set();
+    for (const glyph of String(element.originalText ?? element.text ?? '')) glyphs.add(glyph);
+    glyphsByFamily.set(family, glyphs);
+  }
+  return [...glyphsByFamily.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([fontFamily, glyphs]) => ({ fontFamily, glyphs: [...glyphs].sort().join('') }));
+}
+
+export function drawingFontSignaturesEqual(left = [], right = []) {
+  return sameSignatureEntries(left || [], right || [], ['fontFamily', 'glyphs']);
+}
+
+export function drawingFontWorkRoute(readySignature, inFlightSignature, nextSignature, hasText) {
+  if (drawingFontSignaturesEqual(readySignature, nextSignature)) return 'ready';
+  if (!hasText) return 'clear';
+  if (drawingFontSignaturesEqual(inFlightSignature, nextSignature)) return 'join';
+  return 'export';
+}
+
+export function drawingPlaneWorkRoute(readySignature, inFlightSignature, nextSignature, hasElements) {
+  if (drawingPlaneSignaturesEqual(readySignature, nextSignature)) return 'ready';
+  if (!hasElements) return 'clear';
+  if (drawingPlaneSignaturesEqual(inFlightSignature, nextSignature)) return 'join';
+  return 'export';
+}
+
+export function drawingPlaneGroupPlan(readyGroups = [], inFlightGroups = [], nextGroups = []) {
+  return nextGroups.map(group => {
+    const ready = readyGroups[group.index] || null;
+    const inFlight = inFlightGroups[group.index] || null;
+    return {
+      ...group,
+      ready,
+      inFlight,
+      route: drawingPlaneWorkRoute(ready?.signature, inFlight?.signature, group.signature, true),
+    };
+  });
+}
+
+export const drawingPlaneSettledInFlight = (current, settledPromise) => (
+  current?.promise === settledPromise ? null : current
+);
 
 // 点击/右键/悬停共用的唯一功能件边界：功能件永远优先于覆盖它的墨迹。
 export const DRAWING_HIT_BLOCK = '.container-drag-handle, .react-flow__resize-control, .react-flow__handle, .nodrag, button, input, textarea, [contenteditable]';
