@@ -1,0 +1,30 @@
+{
+  "id": "LE-012",
+  "module": "drawing-persistence",
+  "severity": "P1",
+  "type": "data-integrity",
+  "summary": "建立可恢复草稿与资产引用一致的持久化事务",
+  "evidence": [
+    "DrawLayer 只在 pagehide 把局部 draft 交给父层，普通 fetch 没有 keepalive，崩溃也不会触发 pagehide",
+    "App drawingCommit 每次都发送全部 BinaryFiles，轻量层级/删除/承载操作也重传 base64",
+    "server 先写 canvas.json 再写 drawing-files.json，第二步失败时 elements 可引用不存在的新资产"
+  ],
+  "fix_hint": "编辑态以防抖方式写入仅本应用可读的 draft journal，正常提交成功后清理对应草稿；用资产 ID/签名只上传变更图片；服务端先确保新资产存在，再原子提交引用它们的 elements，并对中间步做故障注入。不改持久化 schema。",
+  "complexity": "complex",
+  "allowed_paths": [
+    "web/src/App.jsx",
+    "web/src/api.js",
+    "web/src/canvas/FlowCanvas.jsx",
+    "web/src/canvas/DrawLayer.jsx",
+    "web/src/canvas/drawing.js",
+    "server/index.mjs",
+    "server/store.mjs",
+    "tests/drawing.test.mjs",
+    "tests/store.test.mjs",
+    "web/CLAUDE.md",
+    "CLAUDE.md",
+    "AGENTS.md"
+  ],
+  "lane": "guarded",
+  "gate_profile": "focused"
+}

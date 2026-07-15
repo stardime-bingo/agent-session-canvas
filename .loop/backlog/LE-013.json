@@ -1,0 +1,34 @@
+{
+  "id": "LE-013",
+  "module": "canvas-semantics-acceptance",
+  "severity": "P1",
+  "type": "architecture",
+  "summary": "修正自动沉底撤销并加固画布验收边界",
+  "evidence": [
+    "自动沉底 toast 的撤销恢复绘制前整快照，导致新底板整个被删除",
+    "toast 无 role=status/aria-live，固定 3.4s 消失且 focus/hover 不暂停",
+    "4518 把整个 repo 放入 Vite fs.allow，/@fs 可读取 data；指标在 useLayoutEffect 中结束，早于真实 paint",
+    "subset worker 构建门只递归 worker closure，未递归生产入口 closure"
+  ],
+  "fix_hint": "撤销只对 sunkIds 恢复 below=false 而不恢复绘制前快照；让 toast 可被读屏发现且可操作；缩小 4518 fs.allow 并显式拒绝 data；用 paint 后采样和真实负载重建红线；对生产与 worker 静态闭包都递归求交。",
+  "complexity": "complex",
+  "allowed_paths": [
+    "web/src/canvas/FlowCanvas.jsx",
+    "web/src/ui.jsx",
+    "web/src/theme.css",
+    "tests/drawing.test.mjs",
+    "tests/fixtures/canvas-acceptance/index.html",
+    "tests/fixtures/canvas-acceptance/main.jsx",
+    "tests/fixtures/canvas-acceptance/fixture-data.js",
+    "tests/fixtures/canvas-acceptance/interaction-data.js",
+    "tests/fixtures/canvas-acceptance/README.md",
+    "scripts/serve-canvas-acceptance.mjs",
+    "scripts/verify-subset-worker-build.mjs",
+    "package.json",
+    "web/CLAUDE.md",
+    "CLAUDE.md",
+    "AGENTS.md"
+  ],
+  "lane": "guarded",
+  "gate_profile": "focused"
+}

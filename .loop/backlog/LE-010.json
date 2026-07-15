@@ -1,0 +1,30 @@
+{
+  "id": "LE-010",
+  "module": "drawing-camera-input",
+  "severity": "P1",
+  "type": "architecture",
+  "summary": "封闭编辑相机的输入主权与缩放语义",
+  "evidence": [
+    "draft preview ready 后 live DrawLayer 被设为 pointer-events:none，180ms 尾部计时加双 rAF 内节点可接收 pointer",
+    "drawingZoomKeyRoute 的缩放键在 DrawLayer capture 中只被 prevent/stop，没有驱动 RF viewport",
+    "绘图激活时 RF Controls/MiniMap 隐藏，Excalidraw zoom actions 也被 CSS 隐藏"
+  ],
+  "fix_hint": "预览接管期保留与编辑层同 z-index 的输入盾，直到 live editor 可交互；快捷键路由返回 zoom/fit/reset 语义动作并统一调用 RF 相机入口；保留一套可见控制。",
+  "complexity": "complex",
+  "allowed_paths": [
+    "web/src/canvas/FlowCanvas.jsx",
+    "web/src/canvas/DrawLayer.jsx",
+    "web/src/canvas/gestures.js",
+    "web/src/canvas/drawing.js",
+    "web/src/theme.css",
+    "tests/gestures.test.mjs",
+    "tests/drawing.test.mjs",
+    "tests/fixtures/canvas-acceptance/main.jsx",
+    "tests/fixtures/canvas-acceptance/interaction-data.js",
+    "web/CLAUDE.md",
+    "CLAUDE.md",
+    "AGENTS.md"
+  ],
+  "lane": "guarded",
+  "gate_profile": "focused"
+}

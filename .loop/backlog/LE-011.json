@@ -1,0 +1,30 @@
+{
+  "id": "LE-011",
+  "module": "container-ink-carry",
+  "severity": "P1",
+  "type": "architecture",
+  "summary": "让容器与锚定墨迹在拖动中同相位运动",
+  "evidence": [
+    "onNodeDrag 只处理 workspace 投放高亮，对 district/board 的锚定墨迹无任何实时位移",
+    "followAnchoredDrawings 只在 onNodeDragStop 中按起点差值提交",
+    "自动整理先 reload/fitView，然后固定等待 120ms 再追加墨迹位移"
+  ],
+  "fix_hint": "拖动开始时冻结锚定 ID 和起点；onNodeDrag 只更新一个非持久化临时 translate，让像素/命中/小地图共享；drag stop 一次提交世界坐标并清空临时变换。",
+  "complexity": "complex",
+  "allowed_paths": [
+    "web/src/App.jsx",
+    "web/src/canvas/FlowCanvas.jsx",
+    "web/src/canvas/InkWorldLayer.jsx",
+    "web/src/canvas/MiniMapInk.jsx",
+    "web/src/canvas/drawing.js",
+    "web/src/theme.css",
+    "tests/drawing.test.mjs",
+    "tests/fixtures/canvas-acceptance/main.jsx",
+    "tests/fixtures/canvas-acceptance/interaction-data.js",
+    "web/CLAUDE.md",
+    "CLAUDE.md",
+    "AGENTS.md"
+  ],
+  "lane": "guarded",
+  "gate_profile": "focused"
+}

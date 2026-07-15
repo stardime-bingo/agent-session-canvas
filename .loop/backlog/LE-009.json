@@ -1,0 +1,26 @@
+{
+  "id": "LE-009",
+  "module": "drawing-locality",
+  "severity": "P1",
+  "type": "architecture",
+  "summary": "稳定 hole-punch 分组并保全全局 z-order",
+  "evidence": [
+    "excludedIds 先过滤再每 48 个切组，删除前部元素会改变后续所有组槽位",
+    "150 个单平面元素的首元素 hole 使 4/4 组重导，400 个时 9/9 组重导",
+    "mergeDrawingTransaction 移除整个非连续闭包后连续插回 anchorIndex，使 host,cover,label 变成 host,label,cover"
+  ],
+  "fix_hint": "先按 committed 世界的稳定槽位分组，再在组内 hole-punch；merge 时保留存活 original ID 的各自全局槽位，仅对闭包内显式重排及新 ID 制定插入规则。",
+  "complexity": "complex",
+  "allowed_paths": [
+    "web/src/canvas/drawing.js",
+    "web/src/canvas/InkWorldLayer.jsx",
+    "tests/drawing.test.mjs",
+    "tests/fixtures/canvas-acceptance/main.jsx",
+    "tests/fixtures/canvas-acceptance/fixture-data.js",
+    "web/CLAUDE.md",
+    "CLAUDE.md",
+    "AGENTS.md"
+  ],
+  "lane": "guarded",
+  "gate_profile": "focused"
+}

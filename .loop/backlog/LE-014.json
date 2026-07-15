@@ -1,0 +1,29 @@
+{
+  "id": "LE-014",
+  "module": "canvas-final-acceptance",
+  "severity": "P1",
+  "type": "architecture",
+  "summary": "收敛全局门并完成隔离 Computer Use 与真页 console 验收",
+  "evidence": [
+    "node:test 不执行 JSX，Vite build 曾经无法阻止 TDZ 上线白屏",
+    "珍贵真画布历史上被自动坐标拖拽污染过三次",
+    "本轮新增的 rendered revision、稳定分组、输入盾、容器实时承载、草稿恢复和故障注入都需要超出纯函数层的验收"
+  ],
+  "fix_hint": "扩充 4518 合成 fixture 和可观测探针，用 Computer Use 重复冷启、开关首组、缩放/平移、尾帧输入、容器承载、自动沉底/撤销和草稿恢复；只读打开 4517 并检查 console，严禁坐标拖拽真画布。",
+  "complexity": "complex",
+  "allowed_paths": [
+    "tests/fixtures/canvas-acceptance/index.html",
+    "tests/fixtures/canvas-acceptance/main.jsx",
+    "tests/fixtures/canvas-acceptance/fixture-data.js",
+    "tests/fixtures/canvas-acceptance/interaction-data.js",
+    "tests/fixtures/canvas-acceptance/README.md",
+    "scripts/serve-canvas-acceptance.mjs",
+    "package.json",
+    "docs/绘图融合根治计划-v2.md",
+    "web/CLAUDE.md",
+    "CLAUDE.md",
+    "AGENTS.md"
+  ],
+  "lane": "guarded",
+  "gate_profile": "focused"
+}

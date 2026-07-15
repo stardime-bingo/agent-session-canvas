@@ -1,0 +1,30 @@
+{
+  "id": "LE-008",
+  "module": "canvas-frame-truth",
+  "severity": "P1",
+  "type": "architecture",
+  "summary": "统一已显示帧、命中与小地图的 rendered revision",
+  "evidence": [
+    "InkWorldLayer 首个 snapshot 为空，必须等待异步 exportToSvg 才显示",
+    "FlowCanvas 普通态命中立即读取新 canvas.drawing，与仍可见的旧 SVG 分叉",
+    "普通更新或 cold export 失败时没有 handoff，错误回调被静默忽略"
+  ],
+  "fix_hint": "InkWorldLayer 成功 paint 后上报带 revision 的 rendered world；命中、MiniMap 与像素共用该快照；cold 给立即可见且不可命中的占位反馈；普通导出失败进入可见 stale+有界重试。",
+  "complexity": "complex",
+  "allowed_paths": [
+    "web/src/canvas/InkWorldLayer.jsx",
+    "web/src/canvas/FlowCanvas.jsx",
+    "web/src/canvas/MiniMapInk.jsx",
+    "web/src/canvas/drawing.js",
+    "web/src/theme.css",
+    "tests/drawing.test.mjs",
+    "tests/fixtures/canvas-acceptance/main.jsx",
+    "tests/fixtures/canvas-acceptance/fixture-data.js",
+    "tests/fixtures/canvas-acceptance/interaction-data.js",
+    "web/CLAUDE.md",
+    "CLAUDE.md",
+    "AGENTS.md"
+  ],
+  "lane": "guarded",
+  "gate_profile": "focused"
+}
