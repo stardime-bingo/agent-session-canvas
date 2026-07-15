@@ -1,7 +1,7 @@
 /**
  * [INPUT]: Excalidraw 的元素数组与 BinaryFiles 字典
  * [OUTPUT]: 提供已提交绘图的过滤/删除/沉浮/平移纯变换、目标关系闭包/局部编辑事务/全量合并、
- *           可排空的串行提交队列、opening request 身份门/隐藏 opening 取消/退出失败回执/closing 收口步、编辑器就绪与几何互斥纯门、资产快照/命中/双平面/包围盒与承载判定
+ *           可排空的串行提交队列、opening request 身份门/相机事务与退出策略/IME 周期状态机/隐藏 opening 取消/退出回执/closing 收口步、编辑器就绪与几何互斥纯门、资产快照/命中/双平面/包围盒与承载判定
  * [POS]: 绘图的纯数据内核；静态世界层、临时编辑器与普通态动作共用，全部可由 node:test 证伪
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -202,6 +202,69 @@ export const drawingFilesSignature = files => Object.keys(files || {}).sort().jo
 
 // opening 的布尔状态可被下一次请求重新置真；只有对象身份才能拒绝上一代迟到的 then/catch。
 export const drawingOpeningRequestCurrent = (currentRequest, request) => !!request && currentRequest === request;
+
+const LIVE_CAMERA = Object.freeze({ phase: 'live', token: null });
+
+// camera token 与 opening token 完全独立；迟到帧返回同一 state 引用，调用方即可零副作用退出。
+export function drawingCameraStep(state = LIVE_CAMERA, event = {}) {
+  const current = state.token === event.token && !!event.token;
+  if (event.type === 'navigate') {
+    if (!event.token) return state;
+    if (state.phase === 'live') return { phase: 'freezing', token: event.token };
+    if (state.phase === 'resuming' || state.phase === 'suspended') return { phase: 'suspended', token: event.token };
+    return state;
+  }
+  if (event.type === 'preview-ready') {
+    return current && state.phase === 'freezing' ? { phase: 'suspended', token: event.token } : state;
+  }
+  if (event.type === 'preview-error') {
+    return current && state.phase === 'freezing' ? LIVE_CAMERA : state;
+  }
+  if (event.type === 'resume') {
+    return state.phase === 'suspended' && event.token ? { phase: 'resuming', token: event.token } : state;
+  }
+  if (event.type === 'resume-ready') {
+    return current && state.phase === 'resuming' ? LIVE_CAMERA : state;
+  }
+  if (event.type === 'resume-error') {
+    return current && state.phase === 'resuming' ? LIVE_CAMERA : state;
+  }
+  if (event.type === 'reset') return LIVE_CAMERA;
+  return state;
+}
+
+// 退出只能保留已 ready 的 preview 填 closing 的洞；freezing 副本尚未可见，必须丢弃。
+export function drawingCameraExitPolicy(state = LIVE_CAMERA) {
+  const phase = state?.phase || 'live';
+  return {
+    align: phase !== 'live',
+    keepPreview: phase === 'suspended' || phase === 'resuming',
+  };
+}
+
+const IDLE_COMPOSITION = Object.freeze({ cycle: 0, active: false, blocked: false, notified: false });
+
+// IME 周期状态机：首次 freeze blocked 只通知一次，同周期后续导航只阻断，end 令迟到回调失效。
+export function drawingCompositionStep(state = IDLE_COMPOSITION, event = {}) {
+  if (event.type === 'start') {
+    return { state: { cycle: state.cycle + 1, active: true, blocked: false, notified: false }, action: 'none' };
+  }
+  if (event.type === 'end') {
+    return { state: { cycle: state.cycle + 1, active: false, blocked: false, notified: false }, action: 'none' };
+  }
+  if (event.type === 'navigate') {
+    return { state, action: state.active && state.blocked ? 'block' : 'continue' };
+  }
+  if (event.type === 'blocked') {
+    if (!state.active || event.cycle !== state.cycle) return { state, action: 'ignore' };
+    const notify = !state.notified;
+    return {
+      state: { ...state, blocked: true, notified: true },
+      action: notify ? 'notify' : 'block',
+    };
+  }
+  return { state, action: 'none' };
+}
 
 // 尚未显现、不可交互的 opening draft 没有用户改动主权：退出必须在 flush/submit 前直接取消。
 export function drawingExitAction({ opening = false, visible = false, hasOpeningResolver = false } = {}) {

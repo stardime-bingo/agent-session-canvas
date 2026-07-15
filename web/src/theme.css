@@ -563,7 +563,8 @@ input.inline-edit {
 /* 绘图编辑激活：保留原生选择与属性面板；汉堡菜单/帮助钮/杂项工具不进屋。 */
 .draw-active .excalidraw .main-menu-trigger,
 .draw-active .excalidraw .help-icon,
-.draw-active .excalidraw .App-toolbar__extra-tools-trigger { display: none !important; }
+.draw-active .excalidraw .App-toolbar__extra-tools-trigger,
+.draw-active .excalidraw .zoom-actions { display: none !important; }
 
 /* 原生属性岛默认贴左，会整块躲进导航岛下面；按导航实时宽度让位，收起导航即自动归位。 */
 .draw-active .excalidraw .App-menu__left {

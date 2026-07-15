@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  anchoredDrawingIds, canvasGeometryAllowed, canvasGeometryPreparation, committedDrawingElements, createDrawingCommitQueue, deleteDrawingElement, drawingBounds,
+  anchoredDrawingIds, canvasGeometryAllowed, canvasGeometryPreparation, committedDrawingElements, createDrawingCommitQueue, deleteDrawingElement, drawingBounds, drawingCameraExitPolicy, drawingCameraStep, drawingCompositionStep,
   advanceDrawingTransaction, createDrawingTransaction, drawingEditorReadyStep, drawingTransactionClosure, drawingTransactionVisibleElements,
   drawingClosingHandoffStep, drawingExitAction, drawingExitFailureNotice, drawingFilesSignature, drawingOpeningRequestCurrent, drawingSnapshot, hitDrawingElement, setDrawingElementPlane, splitDrawingPlanes,
   mergeDrawingTransaction, translateDrawingElements,
@@ -255,6 +255,86 @@ test('隐藏 opening draft 直接取消：持久化与 closing 均为零并收�
   assert.equal(closingCalls, 0);
   assert.deepEqual(state, { opening: false, openingPromise: null, openingResolver: null });
   assert.deepEqual(openingResults, [false]);
+});
+
+test('camera token 状态机：迟到 preview/失败回 live/resume 被新手势抢占', () => {
+  const freeze1 = {};
+  const stale = {};
+  let state = drawingCameraStep(undefined, { type: 'navigate', token: freeze1 });
+  assert.deepEqual(state, { phase: 'freezing', token: freeze1 });
+  assert.equal(drawingCameraStep(state, { type: 'preview-ready', token: stale }), state);
+  assert.deepEqual(drawingCameraStep(state, { type: 'preview-error', token: freeze1 }), { phase: 'live', token: null });
+
+  const freeze2 = {};
+  state = drawingCameraStep(undefined, { type: 'navigate', token: freeze2 });
+  state = drawingCameraStep(state, { type: 'preview-ready', token: freeze2 });
+  assert.deepEqual(state, { phase: 'suspended', token: freeze2 });
+  const resume1 = {};
+  state = drawingCameraStep(state, { type: 'resume', token: resume1 });
+  assert.deepEqual(state, { phase: 'resuming', token: resume1 });
+  const gesture2 = {};
+  state = drawingCameraStep(state, { type: 'navigate', token: gesture2 });
+  assert.deepEqual(state, { phase: 'suspended', token: gesture2 });
+  assert.equal(drawingCameraStep(state, { type: 'resume-ready', token: resume1 }), state, '迟到 resume 不得显现 live');
+  const resume2 = {};
+  state = drawingCameraStep(state, { type: 'resume', token: resume2 });
+  state = drawingCameraStep(state, { type: 'resume-ready', token: resume2 });
+  assert.deepEqual(state, { phase: 'live', token: null });
+
+  const freeze3 = {}, resume3 = {};
+  state = drawingCameraStep(undefined, { type: 'navigate', token: freeze3 });
+  state = drawingCameraStep(state, { type: 'preview-ready', token: freeze3 });
+  state = drawingCameraStep(state, { type: 'resume', token: resume3 });
+  assert.deepEqual(drawingCameraStep(state, { type: 'resume-error', token: resume3 }), { phase: 'live', token: null });
+});
+
+test('exit 抢占 freezing：未 ready preview 必须清掉，迟到 ready 不得再挂双影', async () => {
+  const token = {};
+  let state = drawingCameraStep(undefined, { type: 'navigate', token });
+  let preview = { token, revision: 1 };
+  let release;
+  const deferredReady = new Promise(resolve => { release = resolve; }).then(() => {
+    const next = drawingCameraStep(state, { type: 'preview-ready', token });
+    if (next !== state) preview = { token, revision: 2 };
+    state = next;
+  });
+
+  const policy = drawingCameraExitPolicy(state);
+  assert.deepEqual(policy, { align: true, keepPreview: false });
+  if (!policy.keepPreview) preview = null;
+  state = drawingCameraStep(state, { type: 'reset' });
+  release();
+  await deferredReady;
+  assert.deepEqual(state, { phase: 'live', token: null });
+  assert.equal(preview, null, '迟到 preview-ready 不得恢复已清理的静态副本');
+
+  assert.deepEqual(drawingCameraExitPolicy({ phase: 'suspended', token: {} }), { align: true, keepPreview: true });
+  assert.deepEqual(drawingCameraExitPolicy({ phase: 'resuming', token: {} }), { align: true, keepPreview: true });
+  assert.deepEqual(drawingCameraExitPolicy({ phase: 'live', token: null }), { align: false, keepPreview: false });
+});
+
+test('IME 同一 composition 周期只 freeze/toast 一次，end 后解锁下一周期', () => {
+  let state;
+  let freezes = 0, toasts = 0;
+  state = drawingCompositionStep(state, { type: 'start' }).state;
+  const navigate = () => {
+    const route = drawingCompositionStep(state, { type: 'navigate' });
+    state = route.state;
+    if (route.action === 'block') return;
+    freezes++;
+    const blocked = drawingCompositionStep(state, { type: 'blocked', cycle: state.cycle });
+    state = blocked.state;
+    if (blocked.action === 'notify') toasts++;
+  };
+  navigate();
+  navigate();
+  navigate();
+  assert.deepEqual({ freezes, toasts }, { freezes: 1, toasts: 1 });
+
+  state = drawingCompositionStep(state, { type: 'end' }).state;
+  state = drawingCompositionStep(state, { type: 'start' }).state;
+  navigate();
+  assert.deepEqual({ freezes, toasts }, { freezes: 2, toasts: 2 });
 });
 
 test('pending A 取消后 opening B：A 的迟到 then/catch 必须静默且只有 B ready', async () => {
