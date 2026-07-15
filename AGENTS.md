@@ -12,8 +12,9 @@ hooks/ - Claude Code SessionEnd 接力钩子 (自动生成接力提示词)
 data/ - 运行时产物: scan-cache.json(可丢弃) enrich/canvas/layout/drawing-files.json(珍贵) launch/(临时脚本)
 tests/ - 零依赖 node:test 回归：持久层并发、尾部停止点、增量布局/容器缩放、图片资产、落空连线原子创建、滚轮设备判定与缩放数学、
   绘图命中(线段/旋转/描边带)、上下文倒序分页(无重叠无丢行)；fixtures/canvas-acceptance 是 4518 无数据性能/交互验收夹具
-scripts/ - 开源安装、只读诊断、构建资产准备与 subset-worker 产物闭包硬门；serve-canvas-acceptance 只绑 4518 且拒绝 /api
-plugins/ - Claude Code / Codex 共用薄插件（安装/诊断/启动/打开现有实机）
+scripts/ - 开源安装、只读诊断与发布资产准备；安装脚本按当前 checkout 生成 launchd plist，不写死个人路径；
+  prepare-assets 从 lock 精确固定的 Excalidraw 包同步离线字体，verify-subset-worker-build 递归守住 worker 闭包；serve-canvas-acceptance 只绑 4518 且拒绝 /api
+plugins/ - Claude Code / Codex 共用的薄插件，只安装、诊断、启动、打开本地实机
 docs/ + PRIVACY.md + TERMS.md - Codex 市场提交文案、隐私披露与公开使用条款
 </directory>
 
@@ -39,6 +40,8 @@ npm run scan         # 仅扫描，输出统计
 
 ## 架构决策
 
+> **v17 绘图融合根治进行中**：第一轮 LE-001～LE-007 的单相机方向保留，但 Review 已证实 rendered/hit revision、局部分组/z-order、相机输入盾、容器实时承载、草稿与资产持久化还有 P1 裂缝。唯一执行计划是 `docs/绘图融合根治计划-v2.md`；LE-008～LE-014 全绿前不得宣告根治。
+
 - **Adapter 模式**: 每个 Agent 工具一个适配器输出统一 Session 模型，新增工具=新增一个文件
 - **首尾局部读取**: 只读 JSONL 首 64KB + 尾 8KB，3700 文件冷扫 1.5s，mtime 缓存命中 53ms
 - **三层噪音过滤**: 子智能体(claude isSidechain / codex thread_source=subagent)、空壳、headless 自噪
@@ -47,6 +50,7 @@ npm run scan         # 仅扫描，输出统计
   额度耗尽自动降级；单次精工 xhigh、批量回填 high（Max 微降一档，data/config.json 可改）
 - **人话铁律**: 标题动词开头 8-16 字说人话；批量回填(backfill.mjs)只管近 30 天，历史不管
 - **双仓分离**: 扫描缓存可丢弃可重建；AI 增强数据(标题/摘要/接力)与手工布局独立存放永不清扫
+- **持久层并发律**: 扫描缓存进程内常驻；珍贵 enrich 更新必须锁住“读最新值→改→原子写”；Codex 索引追加后读尾校验
 - **SSE 举旗不抢方向盘**: 文件变化只点亮"有新活动"按钮，用户主动刷新才重排画布
 - **拖动即记忆**: 容器拖过的位置写入 layout.json，永远优先于瀑布流算法
 - **成熟画布手势**: 空白左拖框选；空格+左拖/中键平移；触控板双指平移、捏合缩放；街区/画板仅标题栏搬家
@@ -62,13 +66,14 @@ npm run scan         # 仅扫描，输出统计
   （面积小者优先认领，绑定标签随宿主）；小地图画一切：MiniMapInk 镜像 minimap 的 svg viewBox 把区域底板与批注投进缩略图（Miro 式地标定向）
 - **绘图删除不藏在模式里**: 普通模式点击绘图描边带=一键进选绘图并选中（Delete 即删，Esc 返回），右键绘图=“选中编辑/删除此绘图”（删除过确认、即时落盘）；pane 与一切节点同河——含会话卡/工作区（视觉最上层者赢，按钮/输入/nodrag 功能件/连接点/拖动把手除外）；空心形状中空区穿透给底下卡片，命中检测是纯函数可证伪
 - **整理只动几何**: 自动整理原子重置 x/y/w/h 但保留 layout.d 人工归属；每次成功整理覆盖旧票据，toast 与 Cmd/Ctrl+Z 只撤最近一步
-- **锚点不等于重叠许可**: 手工位置优先，但新增会话/工作区令成员或容器长大时，纯布局层必须顺延避让且不暗写 layout.json
+- **锚点不等于重叠许可**: 手工位置优先，但新增会话/工作区令成员或容器长大时，纯布局层必须确定性顺延避让且不暗写 layout.json
 - **缩放只改画框**: 从左/上放大街区或画板时，持久化 React Flow 已补偿的子项相对坐标，重建后成员绝对位置不跳
 - **落空连线有去处**: 只认明确拖线（关闭点击续连暗状态）；松在 pane、容器空白面或边等画布落点都弹选择——
   会话卡拉出的线首选“打开会话上下文”终端窗（倒序分页 GET /api/context-page：打开停最新、上滑翻至会话开头、
   content-visibility 原生虚拟化，5.7GB 会话与 100KB 同速打开；右键菜单同河），其余“便签/画板”与手动边一次原子写入；
   连接点命中区按缩放保持 12–28px，视觉圆点独立且悬停不位移
 - **看板归属不碰地形**: 工作区拖入另一街区/画板只改 layout.d 与画布坐标，不移动、不改写真实会话目录与文件
+- **纯展示层不抢交互**: 图例等无动作覆盖层必须点击穿透，不能遮挡画布节点与入口
 - **数据流单向**: 地形(~/.claude,~/.codex) → scanner → graph → 画布；画布动作 → launcher/ai → 地形
 
 ## 会话数据源
@@ -78,6 +83,6 @@ npm run scan         # 仅扫描，输出统计
 | Claude Code | ~/.claude/projects/<转义cwd>/<uuid>.jsonl | claude --resume <id> |
 | Codex | ~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl (+archived_sessions) | codex resume <id> |
 
-v0 存量资产 (session-manager skill 的 aliases.json + summaries/) 已自动合并。
+v0 存量资产 (session-manager skill 的 aliases.json + summaries/) 若存在则自动合并；路径可用 AGENT_CANVAS_V0_DIR 覆盖。
 
-[PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
+[PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md

@@ -4,6 +4,8 @@
 React Flow 画布前端。**岛屿架构（v15）：画布即世界满屏铺底，一切 UI 都是漂浮岛（.island 同族皮肤）**——
 左=导航岛(品牌/搜索/过滤/清单)、顶中=常驻画布工具岛(选绘图/画笔激活后 Excalidraw 工具栏进驻上方)、右上=动作岛、右=详情岛。
 Dify 浅色基因：Dify 蓝 #155eef 锚点，Claude 橙 / Codex 青绿作工具身份色。数据单向流：graph → 过滤管道 → 画布/面板。
+
+**v17 根治进行中**：第一轮单相机已证实 viewport drift=0，但 cold 空帧、rendered/hit revision 分叉、hole-punch 重切组、相机尾帧输入穿透、容器墨迹松手追赶、草稿/资产持久化仍未达到融合标准。在 `docs/绘图融合根治计划-v2.md` 的 LE-008～LE-014 全部通过前，下文有关绘图合成器的描述视为“既定目标”，不是已完成验收。
 丝滑四律：节点状态交还 React Flow、全量渲染不做视口裁剪(平移=纯 GPU 变换,裁剪的挂载churn才是卡顿源)、
 动画只走合成器且平移中暂停(.canvas-moving)、已提交绘图与节点同在 React Flow viewport 内、共用唯一 transform——
 视口手势不再驱动 Excalidraw 或绘图重导出；编辑只 hole-punch 目标事务 originalIds，静态/live 不重复同一元素。

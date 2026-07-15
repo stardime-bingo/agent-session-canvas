@@ -40,6 +40,8 @@ npm run scan         # 仅扫描，输出统计
 
 ## 架构决策
 
+> **v17 绘图融合根治进行中**：第一轮 LE-001～LE-007 的单相机方向保留，但 Review 已证实 rendered/hit revision、局部分组/z-order、相机输入盾、容器实时承载、草稿与资产持久化还有 P1 裂缝。唯一执行计划是 `docs/绘图融合根治计划-v2.md`；LE-008～LE-014 全绿前不得宣告根治。
+
 - **Adapter 模式**: 每个 Agent 工具一个适配器输出统一 Session 模型，新增工具=新增一个文件
 - **首尾局部读取**: 只读 JSONL 首 64KB + 尾 8KB，3700 文件冷扫 1.5s，mtime 缓存命中 53ms
 - **三层噪音过滤**: 子智能体(claude isSidechain / codex thread_source=subagent)、空壳、headless 自噪
@@ -83,4 +85,4 @@ npm run scan         # 仅扫描，输出统计
 
 v0 存量资产 (session-manager skill 的 aliases.json + summaries/) 若存在则自动合并；路径可用 AGENT_CANVAS_V0_DIR 覆盖。
 
-[PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+[PROTOCOL]: 变更时更新此头部，然后检查 AGENTS.md
