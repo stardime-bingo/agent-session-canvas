@@ -35,6 +35,7 @@ export default function MiniMapInk({ elements, revision, rootRef }) {
         const filled = el.backgroundColor && el.backgroundColor !== 'transparent';
         return (
           <rect key={el.id} x={b.minX} y={b.minY} width={b.maxX - b.minX} height={b.maxY - b.minY}
+            data-ink-element-id={el.id}
             rx={8} fill={filled ? el.backgroundColor : 'none'}
             stroke={el.strokeColor || '#7c3aed'} strokeWidth={1.2} vectorEffect="non-scaling-stroke"
             opacity={isBelow(el) ? 0.45 : 0.7} />
