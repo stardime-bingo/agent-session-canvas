@@ -1,14 +1,14 @@
 target = "/Users/bingowu/BINGO-Space/AI-code/AGENT会话管理看板"
 app_desc = "本地 Agent 会话指挥塔：React Flow 卡片地形与 Excalidraw 绘图的单相机融合画布"
-modules = ["web/src/canvas", "web/src/App.jsx", "web/src/api.js", "server", "tests", "scripts", "docs"]
-quality_bar = "已 paint 帧是像素/命中/小地图唯一真相；局部编辑不扰动非目标分组和 z-order；相机期输入不穿透；容器与墨迹同相位；草稿可恢复且资产引用一致；无真实画布自动坐标拖拽；node:test、Vite build、4518 paint 后 Computer Use 与 4517 只读 console 全绿"
+modules = ["shared", "web/src/canvas", "web/src/App.jsx", "web/src/api.js", "server", "tests", "scripts", "docs"]
+quality_bar = "已 paint 帧是像素/命中/小地图唯一真相；LE-011R 只含 marker/CSS bridge、scene-token CAS、小型 journal 与目标 frame 回执；不得引入 geometry migration、overlay 世界或候选自证协议；node:test、Vite build、静态 4518 四场景 Playwright 全绿，Computer Use 只做一次视觉烟测；禁止操作 4517、真实数据、launchd 和远端"
 default_lane = "guarded"
 max_attempts = 8
 claim_ttl_seconds = 1800
 
 [gates.focused]
 build = "npm run build"
-behavior = "node --test tests/drawing.test.mjs tests/gestures.test.mjs tests/layout.test.mjs tests/store.test.mjs"
+behavior = "node --test tests/drawing.test.mjs tests/gestures.test.mjs tests/layout.test.mjs tests/store.test.mjs tests/carry-machine.test.mjs tests/carry-service.test.mjs tests/carry-browser.test.mjs"
 
 [gates.global]
 build = "npm run build"
