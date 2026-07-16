@@ -17,6 +17,8 @@
     "tests/fixtures/canvas-acceptance/fixture-data.js",
     "tests/fixtures/canvas-acceptance/interaction-data.js",
     "tests/fixtures/canvas-acceptance/README.md",
+    "tests/canvas-browser.test.mjs",
+    "tests/prod-boot.test.mjs",
     "scripts/serve-canvas-acceptance.mjs",
     "package.json",
     "docs/绘图融合根治计划-v2.md",

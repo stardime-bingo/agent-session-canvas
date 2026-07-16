@@ -1,14 +1,14 @@
 target = "/Users/bingowu/BINGO-Space/AI-code/AGENT会话管理看板"
 app_desc = "本地 Agent 会话指挥塔：React Flow 卡片地形与 Excalidraw 绘图的单相机融合画布"
 modules = ["shared", "web/src/canvas", "web/src/App.jsx", "web/src/api.js", "server", "tests", "scripts", "docs"]
-quality_bar = "已 paint 帧是像素/命中/小地图唯一真相；LE-011R 只含 marker/CSS bridge、scene-token CAS、小型 journal 与目标 frame 回执；不得引入 geometry migration、overlay 世界或候选自证协议；node:test、Vite build、静态 4518 四场景 Playwright 全绿，Computer Use 只做一次视觉烟测；禁止操作 4517、真实数据、launchd 和远端"
+quality_bar = "已 paint 帧是像素/命中/小地图唯一真相；LE-011B 的整理/撤销必须复用单次 batch carry 事务，LE-012 只做 draft journal 与 BinaryFiles 引用一致性，LE-013 只做自动沉层撤销与验收边界，LE-014 只做全局收敛；不得引入 geometry migration、SceneStore、overlay 世界或候选自证协议；每个候选 npm test 与 Vite build 全绿，交互只在合成 4518 执行，4517 仅允许最终只读打开与 console 检查，禁止坐标操作；禁止触碰真实数据和 launchd"
 default_lane = "guarded"
 max_attempts = 8
 claim_ttl_seconds = 1800
 
 [gates.focused]
 build = "npm run build"
-behavior = "node --test tests/drawing.test.mjs tests/gestures.test.mjs tests/layout.test.mjs tests/store.test.mjs tests/carry-machine.test.mjs tests/carry-service.test.mjs tests/carry-browser.test.mjs"
+behavior = "npm test"
 
 [gates.global]
 build = "npm run build"
