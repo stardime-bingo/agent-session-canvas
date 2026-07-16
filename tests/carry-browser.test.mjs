@@ -41,7 +41,7 @@ const run = (command, args) => new Promise((resolve, reject) => {
   child.once('exit', code => code === 0 ? resolve({ stdout, stderr }) : reject(new Error(`${command} exited ${code}\n${stdout}\n${stderr}`)));
 });
 
-test('production static 4518 boots and real FlowCanvas carry/cancel scenarios pass', { timeout: 240000 }, async t => {
+test('production static 4518 runs direct carry plus real React batch arrange/undo handoffs', { timeout: 300000 }, async t => {
   const server = spawn(process.execPath, [serverScript], {
     cwd: repo, env: process.env, stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -77,6 +77,19 @@ test('production static 4518 boots and real FlowCanvas carry/cancel scenarios pa
   const stress = report.scenarios.find(entry => entry.scenario === 'authority-conflict-800');
   assert.ok(stress.moveHandlerP95 < 4 && stress.longTaskCount === 0);
   assert.ok(report.scenarios.every(entry => entry.trace.byteLength > 0 && /^[0-9a-f]{64}$/.test(entry.trace.sha256)));
+  assert.deepEqual(report.batchScenarios.map(entry => entry.scenario), [
+    'batch-normal', 'batch-export-retry', 'batch-response-unknown',
+  ]);
+  assert.ok(report.batchScenarios.every(entry => entry.samples >= 20));
+  assert.ok(report.batchScenarios.every(entry =>
+    entry.arrangeGeneration !== entry.undoGeneration
+    && entry.maxBoardRelativeError <= 0.5
+    && entry.maxDistrictRelativeError <= 0.5));
+  assert.equal(report.batchScenarios.find(entry => entry.scenario === 'batch-export-retry').exportFailures, 3);
+  assert.equal(report.batchScenarios.find(entry => entry.scenario === 'batch-response-unknown').statusQueries, 1);
+  assert.ok(report.batchScenarios.every(entry =>
+    entry.trace.byteLength > 0 && /^[0-9a-f]{64}$/.test(entry.trace.sha256)));
   assert.match(report.browserVersion, /Chrome|Chromium|\d/);
   assert.ok(report.scenarios.every(entry => entry.productionIntegration));
+  assert.ok(report.batchScenarios.every(entry => entry.productionIntegration));
 });

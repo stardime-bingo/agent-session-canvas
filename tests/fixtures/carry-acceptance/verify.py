@@ -23,7 +23,13 @@ SCENARIOS = [
     "escape",
     "pointercancel",
 ]
+BATCH_SCENARIOS = [
+    "batch-normal",
+    "batch-export-retry",
+    "batch-response-unknown",
+]
 BOARD = '[data-id="board:b1"]'
+DISTRICT = '[data-id="district:batch-project"]'
 MAIN = '.ink-world [data-ink-element-id="shape-0"]'
 OUTSIDE = '.ink-world [data-ink-element-id="shape-outside"]'
 MINI = '.mini-ink [data-ink-element-id="shape-0"]'
@@ -135,8 +141,79 @@ START_GEOMETRY_SAMPLER = """
 """ % tuple(json.dumps(value) for value in [BOARD, MAIN, OUTSIDE, MINI])
 
 
+BATCH_GEOMETRY = """
+() => {
+  const rect = selector => {
+    const value = document.querySelector(selector).getBoundingClientRect();
+    return { left: value.left, top: value.top, width: value.width, height: value.height };
+  };
+  return {
+    board: rect(%s),
+    district: rect(%s),
+    main: rect(%s),
+    outside: rect(%s),
+  };
+}
+""" % tuple(json.dumps(value) for value in [BOARD, DISTRICT, MAIN, OUTSIDE])
+
+
+START_BATCH_SAMPLER = """
+({ initial }) => {
+  const rect = selector => {
+    const node = document.querySelector(selector);
+    if (!node) return null;
+    const value = node.getBoundingClientRect();
+    return { left: value.left, top: value.top, width: value.width, height: value.height };
+  };
+  const samples = [];
+  let active = true;
+  let stopped;
+  const done = new Promise(resolve => { stopped = resolve; });
+  const sample = () => requestAnimationFrame(() => {
+    if (!active) {
+      stopped(samples);
+      return;
+    }
+    const board = rect(%s);
+    const district = rect(%s);
+    const main = rect(%s);
+    const outside = rect(%s);
+    const production = window.__carryAcceptance.snapshot();
+    if (board && district && main && outside) {
+      samples.push({
+        boardRelativeError: Math.hypot(
+          (main.left - board.left) - (initial.main.left - initial.board.left),
+          (main.top - board.top) - (initial.main.top - initial.board.top),
+        ),
+        districtRelativeError: Math.hypot(
+          (outside.left - district.left) - (initial.outside.left - initial.district.left),
+          (outside.top - district.top) - (initial.outside.top - initial.district.top),
+        ),
+        bridgeCount: production.bridgeCount,
+        requestedGenerationId: production.requestedGenerationId,
+        renderedGenerationId: production.renderedGenerationId,
+        targetFrameId: production.carryTargetFrame?.targetFrameId || null,
+      });
+    }
+    sample();
+  });
+  sample();
+  window.__batchPaintSampler = {
+    stop() {
+      active = false;
+      return done;
+    },
+  };
+}
+""" % tuple(json.dumps(value) for value in [BOARD, DISTRICT, MAIN, OUTSIDE])
+
+
 def geometry(page):
     return page.evaluate(INITIAL_GEOMETRY)
+
+
+def batch_geometry(page):
+    return page.evaluate(BATCH_GEOMETRY)
 
 
 def distance(left, right):
@@ -183,6 +260,36 @@ def assert_drawing_blocked(page, phase):
     assert after["opening"] is False and after["penActive"] is False
     assert after["drawingCommitCount"] == 0
     assert after["carryTargetFrame"] == before["carryTargetFrame"]
+
+
+def assert_batch_plan(plan):
+    moves = {move["containerId"]: move for move in plan["moves"]}
+    assert set(moves) == {"board:b1", "district:batch-project"}
+    assert moves["board:b1"]["anchorIds"] == ["shape-0"]
+    assert moves["district:batch-project"]["anchorIds"] == ["shape-outside"]
+    assert len({
+        anchor
+        for move in moves.values()
+        for anchor in move["anchorIds"]
+    }) == 2
+
+
+def assert_batch_transition(before, after, plan):
+    deltas = {}
+    for move in plan["moves"]:
+        dx = move["to"]["x"] - move["from"]["x"]
+        dy = move["to"]["y"] - move["from"]["y"]
+        for anchor in move["anchorIds"]:
+            deltas[anchor] = (dx, dy)
+    before_drawing = {element["id"]: element for element in before["drawing"]}
+    after_drawing = {element["id"]: element for element in after["drawing"]}
+    assert set(before_drawing) == set(after_drawing)
+    for element_id, previous in before_drawing.items():
+        dx, dy = deltas.get(element_id, (0, 0))
+        current = after_drawing[element_id]
+        assert current["x"] == previous["x"] + dx
+        assert current["y"] == previous["y"] + dy
+    assert after["token"] != before["token"]
 
 
 def verify_scenario(browser, name):
@@ -396,11 +503,218 @@ def verify_scenario(browser, name):
         raise
 
 
+def verify_batch_scenario(browser, name):
+    context = browser.new_context(viewport={"width": 1200, "height": 760})
+    context.tracing.start(screenshots=True, snapshots=True, sources=True)
+    page = context.new_page()
+    errors = []
+    api_requests = []
+    page.on("console", lambda msg: errors.append(f"console:{msg.type}:{msg.text}") if msg.type == "error" else None)
+    page.on("pageerror", lambda error: errors.append(f"page:{error}"))
+    page.on("requestfailed", lambda request: errors.append(f"request:{request.url}"))
+    page.on("request", lambda request: api_requests.append(request.url) if "/api" in request.url else None)
+    trace = Path("/tmp") / f"le011b-production-batch-{RUN_ID}-{name}.zip"
+    trace.unlink(missing_ok=True)
+    try:
+        response = page.goto(f"{BASE}/?scenario={name}", wait_until="networkidle")
+        assert response and response.ok, f"{name}: page boot failed"
+        page.locator("[data-app-ready=true]").wait_for(timeout=90000)
+        for selector in [BOARD, DISTRICT, MAIN, OUTSIDE, ".batch-arrange", ".batch-undo"]:
+            page.locator(selector).wait_for()
+        before = page.evaluate("window.__carryAcceptance.snapshot()")
+        assert before["productionIntegration"] is True
+        assert before["batchAction"] == "idle"
+        assert before["bridgeCount"] == before["batchBridgeCount"] == 0
+        assert len(before["reactSnapshots"]) == 1
+        initial = batch_geometry(page)
+        page.evaluate(START_BATCH_SAMPLER, {"initial": initial})
+
+        page.locator(".batch-arrange").click()
+        page.wait_for_function(
+            """() => {
+              const value = window.__carryAcceptance.snapshot();
+              const target = value.carryTargetFrame;
+              return value.authorityWrites === 1
+                && target?.kind === 'batch'
+                && target.generationCurrent
+                && target.excludedIdsCurrent
+                && value.requestedGenerationId === target.targetFrameId
+                && value.bridgeCount === 4
+                && value.batchBridgeCount === 4;
+            }""",
+            timeout=30000,
+        )
+        arrange_pending = page.evaluate("window.__carryAcceptance.snapshot()")
+        arrange_frame = arrange_pending["carryTargetFrame"]["targetFrameId"]
+        assert arrange_pending["renderedGenerationId"] != arrange_frame
+        assert len(arrange_pending["reactSnapshots"]) == 2
+        assert len(arrange_pending["batchPlans"]) == 1
+        assert_batch_plan(arrange_pending["batchPlans"][0])
+        assert_batch_transition(
+            arrange_pending["reactSnapshots"][0],
+            arrange_pending["reactSnapshots"][1],
+            arrange_pending["batchPlans"][0],
+        )
+        page.wait_for_timeout(100)
+        still_pending = page.evaluate("window.__carryAcceptance.snapshot()")
+        assert still_pending["carryTargetFrame"]["targetFrameId"] == arrange_frame
+        assert still_pending["bridgeCount"] == still_pending["batchBridgeCount"] == 4
+
+        if name == "batch-export-retry":
+            page.wait_for_function(
+                """() => {
+                  const value = window.__carryAcceptance.snapshot();
+                  return value.batchAction === 'arrange:retryable-paint'
+                    && value.batchCarryRetryable
+                    && value.carryTargetFrame?.failed
+                    && value.bridgeCount === 4;
+                }""",
+                timeout=30000,
+            )
+            retry = page.evaluate("window.__carryAcceptance.snapshot()")
+            assert retry["injectedExportFailures"] == 3
+            assert retry["renderedGenerationId"] != arrange_frame
+            page.locator(".ink-carry-retry").click()
+
+        page.wait_for_function(
+            f"""() => {{
+              const value = window.__carryAcceptance.snapshot();
+              return value.carryTargetFrame === null
+                && value.bridgeCount === 0
+                && value.batchBridgeCount === 0
+                && value.callbackEvents.some(event =>
+                  event.type === 'ready' && event.generationId === {arrange_frame});
+            }}""",
+            timeout=30000,
+        )
+        arranged = page.evaluate("window.__carryAcceptance.snapshot()")
+        expected_arrange_status = "retryable-paint" if name == "batch-export-retry" else "ready"
+        assert arranged["batchOutcomes"] == [{
+            "kind": "arrange",
+            "opId": "batch-1",
+            "status": expected_arrange_status,
+        }]
+        arranged_geometry = batch_geometry(page)
+        assert distance(arranged_geometry["board"], initial["board"]) >= 40
+        assert distance(arranged_geometry["district"], initial["district"]) >= 40
+
+        page.locator(".batch-undo").click()
+        page.wait_for_function(
+            """() => {
+              const value = window.__carryAcceptance.snapshot();
+              const target = value.carryTargetFrame;
+              return value.authorityWrites === 2
+                && target?.kind === 'batch'
+                && target.generationCurrent
+                && target.excludedIdsCurrent
+                && value.requestedGenerationId === target.targetFrameId
+                && value.bridgeCount === 4
+                && value.batchBridgeCount === 4;
+            }""",
+            timeout=30000,
+        )
+        undo_pending = page.evaluate("window.__carryAcceptance.snapshot()")
+        undo_frame = undo_pending["carryTargetFrame"]["targetFrameId"]
+        assert undo_frame != arrange_frame
+        assert undo_pending["renderedGenerationId"] != undo_frame
+        assert any(
+            event["type"] == "ready" and event.get("generationId") == arrange_frame
+            for event in undo_pending["callbackEvents"]
+        )
+        assert len(undo_pending["reactSnapshots"]) == 3
+        assert len(undo_pending["batchPlans"]) == 2
+        assert_batch_plan(undo_pending["batchPlans"][1])
+        assert_batch_transition(
+            undo_pending["reactSnapshots"][1],
+            undo_pending["reactSnapshots"][2],
+            undo_pending["batchPlans"][1],
+        )
+        page.wait_for_timeout(100)
+        undo_still_pending = page.evaluate("window.__carryAcceptance.snapshot()")
+        assert undo_still_pending["carryTargetFrame"]["targetFrameId"] == undo_frame
+        assert undo_still_pending["bridgeCount"] == 4
+        page.wait_for_function(
+            f"""() => {{
+              const value = window.__carryAcceptance.snapshot();
+              return value.batchAction === 'undo:ready'
+                && value.carryTargetFrame === null
+                && value.bridgeCount === 0
+                && value.batchBridgeCount === 0
+                && value.callbackEvents.some(event =>
+                  event.type === 'ready' && event.generationId === {undo_frame});
+            }}""",
+            timeout=30000,
+        )
+        samples = page.evaluate("window.__batchPaintSampler.stop()")
+        assert len(samples) >= 20
+        max_board_error = max(sample["boardRelativeError"] for sample in samples)
+        max_district_error = max(sample["districtRelativeError"] for sample in samples)
+        assert max_board_error <= 0.5, f"{name}: board/drawing intermediate state {max_board_error}"
+        assert max_district_error <= 0.5, f"{name}: district/drawing intermediate state {max_district_error}"
+
+        final = page.evaluate("window.__carryAcceptance.snapshot()")
+        final_geometry = batch_geometry(page)
+        assert len(final["reactSnapshots"]) == 3
+        assert [snapshot["token"] for snapshot in final["reactSnapshots"]] == [
+            "scene-1", "scene-2", "scene-3",
+        ]
+        assert final["reactSnapshots"][0]["drawing"] == final["reactSnapshots"][2]["drawing"]
+        assert final["reactSnapshots"][0]["districtLayout"] == final["reactSnapshots"][2]["districtLayout"]
+        assert final["commitCount"] == final["authorityWrites"] == final["authorityInstalls"] == 2
+        assert final["opIds"] == ["batch-1", "batch-2"]
+        assert final["baseTokens"] == ["scene-1", "scene-2"]
+        assert final["sceneToken"] == "scene-3"
+        assert final["sceneStale"] is False
+        assert final["batchOutcomes"][-1] == {
+            "kind": "undo",
+            "opId": "batch-2",
+            "status": "ready",
+        }
+        if name == "batch-response-unknown":
+            assert final["responseLosses"] == final["statusQueryCount"] == 1
+        else:
+            assert final["responseLosses"] == final["statusQueryCount"] == 0
+        if name == "batch-export-retry":
+            assert final["injectedExportFailures"] == 3
+        else:
+            assert final["injectedExportFailures"] == 0
+        assert distance(final_geometry["board"], initial["board"]) <= 1.5
+        assert distance(final_geometry["district"], initial["district"]) <= 1.5
+        assert distance(final_geometry["main"], initial["main"]) <= 1.5
+        assert distance(final_geometry["outside"], initial["outside"]) <= 1.5
+        assert not errors, f"{name}: browser errors: {errors}"
+        assert not api_requests, f"{name}: API access: {api_requests}"
+        context.tracing.stop(path=str(trace))
+        context.close()
+        trace_bytes = trace.read_bytes()
+        return {
+            "scenario": name,
+            "productionIntegration": True,
+            "arrangeGeneration": arrange_frame,
+            "undoGeneration": undo_frame,
+            "samples": len(samples),
+            "maxBoardRelativeError": max_board_error,
+            "maxDistrictRelativeError": max_district_error,
+            "statusQueries": final["statusQueryCount"],
+            "exportFailures": final["injectedExportFailures"],
+            "trace": {
+                "path": str(trace),
+                "sha256": hashlib.sha256(trace_bytes).hexdigest(),
+                "byteLength": len(trace_bytes),
+            },
+        }
+    except Exception:
+        context.tracing.stop(path=str(trace))
+        context.close()
+        raise
+
+
 with sync_playwright() as playwright:
     browser = playwright.chromium.launch(executable_path=CHROME, headless=True)
     try:
         browser_version = browser.version
         results = [verify_scenario(browser, name) for name in SCENARIOS]
+        batch_results = [verify_batch_scenario(browser, name) for name in BATCH_SCENARIOS]
     finally:
         browser.close()
 
@@ -410,4 +724,5 @@ print(json.dumps({
     "runId": RUN_ID,
     "browserVersion": browser_version,
     "scenarios": results,
+    "batchScenarios": batch_results,
 }, ensure_ascii=False))

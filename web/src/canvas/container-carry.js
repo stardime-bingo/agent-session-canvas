@@ -1,6 +1,6 @@
 /**
- * Browser carry controller and the only DOM adapter for the marker/CSS bridge.
- * The controller owns domain state; React and SVG only render its commands.
+ * Browser direct-carry controller, batch planner/receipt resolver, scene-write
+ * authority barrier and the only DOM adapters for marker/CSS bridges.
  */
 import {
   computeAnchorIds, createCarryLedger, createCarryState, reduceCarry,
@@ -9,34 +9,137 @@ import {
 const MARKER_PREFIX = 'ink-marker:';
 const uuid = () => globalThis.crypto?.randomUUID?.()
   || `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+const containerRect = node => ({
+  id: node.id,
+  x: node.position.x,
+  y: node.position.y,
+  w: node.width ?? node.data?._w,
+  h: node.height ?? node.data?._h,
+});
+
+export function planBatchCarry(beforeNodes = [], afterNodes = [], renderedWorld = null) {
+  const before = beforeNodes
+    .filter(node => node.type === 'district' || node.type === 'board')
+    .map(containerRect);
+  const after = new Map(afterNodes
+    .filter(node => node.type === 'district' || node.type === 'board')
+    .map(node => [node.id, containerRect(node)]));
+  const owners = computeAnchorIds(renderedWorld?.elements || [], before);
+  return before.flatMap(container => {
+    const target = after.get(container.id);
+    if (!target || (target.x === container.x && target.y === container.y)) return [];
+    return [{
+      containerId: container.id,
+      from: { x: container.x, y: container.y },
+      to: { x: target.x, y: target.y },
+      anchorIds: owners.get(container.id) || [],
+    }];
+  });
+}
 
 export function createSceneMutationQueue() {
   const pendingRef = { current: 0 };
   const authorityRef = { current: null };
+  const authorityUnknownRef = { current: null };
   let tail = Promise.resolve();
+  const barrierError = cause => {
+    const error = new Error('无法确认上一笔画布操作是否已落盘，请先刷新');
+    error.code = 'AUTHORITY_UNKNOWN';
+    error.authorityUnknown = true;
+    error.cause = cause || authorityUnknownRef.current;
+    return error;
+  };
+  const poisoned = error => error?.code === 'AUTHORITY_UNKNOWN' || error?.authorityUnknown === true;
+  const enqueue = (request, apply = value => value, guard = {}) => {
+    if (authorityUnknownRef.current && !guard.authorityReload) {
+      return Promise.reject(barrierError());
+    }
+    pendingRef.current++;
+    const operation = tail.then(async () => {
+      if (authorityUnknownRef.current && !guard.authorityReload) throw barrierError();
+      const result = await request();
+      if (guard.baseToken && result?.status === 'committed'
+        && authorityRef.current !== guard.baseToken
+        && authorityRef.current !== result.sceneToken) {
+        return { status: 'superseded', opId: result.opId };
+      }
+      await apply(result);
+      if (typeof result?.sceneToken === 'string' && result.sceneToken) {
+        authorityRef.current = result.sceneToken;
+      }
+      if (guard.authorityReload) {
+        if (typeof result?.sceneToken !== 'string' || !result.sceneToken) {
+          throw barrierError(new Error('权威图缺少 sceneToken'));
+        }
+        authorityUnknownRef.current = null;
+      }
+      return result;
+    }).catch(error => {
+      if (poisoned(error) && !authorityUnknownRef.current) authorityUnknownRef.current = error;
+      throw error;
+    });
+    const settled = operation.finally(() => { pendingRef.current--; });
+    tail = settled.catch(() => {});
+    return settled;
+  };
   return Object.freeze({
-    pendingRef, authorityRef,
+    pendingRef, authorityRef, authorityUnknownRef,
     adoptAuthority(token) {
       if (typeof token === 'string' && token) authorityRef.current = token;
     },
-    enqueue(request, apply = value => value, guard = {}) {
-      pendingRef.current++;
-      const operation = tail.then(request).then(async result => {
-        if (guard.baseToken && result?.status === 'committed'
-          && authorityRef.current !== guard.baseToken
-          && authorityRef.current !== result.sceneToken) {
-          return { status: 'superseded', opId: result.opId };
-        }
-        await apply(result);
-        if (typeof result?.sceneToken === 'string' && result.sceneToken) {
-          authorityRef.current = result.sceneToken;
-        }
-        return result;
-      });
-      const settled = operation.finally(() => { pendingRef.current--; });
-      tail = settled.catch(() => {});
-      return settled;
+    enqueue,
+    reloadAuthority(request, apply = value => value) {
+      return enqueue(request, apply, { authorityReload: true });
     },
+  });
+}
+
+export async function commitBatchWithReceipt(command, commit, queryStatus) {
+  try {
+    return await commit(command);
+  } catch (error) {
+    if (error?.status === 409) throw error;
+    try {
+      const status = await queryStatus(command.opId);
+      if (status?.status === 'committed' && status.opId === command.opId) return status;
+    } catch { /* unknown authority is reported below with the original cause */ }
+    const unknown = new Error('无法确认整理是否已落盘，请先刷新');
+    unknown.code = 'AUTHORITY_UNKNOWN';
+    unknown.authorityUnknown = true;
+    unknown.cause = error;
+    throw unknown;
+  }
+}
+
+export function executeBatchArrange({
+  queue, plan, baseToken, commit, queryStatus, present, install, flush, opId = uuid(),
+}) {
+  let presentation = { status: 'ready' };
+  const command = { opId, baseToken, layout: plan.layout, moves: plan.moves };
+  return queue.enqueue(
+    () => commitBatchWithReceipt(command, commit, queryStatus),
+    async result => {
+      let handoff;
+      try {
+        flush(() => {
+          handoff = present(result) || Promise.resolve({ status: 'ready' });
+          install(result);
+        });
+        const outcome = await handoff;
+        presentation = outcome?.status ? outcome : { status: 'ready' };
+      } catch (error) {
+        error.persistedResult = result;
+        throw error;
+      }
+    },
+    { baseToken },
+  ).then(result => {
+    if (result?.status === 'superseded') {
+      const error = new Error('较新的画布修改已接管');
+      error.status = 409;
+      throw error;
+    }
+    return { result, presentation };
   });
 }
 
@@ -81,6 +184,42 @@ export function createInkDomAdapter(root) {
       clears++;
     },
     stats: () => ({ marked: marked.length, clears }),
+  });
+}
+
+export function createBatchCarryBridge(root) {
+  let marked = [];
+  const select = id => root?.querySelectorAll?.(`[data-ink-element-id="${CSS.escape(id)}"]`) || [];
+  const clear = () => {
+    for (const node of marked) {
+      node.classList.remove('ink-carry-anchor');
+      node.style.removeProperty('--carry-x');
+      node.style.removeProperty('--carry-y');
+    }
+    marked = [];
+    root?.classList.remove('ink-carry-active');
+  };
+  return Object.freeze({
+    present(moves = []) {
+      clear();
+      for (const move of moves) {
+        const dx = move.to.x - move.from.x;
+        const dy = move.to.y - move.from.y;
+        if (!dx && !dy) continue;
+        for (const id of move.anchorIds) {
+          for (const node of select(id)) {
+            node.classList.add('ink-carry-anchor');
+            node.style.setProperty('--carry-x', `${dx}px`);
+            node.style.setProperty('--carry-y', `${dy}px`);
+            marked.push(node);
+          }
+        }
+      }
+      root?.classList.toggle('ink-carry-active', !!marked.length);
+      return marked.length;
+    },
+    clear,
+    count: () => marked.length,
   });
 }
 

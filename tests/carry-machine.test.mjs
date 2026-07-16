@@ -1,11 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { performance } from 'node:perf_hooks';
 import {
-  applyCarry, computeAnchorIds, createCarryLedger, createCarryState, reduceCarry, validateCarryCommand,
+  applyBatchCarry, applyCarry, computeAnchorIds, createCarryLedger, createCarryState, reduceCarry,
+  validateBatchCarryCommand, validateCarryCommand,
 } from '../shared/canvas-carry.mjs';
 import {
-  createContainerCarryController, createSceneMutationQueue,
+  commitBatchWithReceipt, createBatchCarryBridge, createContainerCarryController,
+  createSceneMutationQueue, executeBatchArrange, planBatchCarry,
 } from '../web/src/canvas/container-carry.js';
 
 const begin = (anchorIds = ['shape']) => ({
@@ -70,6 +73,188 @@ test('applyCarry preserves unrelated references and validates finite semantic pr
     opId: 'o', baseToken: 't', containerId: 'b', from: { x: 0, y: 0 },
     to: { x: Infinity, y: 1 }, anchorIds: [],
   }), /coordinates/);
+});
+
+test('batch protocol applies distinct deltas once and rejects overlapping authority', () => {
+  const command = validateBatchCarryCommand({
+    opId: 'batch-1',
+    baseToken: 'token-1',
+    layout: { '/member': { d: 'board:b1' } },
+    moves: [
+      {
+        containerId: 'board:b1',
+        from: { x: 0, y: 0 },
+        to: { x: 10, y: 5 },
+        anchorIds: ['a'],
+      },
+      {
+        containerId: 'district:alpha',
+        from: { x: 100, y: 100 },
+        to: { x: 80, y: 130 },
+        anchorIds: ['b'],
+      },
+    ],
+  });
+  assert.deepEqual(applyBatchCarry([
+    { id: 'a', x: 1, y: 2 },
+    { id: 'b', x: 3, y: 4 },
+    { id: 'c', x: 5, y: 6 },
+  ], command.moves), [
+    { id: 'a', x: 11, y: 7 },
+    { id: 'b', x: -17, y: 34 },
+    { id: 'c', x: 5, y: 6 },
+  ]);
+  assert.throws(() => validateBatchCarryCommand({
+    ...command,
+    moves: [
+      command.moves[0],
+      { ...command.moves[1], anchorIds: ['a'] },
+    ],
+  }), /globally unique/);
+});
+
+test('batch planning freezes painted ownership once and gives overlaps to the smallest container', () => {
+  const node = (id, x, y, w, h) => ({
+    id, type: id.startsWith('board:') ? 'board' : 'district',
+    position: { x, y }, width: w, height: h, data: { _w: w, _h: h },
+  });
+  const before = [
+    node('district:large', 0, 0, 200, 200),
+    node('board:small', 20, 20, 80, 80),
+  ];
+  const after = [
+    node('district:large', 10, 0, 200, 200),
+    node('board:small', 20, 50, 80, 80),
+  ];
+  const moves = planBatchCarry(before, after, {
+    elements: [
+      { id: 'overlap', x: 30, y: 30, width: 10, height: 10 },
+      { id: 'large-only', x: 150, y: 150, width: 10, height: 10 },
+    ],
+  });
+  assert.deepEqual(moves.map(move => [move.containerId, move.anchorIds]), [
+    ['district:large', ['large-only']],
+    ['board:small', ['overlap']],
+  ]);
+  assert.equal(new Set(moves.flatMap(move => move.anchorIds)).size, 2);
+});
+
+test('batch response loss adopts only a matching receipt and otherwise reports unknown authority', async () => {
+  const command = { opId: 'batch-response' };
+  const committed = { status: 'committed', opId: command.opId, sceneToken: 'next' };
+  assert.equal(await commitBatchWithReceipt(
+    command,
+    async () => { throw new Error('response lost'); },
+    async () => committed,
+  ), committed);
+  await assert.rejects(
+    commitBatchWithReceipt(
+      command,
+      async () => { throw new Error('response lost'); },
+      async () => { throw new Error('status offline'); },
+    ),
+    error => error.code === 'AUTHORITY_UNKNOWN' && error.authorityUnknown === true,
+  );
+  await assert.rejects(
+    commitBatchWithReceipt(
+      command,
+      async () => { throw new Error('response lost'); },
+      async () => ({ status: 'unknown', opId: command.opId }),
+    ),
+    error => error.code === 'AUTHORITY_UNKNOWN',
+  );
+});
+
+test('multi-delta DOM bridge is idempotent and clears only its owned marker styles', () => {
+  const cssBefore = globalThis.CSS;
+  globalThis.CSS = { escape: value => value };
+  const node = () => {
+    const classes = new Set();
+    const styles = new Map();
+    return {
+      classList: {
+        add: value => classes.add(value),
+        remove: value => classes.delete(value),
+        contains: value => classes.has(value),
+      },
+      style: {
+        setProperty: (key, value) => styles.set(key, value),
+        removeProperty: key => styles.delete(key),
+        getPropertyValue: key => styles.get(key),
+      },
+    };
+  };
+  const nodes = { a: [node()], b: [node()] };
+  const rootClasses = new Set();
+  const root = {
+    querySelectorAll: selector => nodes[selector.match(/="([^"]+)"/)?.[1]] || [],
+    classList: {
+      toggle: (value, on) => on ? rootClasses.add(value) : rootClasses.delete(value),
+      remove: value => rootClasses.delete(value),
+    },
+  };
+  try {
+    const bridge = createBatchCarryBridge(root);
+    assert.equal(bridge.present([
+      { from: { x: 0, y: 0 }, to: { x: 10, y: 5 }, anchorIds: ['a'] },
+      { from: { x: 20, y: 20 }, to: { x: 15, y: 40 }, anchorIds: ['b'] },
+    ]), 2);
+    assert.equal(nodes.a[0].style.getPropertyValue('--carry-x'), '10px');
+    assert.equal(nodes.b[0].style.getPropertyValue('--carry-y'), '20px');
+    bridge.clear();
+    bridge.clear();
+    assert.equal(bridge.count(), 0);
+    assert.equal(nodes.a[0].classList.contains('ink-carry-anchor'), false);
+  } finally {
+    globalThis.CSS = cssBefore;
+  }
+});
+
+test('arrange uses the shared synchronous bridge+authority executor and no timer/follow chase', async () => {
+  const source = fs.readFileSync(new URL('../web/src/App.jsx', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /followDrawings|containerRects|setTimeout\s*\([^)]*120/);
+  assert.match(source, /executeBatchArrange\(\{[\s\S]*presentBatchCarryResult[\s\S]*setGraph[\s\S]*flush:\s*flushSync/);
+
+  const queue = createSceneMutationQueue();
+  queue.adoptAuthority('scene-1');
+  const order = [];
+  const outcome = await executeBatchArrange({
+    queue,
+    plan: { layout: { a: { x: 1 } }, moves: [] },
+    baseToken: 'scene-1',
+    opId: 'batch-shared',
+    commit: async command => ({
+      status: 'committed', opId: command.opId, sceneToken: 'scene-2',
+      layout: command.layout, moves: command.moves, movedIds: [], drawing: [],
+    }),
+    queryStatus: async () => ({ status: 'unknown' }),
+    present: result => {
+      order.push(`present:${result.sceneToken}`);
+      return Promise.resolve({ status: 'ready' });
+    },
+    install: result => order.push(`install:${result.sceneToken}`),
+    flush: callback => {
+      order.push('flush:start');
+      callback();
+      order.push('flush:end');
+    },
+  });
+  assert.deepEqual(order, [
+    'flush:start', 'present:scene-2', 'install:scene-2', 'flush:end',
+  ]);
+  assert.equal(outcome.presentation.status, 'ready');
+});
+
+test('direct carry presents only from committed RF node.position in a layout effect', () => {
+  const source = fs.readFileSync(new URL('../web/src/canvas/FlowCanvas.jsx', import.meta.url), 'utf8');
+  const dragHandler = source.match(/const onNodeDrag = useCallback\([\s\S]*?const onNodeDragStop = useCallback/)?.[0];
+  assert.ok(dragHandler);
+  assert.doesNotMatch(dragHandler, /carryControllerRef\.current\?\.move|visibleCarryPosition/);
+  assert.doesNotMatch(source, /visibleCarryPosition|activationX|activationY/);
+  assert.match(
+    source,
+    /useLayoutEffect\(\(\) => \{[\s\S]*carryMoveRef\.current[\s\S]*controller\.move\(state\.txId, move\.position\)[\s\S]*controller\.drop\(state\.txId, move\.position\)[\s\S]*\}, \[nodes\]\)/,
+  );
 });
 
 test('state machine owns tx op and target frame identities', () => {
@@ -223,6 +408,88 @@ test('scene mutation queue serializes request, response application, and recover
     'request-3', 'request-4', 'apply-4:scene-3',
   ]);
   assert.equal(currentToken, 'scene-3');
+  assert.equal(queue.pendingRef.current, 0);
+});
+
+test('unknown authority poisons queued and new writes until a successful graph reload', async () => {
+  const deferred = () => {
+    let resolve;
+    let reject;
+    const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+    return { promise, resolve, reject };
+  };
+  const firstGate = deferred();
+  const firstStarted = deferred();
+  const requests = [];
+  const queue = createSceneMutationQueue();
+  queue.adoptAuthority('scene-1');
+  const first = queue.enqueue(async () => {
+    requests.push('unknown');
+    firstStarted.resolve();
+    await firstGate.promise;
+  });
+  const queued = queue.enqueue(async () => {
+    requests.push('queued-write');
+    return { sceneToken: 'scene-2' };
+  });
+  const firstRejected = assert.rejects(first, error =>
+    error.code === 'AUTHORITY_UNKNOWN' && error.authorityUnknown === true);
+  const queuedRejected = assert.rejects(queued, error =>
+    error.code === 'AUTHORITY_UNKNOWN' && error.authorityUnknown === true);
+
+  await firstStarted.promise;
+  const unknown = new Error('commit and status both unavailable');
+  unknown.code = 'AUTHORITY_UNKNOWN';
+  unknown.authorityUnknown = true;
+  firstGate.reject(unknown);
+  await firstRejected;
+  await queuedRejected;
+  assert.deepEqual(requests, ['unknown']);
+  assert.equal(queue.authorityUnknownRef.current, unknown);
+
+  let newWriteCalled = false;
+  await assert.rejects(
+    queue.enqueue(async () => {
+      newWriteCalled = true;
+      return { sceneToken: 'scene-2' };
+    }),
+    error => error.code === 'AUTHORITY_UNKNOWN',
+  );
+  assert.equal(newWriteCalled, false);
+  queue.adoptAuthority('scene-untrusted');
+  await assert.rejects(
+    queue.enqueue(async () => {
+      newWriteCalled = true;
+      return { sceneToken: 'scene-3' };
+    }),
+    error => error.code === 'AUTHORITY_UNKNOWN',
+  );
+  assert.equal(newWriteCalled, false);
+
+  const reloadApplied = [];
+  await assert.rejects(
+    queue.reloadAuthority(async () => { throw new Error('graph reload offline'); }),
+    /graph reload offline/,
+  );
+  assert.equal(queue.authorityUnknownRef.current, unknown);
+  await assert.rejects(
+    queue.reloadAuthority(async () => ({ graph: true })),
+    error => error.code === 'AUTHORITY_UNKNOWN',
+  );
+  assert.equal(queue.authorityUnknownRef.current, unknown);
+  await queue.reloadAuthority(
+    async () => ({ sceneToken: 'scene-authoritative', graph: true }),
+    graph => reloadApplied.push(graph.sceneToken),
+  );
+  assert.deepEqual(reloadApplied, ['scene-authoritative']);
+  assert.equal(queue.authorityUnknownRef.current, null);
+  assert.equal(queue.authorityRef.current, 'scene-authoritative');
+  const recovered = await queue.enqueue(async () => {
+    requests.push('recovered-write');
+    return { sceneToken: 'scene-next' };
+  });
+  assert.equal(recovered.sceneToken, 'scene-next');
+  assert.deepEqual(requests, ['unknown', 'recovered-write']);
   assert.equal(queue.pendingRef.current, 0);
 });
 

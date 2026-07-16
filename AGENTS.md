@@ -65,8 +65,10 @@ npm run scan         # 仅扫描，输出统计
   4518 人工尾窗证伪由始终可见按钮在真实 selection 事务 live 后武装只读 rAF+timer 双时钟观察，只由 Computer Use 真实手工具拖动触发；fixture 不写相机/viewport、不派发输入，timer 只补捕 resuming 且绝不充当 shield 帧样本，捕获后只调 production exitDrawing 并延迟 dirty closing export 取样。每次武装在旧 cleanup 完成后分配唯一 run token/scenario 和 call 起点，且只接受精确匹配 production closing revision 的导出；旧观察器/timeout/fail 不得覆盖新轮 UI。LE-010 原始证据必须恰好三轮 fresh hard refresh，每轮保留严格九步 action、baseline→selectionLive→highFrequencyLive→tailPass→final 五阶段 production snapshot，以及 Shift+1/2/3 的 before/after/target 有限数样本。
   LE-010 证据来源另设硬门：URL 逐字固定为 4518 interaction，每轮 address/selection/tail 三张 Computer Use PNG 共九张，action 以 artifact ID 一一引用；raw 与截图只能位于当前 candidate evidence 目录且不得是软链或越界路径，gate 当场复算 byteLength/SHA256、解析 PNG IHDR/IEND 与尺寸，并把完整 artifact 元数据写进受 manifest 哈希的 behavior log。Judge 仍须打开九图确认地址栏、live 编辑器与 PASS 阶段；任何 4517、伪 source/proof、旧 candidate 或复用截图都失败。
   首次 new 事务里，本次 primary/左键手势新增且达到宽≥400、高≥300、面积≥120000 的实心 rectangle/ellipse/diamond，在 pointerup 后等 Excal change 稳定两帧即只 signal 一次既有 exitDrawing；selection、透明/小形状、旧元素编辑、IME 与已 rebase 事务不自动退场。唯一提交链再写入 below=true，绑定文字随宿主沉层，完整静态帧交接成功后 toast 提供按成功代际守卫的整快照撤销。屏幕 worldOverride、提交队列与持久化 props 三真相只在 idle 且 props 同引用追上 override 或当前队列快照时收口；撤销上屏前稳定排空等待期间追加的 tail，并在函数式换屏瞬间复核无 pending、代际与编辑门，后续成功不覆盖、后续失败仍恢复。普通态绘图动作串行提交，每笔到队首才基于上一成功快照变换，失败不推进基线也不毒死后续。沉层点击让位卡片，浮层命中仍跟着视觉顺序
-- **容器承载律 (FigJam/Miro 共识)**: 墨迹中心落在街区/画板内就跟容器走——容器拖动、自动整理、撤销整理三路都量差平移锚定墨迹
-  （面积小者优先认领，绑定标签随宿主）；小地图画一切：MiniMapInk 镜像 minimap 的 svg viewBox 把区域底板与批注投进缩略图（Miro 式地标定向）
+- **容器承载律 (FigJam/Miro 共识)**: 墨迹中心落在街区/画板内就跟容器走——direct 拖动走单容器 carry，bridge 只在 RF node.position 已进 DOM 的 layout effect 同步并从同一点 DROP，禁止 pointer-derived CSS 抢跑；
+  自动整理与撤销以 production buildGraph 同步规划 before/after，冻结 rendered world 的全局互斥 anchors，再用一次 batch carry 在同一 scene lock/CAS/journal/receipt 内原子替换 layout 与平移 drawing；多 delta DOM bridge 只在精确目标 generation 进 DOM 后清除。
+  commit 与 status 同时失败即以 AUTHORITY_UNKNOWN 毒化 scene mutation queue：已排队但未 request 与新写一律阻断，只有成功读取带 sceneToken 的权威 graph 才解除。
+  面积小者优先认领、绑定标签随宿主；小地图画一切：MiniMapInk 镜像 minimap 的 svg viewBox 把区域底板与批注投进缩略图（Miro 式地标定向）
 - **绘图删除不藏在模式里**: 普通模式点击绘图描边带=一键进选绘图并选中（Delete 即删，Esc 返回），右键绘图=“选中编辑/删除此绘图”（删除过确认、即时落盘）；pane 与一切节点同河——含会话卡/工作区（视觉最上层者赢，按钮/输入/nodrag 功能件/连接点/拖动把手除外）；空心形状中空区穿透给底下卡片，命中检测是纯函数可证伪
 - **整理只动几何**: 自动整理原子重置 x/y/w/h 但保留 layout.d 人工归属；每次成功整理覆盖旧票据，toast 与 Cmd/Ctrl+Z 只撤最近一步
 - **锚点不等于重叠许可**: 手工位置优先，但新增会话/工作区令成员或容器长大时，纯布局层必须确定性顺延避让且不暗写 layout.json
