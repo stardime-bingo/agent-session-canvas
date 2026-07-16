@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 @excalidraw/excalidraw 与局部事务 elements/files；持久化主权由 FlowCanvas 的全量队列持有
- * [OUTPUT]: 对外提供仅在编辑态挂载的 DrawLayer；维护/flush/freeze 局部 draft、上报 IME 周期、在手势跟踪前排除编辑器功能岛、识别新事务单次大底板落笔，并仅在 opening/resume 同步对齐 RF viewport
+ * [OUTPUT]: 对外提供仅在编辑态挂载的 DrawLayer；维护/flush/freeze 局部 draft、水合后上报本地 journal、上报 IME 周期、在手势跟踪前排除编辑器功能岛、识别新事务单次大底板落笔，并仅在 opening/resume 同步对齐 RF viewport
  * [POS]: 临时目标事务编辑器；绝不直接保存局部副本，普通态与未选目标始终不挂载
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -12,7 +12,7 @@ import {
   setDrawingElementPlane, translateDrawingElements,
 } from './drawing.js';
 
-export default forwardRef(function DrawLayer({ active, visible = true, initialElements, initialFiles, autoExitLargeNew = false, onToolChange, onReady, onDraftPageHide, onExitToCanvas, onAutoExitLargeNew, onCompositionChange }, ref) {
+export default forwardRef(function DrawLayer({ active, visible = true, initialElements, initialFiles, autoExitLargeNew = false, onToolChange, onReady, onDraftChange, onDraftLocalFlush, onExitToCanvas, onAutoExitLargeNew, onCompositionChange }, ref) {
   const apiRef = useRef(null);
   const rootRef = useRef(null);
   const composingRef = useRef(false);
@@ -58,12 +58,17 @@ export default forwardRef(function DrawLayer({ active, visible = true, initialEl
     autoExitRafRef.current = requestAnimationFrame(frame);
   };
 
-  // 关标签页/刷新时只把局部 draft 交给父层；父层合并全量世界后才可 best-effort 保存。
+  // 关标签页/切后台只 flush 同源本地 journal；绝不在尾窗发网络请求。
   useEffect(() => {
-    const onHide = () => onDraftPageHide?.(draftSnapshot());
+    const onHide = () => onDraftLocalFlush?.();
+    const onVisibility = () => { if (document.visibilityState === 'hidden') onHide(); };
     window.addEventListener('pagehide', onHide);
-    return () => window.removeEventListener('pagehide', onHide);
-  }, []);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('pagehide', onHide);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [onDraftLocalFlush]);
 
   useEffect(() => {
     if (!active || !visible || !autoExitLargeNew) cancelAutoExit();
@@ -210,6 +215,9 @@ export default forwardRef(function DrawLayer({ active, visible = true, initialEl
             autoExitRef.current = changed.state;
           }
           advanceHandshake('change', appState?.activeTool?.type);
+          if (handshakeRef.current.ready) {
+            onDraftChange?.(drawingSnapshot(elements, latestFiles.current));
+          }
         }}
         UIOptions={{
           canvasActions: {

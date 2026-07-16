@@ -1,7 +1,7 @@
 /**
  * [INPUT]: Excalidraw 的元素数组与 BinaryFiles 字典
  * [OUTPUT]: 提供已提交绘图的过滤/删除/沉浮/平移纯变换、整理的单步墨迹撤销票据、包含 Excalidraw `.Island` 的唯一功能件命中排除表、首次新建大底板共享判定/落笔退场状态机/自动沉层、目标关系闭包/局部编辑事务/全量合并、
- *           可稳定排空且按成功代际守卫撤销的串行提交队列、屏幕override/外部props/队列三真相同步门、opening request 身份门/已对齐 resuming 相机事务与分期退出策略/可渲染输入盾呈现策略/IME 周期状态机/隐藏 opening 取消/退出回执/closing 收口步、编辑器就绪与几何互斥纯门、资产快照/命中/已 paint 帧真相与有界重试、双平面固定 z-order 槽内 hole 分组签名与 ready/in-flight 工作路由/包围盒与承载判定
+ *           可返回本笔 receipt、稳定排空且按成功代际守卫撤销的串行提交队列、屏幕override/外部props/队列三真相同步门、opening request 身份门/已对齐 resuming 相机事务与分期退出策略/可渲染输入盾呈现策略/IME 周期状态机/隐藏 opening 取消/退出回执/closing 收口步、编辑器就绪与几何互斥纯门、资产 delta/快照/命中/已 paint 帧真相与有界重试、双平面固定 z-order 槽内 hole 分组签名与 ready/in-flight 工作路由/包围盒与承载判定
  * [POS]: 绘图的纯数据内核；静态世界层、临时编辑器与普通态动作共用，全部可由 node:test 证伪
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -322,6 +322,25 @@ export function drawingSnapshot(elements = [], files = {}) {
   const kept = {};
   for (const id of [...used].sort()) if (files?.[id]) kept[id] = files[id];
   return { elements: committed, files: kept };
+}
+
+const normalizedDrawingFile = (id, file = {}) => ({
+  id,
+  mimeType: typeof file.mimeType === 'string' ? file.mimeType : 'application/octet-stream',
+  dataURL: file.dataURL,
+  created: Number.isFinite(file.created) ? file.created : 0,
+  ...(Number.isFinite(file.lastRetrieved) ? { lastRetrieved: file.lastRetrieved } : {}),
+});
+
+// BinaryFiles 只按服务端持久化的规范字段比较；对象换引用但内容相同时绝不重传 base64。
+export function drawingFilesDelta(previous = {}, next = {}) {
+  const delta = {};
+  for (const id of Object.keys(next).sort()) {
+    const file = normalizedDrawingFile(id, next[id]);
+    const before = previous[id] && normalizedDrawingFile(id, previous[id]);
+    if (!before || JSON.stringify(before) !== JSON.stringify(file)) delta[id] = file;
+  }
+  return delta;
 }
 
 // ============================================================
@@ -715,23 +734,24 @@ export function createDrawingCommitQueue(initialSnapshot = {}, persist) {
   let tail = Promise.resolve();
   let pending = 0;
 
-  const submit = transform => {
+  const submitWithReceipt = transform => {
     pending++;
     const run = tail.then(async () => {
       const base = lastSuccessful;
       const transformed = transform(base);
-      if (transformed == null) return base;
+      if (transformed == null) return { snapshot: base, receipt: null };
       const draft = Array.isArray(transformed)
         ? { elements: transformed, files: base.files }
         : transformed;
       const next = drawingSnapshot(draft.elements, draft.files ?? base.files);
-      await persist(next);
+      const receipt = await persist(next, base);
       lastSuccessful = next;
-      return next;
+      return { snapshot: next, receipt };
     });
     tail = run.catch(() => {}).finally(() => { pending--; });
     return run;
   };
+  const submit = transform => submitWithReceipt(transform).then(result => result.snapshot);
 
   // 真排空必须追赶等待创建后追加的 tail；额外一个 microtask 让同轮 promise reaction 先完成追加。
   const whenIdle = async () => {
@@ -745,6 +765,7 @@ export function createDrawingCommitQueue(initialSnapshot = {}, persist) {
 
   return {
     submit,
+    submitWithReceipt,
     // 撤销在真正轮到队首时按成功快照对象身份判代；后续失败不换代，后续成功必使旧撤销失效。
     guardedRestore(expectedSnapshot, previousSnapshot) {
       let restored = false;

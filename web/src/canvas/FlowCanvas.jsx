@@ -4,7 +4,7 @@
  *           增量成员防重叠、Figma 式框选/平移/触控板手势、滚轮双模（触控板平移/鼠标缩放+模式切换钮）、
  *           容器缩放定桩、全画布落空连线选择（含就地打开会话上下文）、缩放感知连接点、原生绘图选择/画笔、
  *           committed ink 与节点共用 ViewportPortal 唯一相机、commit-bound requested generation 与已 paint rendered world 统一像素/命中/MiniMap、cold/stale 可见回执、编辑态 wheel/key/Safari gesture/pointer 全入口 RF 相机事务（Shift+1/2/3 统一全景 fit）、唯一 Excal 对齐入口与成功/acquire/cleanup 只读计数及 live 隐藏期同层输入盾/可见缩放岛、
- *           目标关系闭包局部事务、新建大底板落笔即退场/自动沉层与稳定排空撤销、屏幕/队列/持久化三真相收口、opening request 身份门与纯取消、无双影帧交接与真实阶段回执、
+ *           目标关系闭包局部事务、IndexedDB 单 active 草稿精确恢复/条件清理/closing 失败按 committed token 续写、新建大底板落笔即退场/自动沉层与稳定排空撤销、屏幕/队列/持久化三真相收口、opening request 身份门与纯取消、无双影帧交接与真实阶段回执、
  *           普通模式绘图命中（pane/容器面同河、nodrag/连接点等功能件优先）与 Backspace 删除治理；4518 seam 只驱动真实 open/exit 动作并替换 Ink exporter
  *           direct 容器承载只在 RF node.position 已进 DOM 的 layout effect 同步桥与最终 DROP；同步 buildGraph batch 整理规划共用 rendered world 所有权，batch 多 delta bridge 只由精确目标 generation DOM-ready 清除且向 4518 probe 只读公开其代际/桥状态；事务受 App 场景变更队列硬闸门约束，Escape/pointercancel 只取消当前指针的 DRAGGING 并阻断迟到 DROP
  * [POS]: canvas 的画布引擎。归属律：layout.d 手动指定 > 路径推断；容器永远生长包住成员；
@@ -26,6 +26,7 @@ import {
   deleteDrawingElement, DRAWING_HIT_BLOCK, drawingCameraExitPolicy, drawingCameraPresentation, drawingCameraStep, drawingClosingHandoffStep, drawingCompositionStep, drawingExitAction, drawingExitFailureNotice, drawingFrameHitElements, drawingFrameTruthStep, drawingOpeningRequestCurrent, drawingRestoredWorldOverride, drawingTransactionVisibleElements, drawingWorldInputStep, drawingWorldSyncStep, hitDrawingElement, mergeDrawingTransaction,
   setDrawingElementPlane,
 } from './drawing.js';
+import { createDrawingDraftStore, drawingDraftClosureFingerprint } from './drawing-draft-store.js';
 import InkWorldLayer from './InkWorldLayer.jsx';
 import MiniMapInk from './MiniMapInk.jsx';
 import {
@@ -133,14 +134,26 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   const [carryRetryToken, setCarryRetryToken] = useState(0);
   const [batchCarryRetryable, setBatchCarryRetryable] = useState(false);
   const clearSelectionRef = useRef(() => {});       // 进绘图前清 RF 选中——Delete 不许一键双雷（定义在下方，ref 解前向引用）
+  const sceneTokenRef = useRef(sceneToken);
+  sceneTokenRef.current = sceneToken;
   const drawingCommitQueueRef = useRef(null);
   if (!drawingCommitQueueRef.current) {
     drawingCommitQueueRef.current = createDrawingCommitQueue(
       { elements: canvas?.drawing, files: canvas?.drawingFiles },
-      snapshot => onCanvasAction('drawingCommit', snapshot),
+      async (next, previousSuccessful) => {
+        const receipt = await onCanvasAction('drawingCommit', { next, previousSuccessful });
+        if (typeof receipt?.sceneToken === 'string') sceneTokenRef.current = receipt.sceneToken;
+        return receipt;
+      },
     );
   }
   const drawingCommitQueue = drawingCommitQueueRef.current;
+  const draftJournalRef = useRef(null);
+  if (!draftJournalRef.current) draftJournalRef.current = createDrawingDraftStore({
+    onError: () => toast('本地草稿恢复不可用；本次仍可正常保存到画布', 'error'),
+  });
+  const draftJournal = draftJournalRef.current;
+  const draftRequestRef = useRef(null);
   const updateDrawVisible = useCallback(visible => {
     drawVisibleRef.current = visible;
     setDrawVisible(visible);
@@ -646,6 +659,8 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       setEditSeed(null);
       editTransactionRef.current = null;
       editBaseRef.current = null;
+      draftJournal.deactivate(draftRequestRef.current);
+      draftRequestRef.current = null;
       openingRef.current = false;
       openingPromiseRef.current = null;
       penActiveRef.current = false;
@@ -685,6 +700,8 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       setEditSeed(null);
       editTransactionRef.current = null;
       editBaseRef.current = null;
+      draftJournal.deactivate(draftRequestRef.current);
+      draftRequestRef.current = null;
       openingRef.current = action.opening;
       openingRequestRef.current = null;
       openingPromiseRef.current = action.openingPromise;
@@ -711,19 +728,26 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     cameraPendingVpRef.current = null;
     if (!cameraExit.keepPreview) setDraftPreview(null);
     let persisted = false;
+    let committedSceneToken = null;
     try {
       const draft = await drawRef.current?.flush();
       const transaction = editTransactionRef.current;
       if (!draft || !transaction) throw new Error('绘图编辑器尚未就绪');
+      await draftJournal.flush(draft);
       let preparedDraft = draft;
       let newAutoSinkTicket = null;
-      const merged = await drawingCommitQueue.submit(base => {
+      const committed = await drawingCommitQueue.submitWithReceipt(base => {
         const prepared = autoSinkLargeNewDrawingDraft(base, transaction, draft);
         preparedDraft = prepared.snapshot;
         if (prepared.sunkIds.length) newAutoSinkTicket = { before: base, sunkIds: prepared.sunkIds };
         return mergeDrawingTransaction(base, transaction, prepared.snapshot);
       });
+      const merged = committed.snapshot;
       persisted = true;
+      committedSceneToken = committed.receipt?.sceneToken;
+      if (typeof committedSceneToken !== 'string' || !committedSceneToken) {
+        throw new Error('绘图提交回执缺少 sceneToken');
+      }
       if (newAutoSinkTicket) {
         autoSinkUndoRef.current = { ...newAutoSinkTicket, after: merged };
         // static frame 交接若失败，live draft 也必须带着同一层级真相，重试不能把底板浮回去。
@@ -740,6 +764,11 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       // live draft 继续填着旧 hole；只有完整 merged SVG 进 DOM 后才会在 layout effect 同步卸载。
       setWorldOverride({ elements: merged.elements, files: merged.files, excludedIds: NO_DRAWING_IDS, revision });
       const closedOk = await closed;
+      if (closedOk && draftRequestRef.current) {
+        const identity = draftRequestRef.current;
+        await draftJournal.clear(identity);
+        if (draftRequestRef.current === identity) draftRequestRef.current = null;
+      }
       const autoSinkTicket = autoSinkUndoRef.current;
       autoSinkUndoRef.current = null;
       // closing 失败后若用户又成功提交过，旧票据即使终于交接成功也不得冒充本代自动沉底。
@@ -783,6 +812,20 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       }
       return closedOk;
     } catch (err) {
+      if (persisted && editBaseRef.current && editTransactionRef.current) {
+        const liveDraft = await drawRef.current?.flush();
+        const requestId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+        const base = editBaseRef.current;
+        const transaction = editTransactionRef.current;
+        draftRequestRef.current = draftJournal.begin({
+          requestId,
+          sceneToken: committedSceneToken || sceneTokenRef.current,
+          closureFingerprint: drawingDraftClosureFingerprint(transaction),
+          baselineSnapshot: base,
+          mergeDraft: nextDraft => mergeDrawingTransaction(base, transaction, nextDraft),
+        });
+        if (liveDraft) await draftJournal.flush(liveDraft);
+      }
       const notice = drawingExitFailureNotice({ persisted, errorMessage: err.message });
       toast(notice.message, 'error');
       setDrawOpening(false);
@@ -865,7 +908,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     }
 
     // 第一条进入请求在任何 await 前封门；其后的普通态提交必须失败，不能越过 drain。
-    const openingRequest = {};
+    const openingRequest = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
     openingRequestRef.current = openingRequest;
     openingRef.current = true;
     resetDrawingCamera(false);
@@ -873,13 +916,36 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     let resolveReady;
     const ready = new Promise(resolve => { resolveReady = resolve; });
     openingReadyResolveRef.current = resolveReady;
-    const openingPromise = drawingCommitQueue.whenIdle().then(seed => {
+    const openingPromise = drawingCommitQueue.whenIdle().then(async seed => {
       if (!drawingOpeningRequestCurrent(openingRequestRef.current, openingRequest)) return false;
       const transaction = createDrawingTransaction(seed, selectId || null);
       if (!transaction) throw new Error('目标绘图刚刚发生变化，请重新选择');
+      const closureFingerprint = drawingDraftClosureFingerprint(transaction);
+      const recovery = await draftJournal.recover({
+        sceneToken: sceneTokenRef.current,
+        closureFingerprint,
+        baselineSnapshot: seed,
+      });
+      if (!drawingOpeningRequestCurrent(openingRequestRef.current, openingRequest)) return false;
+      if (recovery.status === 'conflict') {
+        throw new Error('本地绘图草稿与当前画布冲突；草稿已保留，已阻止自动覆盖');
+      }
+      const recovered = recovery.status === 'restored' ? recovery.record : null;
+      const requestId = recovered?.requestId
+        || globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+      const draft = recovered?.draft || transaction;
       editBaseRef.current = seed;
       editTransactionRef.current = transaction;
-      setEditSeed({ ...transaction, openingRequest });
+      draftRequestRef.current = draftJournal.begin({
+        requestId,
+        sceneToken: sceneTokenRef.current,
+        closureFingerprint,
+        baselineSnapshot: seed,
+        mergeDraft: nextDraft => mergeDrawingTransaction(seed, transaction, nextDraft),
+        epoch: recovered?.epoch,
+        seq: recovered?.seq || 0,
+      });
+      setEditSeed({ ...transaction, ...draft, openingRequest });
       updateDrawVisible(false);
       penActiveRef.current = true;
       setPenActive(true);
@@ -895,6 +961,8 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       setEditSeed(null);
       editTransactionRef.current = null;
       editBaseRef.current = null;
+      draftJournal.deactivate(draftRequestRef.current);
+      draftRequestRef.current = null;
       penActiveRef.current = false;
       setPenActive(false);
       toast(`打开绘图失败：${err.message}`, 'error');
@@ -902,7 +970,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     });
     openingPromiseRef.current = openingPromise;
     return openingPromise;
-  }, [carryBlocksDrawing, drawingCommitQueue, exitDrawing, geometryPendingRef, resetDrawingCamera, updateDrawVisible]);
+  }, [carryBlocksDrawing, draftJournal, drawingCommitQueue, exitDrawing, geometryPendingRef, resetDrawingCamera, updateDrawVisible]);
 
   const togglePen = useCallback(() => {
     if (penActiveRef.current && !openingRef.current) exitDrawing();
@@ -2088,10 +2156,12 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
           }}
           onExitToCanvas={exitToCanvas}
           onAutoExitLargeNew={autoExitLargeNewDrawing}
-          onDraftPageHide={draft => {
+          onDraftChange={draft => {
             const transaction = editTransactionRef.current;
-            if (transaction) drawingCommitQueue.submit(base => mergeDrawingTransaction(base, transaction, draft)).catch(() => {});
+            const requestId = draftRequestRef.current;
+            if (transaction && requestId) draftJournal.schedule(draft);
           }}
+          onDraftLocalFlush={() => { void draftJournal.flush(); }}
           onReady={controller => {
             const openingRequest = editSeed.openingRequest;
             if (!drawingOpeningRequestCurrent(openingRequestRef.current, openingRequest)) return;
@@ -2107,6 +2177,8 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
               setEditSeed(null);
               editTransactionRef.current = null;
               editBaseRef.current = null;
+              draftJournal.deactivate(draftRequestRef.current);
+              draftRequestRef.current = null;
               openingRef.current = false;
               openingRequestRef.current = null;
               openingPromiseRef.current = null;

@@ -1,7 +1,7 @@
 /**
  * [INPUT]: 依赖 store 的 JSON 原子读写与 data 目录
- * [OUTPUT]: 提供 Excalidraw BinaryFiles 的校验、独立落盘与回读
- * [POS]: server 的绘图图片资产仓；与轻量 canvas.json 分离，避免移动便签时反复重写大图
+ * [OUTPUT]: 提供 Excalidraw BinaryFiles 的规范化、引用收集、独立落盘与回读
+ * [POS]: server 的绘图图片资产仓；事务性写入由 canvas repository 持有，此处保留兼容读写原语
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
 
@@ -25,6 +25,12 @@ export function normalizeDrawingFiles(files) {
     };
   }
   return clean;
+}
+
+export function drawingFileIds(elements = []) {
+  return [...new Set(elements
+    .filter(element => !element?.isDeleted && element?.type === 'image' && typeof element.fileId === 'string')
+    .map(element => element.fileId))].sort();
 }
 
 export function loadDrawingFiles(dataDir) {

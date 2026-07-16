@@ -1,6 +1,8 @@
 /**
- * Durable canvas/layout repository and direct/batch semantic container-carry service.
- * Every scene read/write shares one cross-process lock; drawing files are out of scope.
+ * [INPUT]: canvas/layout/drawing-files 文档与 carry/drawing mutation command
+ * [OUTPUT]: 提供共用跨进程 scene lock 的 strict read、CAS、durable journal/receipt/status 与 graph scene/files 快照
+ * [POS]: 画布持久化权威；container carry 与 drawing asset transaction 共用恢复/锁原语
+ * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -8,6 +10,7 @@ import crypto from 'node:crypto';
 import {
   applyBatchCarry, applyCarry, validateBatchCarryCommand, validateCarryCommand,
 } from '../shared/canvas-carry.mjs';
+import { drawingFileIds, normalizeDrawingFiles } from './drawing-files.mjs';
 
 const EMPTY_CANVAS = Object.freeze({ edges: [], notes: [], boards: [], drawing: [] });
 const sleep = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -72,6 +75,9 @@ export function createCanvasRepository(dataDir, options = {}) {
   const lockDir = path.join(dataDir, '.canvas-scene.lock');
   const journalFile = path.join(dataDir, 'canvas-carry-journal.json');
   const receiptsDir = path.join(dataDir, 'canvas-carry-receipts');
+  const drawingFilesFile = path.join(dataDir, 'drawing-files.json');
+  const drawingJournalFile = path.join(dataDir, 'canvas-drawing-journal.json');
+  const drawingReceiptsDir = path.join(dataDir, 'canvas-drawing-receipts');
   fs.mkdirSync(dataDir, { recursive: true });
 
   const fault = stage => options.fault?.(stage);
@@ -121,6 +127,56 @@ export function createCanvasRepository(dataDir, options = {}) {
     }
     assertJson(scene, '$', code);
     return scene;
+  };
+  const validateCanvas = (canvas, code = 'SCENE_CORRUPT', label = 'canvas') =>
+    validateScene({ canvas, layout: {} }, code, label).canvas;
+  const readDrawingFilesUnlocked = () => {
+    const raw = strictRead(drawingFilesFile, {}, 'drawing files', 'DRAWING_FILES_CORRUPT');
+    const normalized = normalizeDrawingFiles(raw);
+    if (canonical(raw) !== canonical(normalized)) {
+      corrupt('DRAWING_FILES_CORRUPT', 'drawing files schema mismatch');
+    }
+    return normalized;
+  };
+  const validateDrawingReferences = (elements, files, code = 'DRAWING_FILE_MISSING') => {
+    const missing = drawingFileIds(elements).filter(id => !Object.hasOwn(files, id));
+    if (missing.length) throw new SceneError(409, code, `drawing image file is missing: ${missing[0]}`);
+    return drawingFileIds(elements);
+  };
+  const validateDrawingCommand = raw => {
+    if (!exactKeys(raw, ['opId', 'baseToken', 'elements', 'files'])
+      || typeof raw.opId !== 'string' || !raw.opId
+      || !tokenPattern.test(raw.baseToken) || !Array.isArray(raw.elements)
+      || !plainObject(raw.files)) {
+      throw new SceneError(400, 'INVALID_DRAWING_COMMIT', 'drawing commit schema mismatch');
+    }
+    const canvas = validateCanvas({ ...clone(EMPTY_CANVAS), drawing: clone(raw.elements) },
+      'INVALID_DRAWING_COMMIT', 'drawing commit');
+    const files = normalizeDrawingFiles(raw.files);
+    if (canonical(files) !== canonical(raw.files)) {
+      throw new SceneError(400, 'INVALID_DRAWING_COMMIT', 'drawing file delta schema mismatch');
+    }
+    const command = { opId: raw.opId, baseToken: raw.baseToken, elements: canvas.drawing, files };
+    return {
+      ...command,
+      commandHash: crypto.createHash('sha256').update(canonical(command)).digest('hex'),
+    };
+  };
+  const validateDrawingResult = (result, opId, commandHash, code) => {
+    if (!exactKeys(result, ['status', 'opId', 'sceneToken', 'drawing', 'fileIds'])
+      || result.status !== 'committed' || result.opId !== opId
+      || !tokenPattern.test(result.sceneToken) || !Array.isArray(result.drawing)
+      || !Array.isArray(result.fileIds)
+      || new Set(result.fileIds).size !== result.fileIds.length
+      || result.fileIds.some(id => typeof id !== 'string')) {
+      corrupt(code, 'drawing result schema mismatch');
+    }
+    validateCanvas({ ...clone(EMPTY_CANVAS), drawing: result.drawing }, code, 'drawing result');
+    if (canonical(drawingFileIds(result.drawing)) !== canonical(result.fileIds)) {
+      corrupt(code, 'drawing result fileIds mismatch');
+    }
+    if (!tokenPattern.test(commandHash)) corrupt(code, 'drawing command hash mismatch');
+    return result;
   };
   const validateDirectResult = (result, opId, code) => {
     if (!exactKeys(result, ['status', 'opId', 'sceneToken', 'container', 'drawing', 'movedIds'])
@@ -320,6 +376,63 @@ export function createCanvasRepository(dataDir, options = {}) {
     if (!fs.existsSync(journalFile)) return null;
     return validateJournal(strictRead(journalFile, {}, 'carry journal', 'JOURNAL_CORRUPT'));
   };
+  const drawingReceiptFile = opId => path.join(
+    drawingReceiptsDir,
+    `${crypto.createHash('sha256').update(opId).digest('hex')}.json`,
+  );
+  const validateDrawingReceipt = (receipt, opId) => {
+    const code = 'DRAWING_RECEIPT_CORRUPT';
+    if (!exactKeys(receipt, ['schemaVersion', 'opId', 'commandHash', 'committedAt', 'result'])
+      || receipt.schemaVersion !== 1 || receipt.opId !== opId
+      || !isoTimestamp(receipt.committedAt)) {
+      corrupt(code, 'drawing receipt schema mismatch');
+    }
+    validateDrawingResult(receipt.result, opId, receipt.commandHash, code);
+    return receipt;
+  };
+  const readDrawingReceipt = opId => {
+    const file = drawingReceiptFile(opId);
+    if (!fs.existsSync(file)) return null;
+    return validateDrawingReceipt(
+      strictRead(file, {}, 'drawing receipt', 'DRAWING_RECEIPT_CORRUPT'),
+      opId,
+    );
+  };
+  const validateDrawingJournal = (journal, layout) => {
+    const code = 'DRAWING_JOURNAL_CORRUPT';
+    if (!exactKeys(journal, [
+      'schemaVersion', 'kind', 'phase', 'opId', 'commandHash', 'baseToken',
+      'afterToken', 'createdAt', 'beforeCanvas', 'afterCanvas', 'result',
+    ]) || journal.schemaVersion !== 1 || journal.kind !== 'drawing'
+      || !['prepared', 'committed'].includes(journal.phase)
+      || typeof journal.opId !== 'string' || !journal.opId
+      || !tokenPattern.test(journal.commandHash)
+      || !tokenPattern.test(journal.baseToken) || !tokenPattern.test(journal.afterToken)
+      || !isoTimestamp(journal.createdAt)) {
+      corrupt(code, 'drawing journal schema mismatch');
+    }
+    validateCanvas(journal.beforeCanvas, code, 'drawing journal before');
+    validateCanvas(journal.afterCanvas, code, 'drawing journal after');
+    validateDrawingResult(journal.result, journal.opId, journal.commandHash, code);
+    if (canonical(journal.afterCanvas.drawing) !== canonical(journal.result.drawing)
+      || journal.afterToken !== journal.result.sceneToken
+      || sceneToken({ canvas: journal.beforeCanvas, layout }) !== journal.baseToken
+      || sceneToken({ canvas: journal.afterCanvas, layout }) !== journal.afterToken) {
+      corrupt(code, 'drawing journal result mismatch');
+    }
+    const stableAfter = clone(journal.afterCanvas);
+    stableAfter.drawing = journal.beforeCanvas.drawing;
+    if (canonical(stableAfter) !== canonical(journal.beforeCanvas)) {
+      corrupt(code, 'drawing journal unrelated canvas mismatch');
+    }
+    return journal;
+  };
+  const readDrawingJournal = layout => {
+    if (!fs.existsSync(drawingJournalFile)) return null;
+    return validateDrawingJournal(strictRead(
+      drawingJournalFile, {}, 'drawing journal', 'DRAWING_JOURNAL_CORRUPT',
+    ), layout);
+  };
   const writeScene = (scene, stagePrefix) => {
     validateScene(scene);
     durableWrite(canvasFile, scene.canvas, `${stagePrefix}:canvas`);
@@ -342,6 +455,49 @@ export function createCanvasRepository(dataDir, options = {}) {
       schemaVersion: journal.schemaVersion, opId: journal.opId, committedAt: journal.createdAt, result: journal.result,
     }, 'recover:receipt');
     durableDelete(journalFile);
+  };
+  const pruneDrawingFilesUnlocked = (scene, files) => {
+    const used = validateDrawingReferences(scene.canvas.drawing, files);
+    const pruned = Object.fromEntries(used.map(id => [id, files[id]]));
+    if (canonical(pruned) === canonical(files)) return files;
+    try {
+      durableWrite(drawingFilesFile, pruned, 'drawing:prune');
+      return pruned;
+    } catch {
+      return files; // orphan assets are safe; cleanup must never downgrade a durable commit
+    }
+  };
+  const recoverDrawingUnlocked = () => {
+    const scene = readUnlocked();
+    const journal = readDrawingJournal(scene.layout);
+    if (!journal) return;
+    const files = readDrawingFilesUnlocked();
+    if (journal.phase === 'prepared') {
+      durableWrite(canvasFile, journal.beforeCanvas, 'drawing-recover-prepared:canvas');
+      durableDelete(drawingJournalFile);
+      pruneDrawingFilesUnlocked({ ...scene, canvas: journal.beforeCanvas }, files);
+      return;
+    }
+    validateDrawingReferences(journal.afterCanvas.drawing, files);
+    const existing = readDrawingReceipt(journal.opId);
+    if (existing && (existing.commandHash !== journal.commandHash
+      || canonical(existing.result) !== canonical(journal.result))) {
+      throw new SceneError(503, 'DRAWING_RECEIPT_CORRUPT', 'drawing journal and receipt disagree');
+    }
+    durableWrite(canvasFile, journal.afterCanvas, 'drawing-recover-committed:canvas');
+    if (!existing) durableWrite(drawingReceiptFile(journal.opId), {
+      schemaVersion: 1,
+      opId: journal.opId,
+      commandHash: journal.commandHash,
+      committedAt: journal.createdAt,
+      result: journal.result,
+    }, 'drawing-recover:receipt');
+    durableDelete(drawingJournalFile);
+    pruneDrawingFilesUnlocked({ ...scene, canvas: journal.afterCanvas }, files);
+  };
+  const recoverAllUnlocked = () => {
+    recoverUnlocked();
+    recoverDrawingUnlocked();
   };
   const withLock = task => {
     const deadline = Date.now() + (options.lockTimeoutMs || 5000);
@@ -383,14 +539,24 @@ export function createCanvasRepository(dataDir, options = {}) {
   return Object.freeze({
     read() {
       return withLock(() => {
-        recoverUnlocked();
+        recoverAllUnlocked();
         const scene = readUnlocked();
         return { ...clone(scene), sceneToken: sceneToken(scene) };
       });
     },
+    readWithDrawingFiles() {
+      return withLock(() => {
+        recoverAllUnlocked();
+        const scene = readUnlocked();
+        const drawingFiles = readDrawingFilesUnlocked();
+        validateDrawingReferences(scene.canvas.drawing, drawingFiles);
+        const visibleFiles = pruneDrawingFilesUnlocked(scene, drawingFiles);
+        return { ...clone(scene), drawingFiles: clone(visibleFiles), sceneToken: sceneToken(scene) };
+      });
+    },
     mutate(mutator) {
       return withLock(() => {
-        recoverUnlocked();
+        recoverAllUnlocked();
         const before = readUnlocked();
         const draft = clone(before);
         const result = mutator(draft);
@@ -401,14 +567,14 @@ export function createCanvasRepository(dataDir, options = {}) {
       });
     },
     recover() {
-      return withLock(() => { recoverUnlocked(); return true; });
+      return withLock(() => { recoverAllUnlocked(); return true; });
     },
     carry(raw, context = {}) {
       let command;
       try { command = validateCarryCommand(raw); }
       catch (error) { throw new SceneError(400, 'INVALID_CARRY', error.message); }
       return withLock(() => {
-        recoverUnlocked();
+        recoverAllUnlocked();
         const prior = readReceipt(command.opId);
         if (prior) return clone(prior.result);
         const before = readUnlocked();
@@ -476,7 +642,7 @@ export function createCanvasRepository(dataDir, options = {}) {
       try { command = validateBatchCarryCommand(raw); }
       catch (error) { throw new SceneError(400, 'INVALID_BATCH_CARRY', error.message); }
       return withLock(() => {
-        recoverUnlocked();
+        recoverAllUnlocked();
         const prior = readReceipt(command.opId);
         if (prior) return clone(prior.result);
         const before = readUnlocked();
@@ -543,14 +709,99 @@ export function createCanvasRepository(dataDir, options = {}) {
         return clone(result);
       });
     },
+    commitDrawing(raw) {
+      const command = validateDrawingCommand(raw);
+      return withLock(() => {
+        recoverAllUnlocked();
+        const prior = readDrawingReceipt(command.opId);
+        if (prior) {
+          if (prior.commandHash !== command.commandHash) {
+            throw new SceneError(409, 'OP_ID_REUSED', 'drawing opId was already used with another payload');
+          }
+          return clone(prior.result);
+        }
+        const before = readUnlocked();
+        const currentFiles = readDrawingFilesUnlocked();
+        validateDrawingReferences(before.canvas.drawing, currentFiles);
+        const currentToken = sceneToken(before);
+        if (command.baseToken !== currentToken) {
+          throw new SceneError(409, 'SCENE_CONFLICT', 'canvas scene has changed', { sceneToken: currentToken });
+        }
+        const newFiles = {};
+        for (const [id, file] of Object.entries(command.files)) {
+          if (Object.hasOwn(currentFiles, id)
+            && currentFiles[id].dataURL !== file.dataURL) {
+            throw new SceneError(409, 'DRAWING_FILE_IMMUTABLE', `drawing file id cannot change: ${id}`);
+          }
+          if (!Object.hasOwn(currentFiles, id)) newFiles[id] = file;
+        }
+        const mergedFiles = { ...currentFiles, ...newFiles };
+        const fileIds = validateDrawingReferences(command.elements, mergedFiles);
+        const after = clone(before);
+        after.canvas.drawing = clone(command.elements);
+        const afterToken = sceneToken(after);
+        const result = {
+          status: 'committed',
+          opId: command.opId,
+          sceneToken: afterToken,
+          drawing: after.canvas.drawing,
+          fileIds,
+        };
+        const createdAt = new Date().toISOString();
+        const journal = {
+          schemaVersion: 1,
+          kind: 'drawing',
+          phase: 'prepared',
+          opId: command.opId,
+          commandHash: command.commandHash,
+          baseToken: command.baseToken,
+          afterToken,
+          createdAt,
+          beforeCanvas: before.canvas,
+          afterCanvas: after.canvas,
+          result,
+        };
+        if (canonical(mergedFiles) !== canonical(currentFiles)) {
+          durableWrite(drawingFilesFile, mergedFiles, 'drawing:assets');
+        }
+        durableWrite(drawingJournalFile, journal, 'drawing:prepared');
+        durableWrite(canvasFile, after.canvas, 'drawing:canvas');
+        durableWrite(drawingJournalFile, { ...journal, phase: 'committed' }, 'drawing:committed');
+        durableWrite(drawingReceiptFile(command.opId), {
+          schemaVersion: 1,
+          opId: command.opId,
+          commandHash: command.commandHash,
+          committedAt: new Date().toISOString(),
+          result,
+        }, 'drawing:receipt');
+        try {
+          fault('drawing:cleanup');
+          durableDelete(drawingJournalFile);
+        }
+        catch { /* durable receipt is authoritative; recovery will remove the journal */ }
+        pruneDrawingFilesUnlocked(after, mergedFiles);
+        return clone(result);
+      });
+    },
+    drawingStatus(opId) {
+      if (typeof opId !== 'string' || !opId) throw new SceneError(400, 'INVALID_OP_ID', 'opId is required');
+      return withLock(() => {
+        recoverAllUnlocked();
+        const receipt = readDrawingReceipt(opId);
+        return receipt ? clone(receipt.result) : { status: 'unknown', opId };
+      });
+    },
     status(opId) {
       if (typeof opId !== 'string' || !opId) throw new SceneError(400, 'INVALID_OP_ID', 'opId is required');
       return withLock(() => {
-        recoverUnlocked();
+        recoverAllUnlocked();
         const receipt = readReceipt(opId);
         return receipt ? clone(receipt.result) : { status: 'unknown', opId };
       });
     },
-    paths: Object.freeze({ canvasFile, layoutFile, journalFile, receiptsDir, lockDir }),
+    paths: Object.freeze({
+      canvasFile, layoutFile, journalFile, receiptsDir, lockDir,
+      drawingFilesFile, drawingJournalFile, drawingReceiptsDir,
+    }),
   });
 }
