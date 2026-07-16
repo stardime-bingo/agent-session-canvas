@@ -1,9 +1,11 @@
 /**
- * [INPUT]: 元素数量 300/800 与变更序号
+ * [INPUT]: 元素数量 300/800、变更序号与 canvas fixture Excal 静态资产根
  * [OUTPUT]: 确定性双平面 Excalidraw 元素、单平面变更与验收红线
  * [POS]: 4518 无持久化验收数据真相；不读真实 canvas/layout
  * [PROTOCOL]: 变更时更新此头部，然后检查 README/web/CLAUDE.md
  */
+
+globalThis.EXCALIDRAW_ASSET_PATH = '/';
 
 const COLORS = ['#dbeafe', '#dcfce7', '#fef3c7', '#fce7f3'];
 
@@ -42,7 +44,7 @@ export function createCanvasAcceptanceElements(size) {
     const below = index % 2 === 0;
     const base = baseElement(`fixture-${size}-${index}`, index, below);
     if (index % 5 === 4) {
-      const text = index === 4 ? '早期唯一字龘' : `自动化区 ${index}`;
+      const text = index === 4 ? 'Early unique Q' : `Automation zone ${index}`;
       return {
         ...base,
         type: 'text',
@@ -77,8 +79,8 @@ export function mutateBelowPlane(elements, tick) {
 export function mutateEarlyUniqueText(elements) {
   return elements.map(element => element.id.endsWith('-4') ? {
     ...element,
-    text: '早期唯一字靐',
-    originalText: '早期唯一字靐',
+    text: 'Early unique Z',
+    originalText: 'Early unique Z',
     version: element.version + 1,
     versionNonce: element.versionNonce + 104729,
   } : element);

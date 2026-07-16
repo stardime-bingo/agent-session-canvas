@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 独立样式文件，依赖系统 Inter/PingFang 字体栈
- * [OUTPUT]: 对外提供全局 CSS 变量、基础排版/面板/按钮、绘图 armed/opening/hole 帧交接与 cold/retrying/stale 视觉、缩放感知连接点与终端框/toast 皮肤
+ * [OUTPUT]: 对外提供全局 CSS 变量、基础排版/面板/按钮、绘图 armed/opening/hole 帧交接与 cold/retrying/stale 视觉、缩放感知连接点与终端框/可聚焦 toast/4518 fixture 皮肤
  * [POS]: web 的视觉唯一真相源——浅灰画布 + 纯白卡片 + Dify 蓝锚点 + 柔和阴影，动画只走合成器
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -414,17 +414,46 @@ input.search:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--ac
   display: flex; align-items: center; gap: 12px;
   box-shadow: var(--shadow-drag); max-width: 70vw;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  animation: toast-in 0.22s var(--ease-panel);
+  animation: toast-in 0.22s var(--ease-panel); pointer-events: auto;
 }
-.toast:has(.toast-action) { pointer-events: auto; }
 .toast-action {
   border: 0; border-left: 1px solid rgba(255, 255, 255, 0.35); padding: 0 0 0 12px;
   background: transparent; color: #fff; font: inherit; font-weight: 700; cursor: pointer;
 }
 .toast-action:hover { text-decoration: underline; }
+.toast-action:focus-visible { outline: 2px solid #fff; outline-offset: 3px; border-radius: 3px; }
 .toast.error { background: #b42318; }
 .toast.ok { background: #067647; }
 @keyframes toast-in { from { transform: translateY(10px); opacity: 0; } }
+
+/* 4518 production fixture 复用正式样式产物，避免验收 index 夹带 inline style。 */
+.fixture-shell, .fixture-interaction, .fixture-flow { position: relative; width: 100%; height: 100%; }
+.fixture-panel {
+  position: absolute; z-index: 2000; top: 12px; right: 12px; width: min(430px, 42vw);
+  max-height: calc(100% - 24px); overflow: auto; padding: 12px;
+  border: 1px solid #cbd5e1; border-radius: 10px; background: rgb(255 255 255 / 94%);
+  box-shadow: 0 8px 28px rgb(15 23 42 / 14%);
+}
+.fixture-panel h1 { margin: 0 0 8px; font: 700 14px/1.2 ui-sans-serif, system-ui; }
+.fixture-panel pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-size: 10px; line-height: 1.45; }
+.fixture-status {
+  display: inline-block; margin-bottom: 8px; padding: 3px 7px; border-radius: 999px;
+  background: #e2e8f0; font-size: 11px;
+}
+.fixture-status[data-status="pass"] { background: #dcfce7; color: #166534; }
+.fixture-status[data-status="fail"], .fixture-status[data-status="error"] { background: #fee2e2; color: #991b1b; }
+.react-flow__node-probe {
+  width: 1px !important; height: 1px !important; min-width: 1px; min-height: 1px;
+  border: 0; padding: 0; pointer-events: none;
+}
+[data-flow-anchor] { width: 1px; height: 1px; }
+.interaction-panel {
+  position: fixed; z-index: 3000; right: 12px; bottom: 12px; display: grid; gap: 3px;
+  min-width: 230px; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 10px;
+  background: rgb(255 255 255 / 94%); box-shadow: 0 8px 28px rgb(15 23 42 / 14%);
+  pointer-events: none; font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.interaction-panel strong { font: 700 13px/1.3 ui-sans-serif, system-ui; }
 
 .confirm-veil { position: fixed; inset: 0; z-index: 1100; }
 .confirm-pop {

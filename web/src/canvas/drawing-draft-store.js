@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖浏览器 IndexedDB，或 node:test 注入的同形 adapter
- * [OUTPUT]: 提供单 active drawing draft 的串行防抖 journal、scene/baseline/closure 精确恢复判定与 request/epoch/seq 条件清理
+ * [OUTPUT]: 提供单 active drawing draft 的串行防抖 journal、FlowCanvas 水合/closing 协调器、scene/baseline/closure 精确恢复判定与 request/epoch/seq 条件清理
  * [POS]: 临时编辑草稿仓；只恢复局部 editSeed，不参与 committed 世界合并或网络提交
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -161,6 +161,10 @@ export function createDrawingDraftStore({
         draft: structuredClone(pending.draft),
       };
       await adapter.put(persisted);
+      if (active !== owner || !sameIdentity(active, pending)) {
+        await adapter.deleteIfIdentity(persisted);
+        return false;
+      }
       return true;
     });
   };
@@ -250,4 +254,102 @@ export function createDrawingDraftStore({
       return tail;
     },
   });
+}
+
+export function createDrawingDraftCoordinator(
+  store = createDrawingDraftStore(),
+  scheduleMicrotask = globalThis.queueMicrotask,
+) {
+  let activeIdentity = null;
+  let hydrated = false;
+  let skipHydrationChange = false;
+  let hydrationGeneration = 0;
+  const resetHydration = () => {
+    hydrationGeneration++;
+    hydrated = false;
+    skipHydrationChange = false;
+  };
+  return Object.freeze({
+    recover: input => store.recover(input),
+    begin(input) {
+      activeIdentity = store.begin(input);
+      resetHydration();
+      return activeIdentity;
+    },
+    markHydrated(identity = activeIdentity) {
+      if (!sameIdentity(activeIdentity, identity)) return false;
+      hydrated = true;
+      skipHydrationChange = true;
+      const generation = ++hydrationGeneration;
+      scheduleMicrotask?.(() => {
+        if (hydrationGeneration === generation) skipHydrationChange = false;
+      });
+      return true;
+    },
+    schedule(draft) {
+      if (!hydrated || !activeIdentity) return 0;
+      if (skipHydrationChange) {
+        skipHydrationChange = false;
+        return 0;
+      }
+      return store.schedule(draft);
+    },
+    flush: draft => store.flush(draft),
+    clear(identity) {
+      if (sameIdentity(activeIdentity, identity)) {
+        activeIdentity = null;
+        resetHydration();
+      }
+      return store.clear(identity);
+    },
+    deactivate(identity) {
+      if (!sameIdentity(activeIdentity, identity)) return false;
+      activeIdentity = null;
+      resetHydration();
+      return store.deactivate(identity);
+    },
+    async rebaseAfterClosingFailure(input, draft) {
+      const identity = store.begin(input);
+      activeIdentity = identity;
+      hydrated = true;
+      skipHydrationChange = false;
+      hydrationGeneration++;
+      await store.flush(draft);
+      return identity;
+    },
+    idle: () => store.idle(),
+  });
+}
+
+export function advanceAutoSinkUndoTicket(current, {
+  transaction,
+  commitBase,
+  committed,
+  advancedTransaction,
+  sunkIds = [],
+} = {}) {
+  if (sunkIds.length) {
+    return { sunkIds: [...sunkIds], after: committed, transaction: advancedTransaction };
+  }
+  if (current?.transaction === transaction && current.after === commitBase) {
+    const below = new Set((committed?.elements || [])
+      .filter(element => element?.customData?.below)
+      .map(element => element.id));
+    const remaining = current.sunkIds.filter(id => below.has(id));
+    return remaining.length
+      ? { ...current, sunkIds: remaining, after: committed, transaction: advancedTransaction }
+      : null;
+  }
+  return current;
+}
+
+export function submitAutoSinkUndo(queue, ticket, setPlane) {
+  let restored = false;
+  return queue.submit(base => {
+    if (!ticket || base !== ticket.after) return null;
+    restored = true;
+    let elements = base.elements;
+    for (const id of ticket.sunkIds || []) elements = setPlane(elements, id, false);
+    return { elements, files: base.files };
+  }).then(snapshot => ({ restored, snapshot }));
 }

@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖真实 FlowCanvas/UIHost、4518 synthetic 数据与只替换 Ink exporter 的故障探针
- * [OUTPUT]: 无 fetch 全内存交互画布；七项自动链与按 run token/call 起点/closing revision 隔离的只读 rAF+timer 双时钟相机尾窗人工证伪
+ * [OUTPUT]: 无 fetch 全内存交互画布；LE-012 drawingCommit receipt、七项自动链与按 run token/call 起点/closing revision 隔离的只读 rAF+timer 双时钟相机尾窗人工证伪
  * [POS]: 仅由 ?mode=interaction 动态加载；不进入 performance 模式首屏闭包，不触碰真实 4517 数据
  * [PROTOCOL]: 变更时更新此头部，然后检查 main.jsx/README/web/CLAUDE.md
  */
@@ -211,6 +211,7 @@ const initialCameraTailProof = (status = 'idle', error = null) => ({
 function InteractionCanvas() {
   const [canvas, setCanvas] = useState(INITIAL_CANVAS);
   const [layout, setLayout] = useState(INITIAL_LAYOUT);
+  const [sceneToken, setSceneToken] = useState('fixture-scene-1');
   const [selectedKey, setSelectedKey] = useState(null);
   const [expanded, setExpanded] = useState(new Set());
   const [renderGeneration, setRenderGeneration] = useState('live');
@@ -224,6 +225,7 @@ function InteractionCanvas() {
   const concurrentHandledRef = useRef(false);
   const actionLogRef = useRef([]);
   const commitLogRef = useRef([]);
+  const sceneTokenSequenceRef = useRef(1);
   const pointerUpAtRef = useRef(null);
   const openingTimerRef = useRef(null);
   const openingLatencyRef = useRef(null);
@@ -254,13 +256,22 @@ function InteractionCanvas() {
   const onCanvasAction = useCallback(async (kind, payload) => {
     record(kind, payload);
     if (kind === 'drawingCommit') {
-      const snapshot = { elements: payload.elements || [], files: payload.files || {} };
+      if (!payload?.next || !payload?.previousSuccessful) {
+        throw new Error('4518 drawingCommit requires { next, previousSuccessful }');
+      }
+      const snapshot = payload.next;
       commitLogRef.current = [...commitLogRef.current, {
         at: performance.now(),
         elements: snapshot.elements.map(item => ({ id: item.id, type: item.type, below: !!item.customData?.below })),
       }];
       setCanvas(current => ({ ...current, drawing: snapshot.elements, drawingFiles: snapshot.files }));
-      return payload;
+      const nextSceneToken = `fixture-scene-${++sceneTokenSequenceRef.current}`;
+      setSceneToken(nextSceneToken);
+      return {
+        status: 'committed',
+        sceneToken: nextSceneToken,
+        drawing: snapshot.elements,
+      };
     }
     if (kind === 'setBoard') {
       setCanvas(current => {
@@ -920,6 +931,7 @@ function InteractionCanvas() {
         edges: [],
         layout,
         canvas: flowCanvas,
+        sceneToken,
         onMoveNode,
         onCanvasAction,
         onRenameSession: () => {},

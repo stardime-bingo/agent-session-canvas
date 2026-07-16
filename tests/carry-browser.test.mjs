@@ -41,21 +41,34 @@ const run = (command, args) => new Promise((resolve, reject) => {
   child.once('exit', code => code === 0 ? resolve({ stdout, stderr }) : reject(new Error(`${command} exited ${code}\n${stdout}\n${stderr}`)));
 });
 
+const stop = child => new Promise(resolve => {
+  if (child.exitCode != null) return resolve();
+  child.once('exit', resolve);
+  child.kill('SIGTERM');
+});
+
 test('production static 4518 runs direct carry plus real React batch arrange/undo handoffs', { timeout: 300000 }, async t => {
   const server = spawn(process.execPath, [serverScript], {
     cwd: repo, env: process.env, stdio: ['ignore', 'pipe', 'pipe'],
   });
-  t.after(() => {
-    if (server.exitCode == null) server.kill('SIGTERM');
-  });
+  t.after(() => stop(server));
   const ready = await waitForReady(server);
   assert.match(ready.dist, /agent-carry-4518-/);
 
-  const apiResponse = await fetch('http://127.0.0.1:4518/api/graph');
-  assert.equal(apiResponse.status, 403);
+  for (const pathname of ['/api/graph', '/data/canvas.json', '/@fs/private', '/.git/config']) {
+    const response = await fetch(`http://127.0.0.1:4518${pathname}`);
+    assert.equal(response.status, 403, pathname);
+  }
+  const postResponse = await fetch('http://127.0.0.1:4518/', { method: 'POST' });
+  assert.equal(postResponse.status, 405);
   const rootResponse = await fetch('http://127.0.0.1:4518/');
   assert.equal(rootResponse.status, 200);
-  assert.equal(rootResponse.headers.get('content-security-policy'), "script-src 'self'; object-src 'none'; base-uri 'none'");
+  const csp = rootResponse.headers.get('content-security-policy');
+  for (const directive of [
+    "default-src 'none'", "connect-src 'self'", "frame-ancestors 'none'",
+    "form-action 'none'", "object-src 'none'", "base-uri 'none'",
+  ]) assert.match(csp, new RegExp(directive.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.doesNotMatch(csp, /'unsafe-eval'/);
   const html = await rootResponse.text();
   assert.doesNotMatch(html, /<script(?![^>]*\bsrc=)|<style\b|react-refresh|\/@fs|@vite\/client/i);
 

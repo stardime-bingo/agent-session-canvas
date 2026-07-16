@@ -11,8 +11,8 @@
   "scripts": {
     "dev": "vite",
     "build": "node scripts/prepare-assets.mjs && vite build && node scripts/verify-subset-worker-build.mjs",
-    "acceptance:canvas": "node scripts/serve-canvas-acceptance.mjs",
-    "test": "node --test tests/*.test.mjs",
+    "acceptance:canvas": "node scripts/serve-canvas-acceptance.mjs --fixture=canvas",
+    "test": "node --test --test-concurrency=1 tests/*.test.mjs",
     "serve": "node server/index.mjs",
     "scan": "node server/scanner.mjs",
     "start": "npm run build && npm run serve"
