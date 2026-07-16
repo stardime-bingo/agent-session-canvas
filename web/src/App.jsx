@@ -8,9 +8,10 @@
  */
 import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { flushSync } from 'react-dom';
-import { api, subscribeEvents } from './api.js';
+import { api, commitDrawingWithReceipt, subscribeEvents } from './api.js';
 import FlowCanvas from './canvas/FlowCanvas.jsx';
 import { createSceneMutationQueue, executeBatchArrange } from './canvas/container-carry.js';
+import { drawingFilesDelta } from './canvas/drawing.js';
 import { tidyLayoutEntries } from './canvas/layout.js';
 import TopBar from './panels/TopBar.jsx';
 import Sidebar from './panels/Sidebar.jsx';
@@ -217,10 +218,34 @@ export default function App() {
       setCtxFrame(payload);   // 纯视图动作：画布就地弹终端框，不碰盘
     } else if (action === 'drawingCommit') {
       // 普通看板态的沉浮/删除/承载动作：后端落盘成功才原子换本地 committed 快照。
+      const { next, previousSuccessful } = payload;
+      const opId = globalThis.crypto.randomUUID();
+      const files = drawingFilesDelta(previousSuccessful.files, next.files);
       return sceneMutationQueue.enqueue(
-        () => api.setDrawing(payload.elements, payload.files),
-        result => patch(c => ({ ...c, drawing: payload.elements, drawingFiles: payload.files }), result.sceneToken),
-      ).then(() => payload);
+        () => {
+          const command = {
+            opId,
+            baseToken: sceneMutationQueue.authorityRef.current,
+            elements: next.elements,
+            files,
+          };
+          return commitDrawingWithReceipt(command, api.setDrawing, api.drawingCommitStatus);
+        },
+        result => patch(c => ({ ...c, drawing: result.drawing, drawingFiles: next.files }), result.sceneToken),
+      ).then(result => {
+        if (result?.status === 'superseded') {
+          const error = new Error('较新的画布修改已接管');
+          error.status = 409;
+          throw error;
+        }
+        return result;
+      }).catch(error => {
+        if (error.status === 409 || error.authorityUnknown) {
+          sceneStaleRef.current = true;
+          setGraph(current => ({ ...current, sceneStale: true }));
+        }
+        throw error;
+      });
     } else if (action === 'drawingPersisted') {
       // 临时编辑器 flush 成功后回写；兼容旧的纯 elements 回调。
       const drawing = Array.isArray(payload) ? payload : payload.elements;

@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 scanner 的图数据、launcher 的终端拉起、ai 的摘要/接力、store 的增强仓与静态目录
- * [OUTPUT]: 对外提供 HTTP 服务（:4517）：graph/session/context(深档上下文)/scan/launch/AI/rename/events + 画布布局/direct+batch carry/图片资产/原子建点连线 API + 前端静态托管
+ * [OUTPUT]: 对外提供 HTTP 服务（:4517）：graph/session/context(深档上下文)/scan/launch/AI/rename/events + 画布布局/direct+batch carry/drawing CAS 与图片资产/原子建点连线 API + 前端静态托管
  * [POS]: server 的总入口与路由层，前端画布与本地地形之间唯一的桥
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -14,7 +14,6 @@ import { launch } from './launcher.mjs';
 import { summarize, makeHandoff, extractDigest, extractEndingDigest, extractContextPage, nameSession } from './ai.mjs';
 import { runBackfill, backfillStatus, findCandidates } from './backfill.mjs';
 import { WEB_DIST, loadEnrich, updateEnrich, appendJsonlVerified, DATA_DIR } from './store.mjs';
-import { loadDrawingFiles, saveDrawingFiles } from './drawing-files.mjs';
 import { createNodeFromEdge } from './canvas-actions.mjs';
 import { createCanvasRepository } from './canvas-repository.mjs';
 
@@ -129,10 +128,10 @@ function pickLayout(src, prev) {
 const routes = {
   // 画布手工布局与手绘层随图下发
   'GET /api/graph': async () => {
-    const scene = canvasRepository.read();
+    const scene = canvasRepository.readWithDrawingFiles();
     return {
       ...graph, layout: scene.layout, sceneToken: scene.sceneToken,
-      canvas: { ...scene.canvas, drawingFiles: loadDrawingFiles(DATA_DIR) },
+      canvas: { ...scene.canvas, drawingFiles: scene.drawingFiles },
     };
   },
 
@@ -175,17 +174,15 @@ const routes = {
     }));
   },
 
-  // ---- Excalidraw 绘图层：整层元素快照落盘（前端已防抖） ----
+  // ---- Excalidraw 绘图层：资产先 durable，再以 CAS 提交引用；receipt 先于成功响应 ----
   'POST /api/drawing-set': async body => {
-    const saved = canvasRepository.mutate(scene => {
-      scene.canvas.drawing = Array.isArray(body.elements) ? body.elements : [];
-      return { ok: true, count: scene.canvas.drawing.length };
-    });
-    const hasFiles = Object.prototype.hasOwnProperty.call(body, 'files');
-    const files = hasFiles ? saveDrawingFiles(DATA_DIR, body.files) : loadDrawingFiles(DATA_DIR);
-    if (hasFiles) backupPrecious();   // 第一张图当天立刻入备份，不等下一轮 12h 定时器
-    return { ...saved.result, files: Object.keys(files).length, sceneToken: saved.sceneToken };
+    const result = canvasRepository.commitDrawing(body);
+    if (Object.keys(body.files || {}).length) backupPrecious();
+    return result;
   },
+
+  'GET /api/drawing-commit-status': async (_, query) =>
+    canvasRepository.drawingStatus(query.opId),
 
   // ---- 拉线落空：便签/画板与手动边同一次写盘，同成同败 ----
   'POST /api/node-from-edge': async body => {

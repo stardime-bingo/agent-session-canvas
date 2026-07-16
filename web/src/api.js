@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖浏览器 fetch / EventSource，对接 server/index.mjs 的 API 契约
- * [OUTPUT]: 对外提供 graph/session/contextPage(终端框倒序分页)/AI/布局/direct+batch carry/画布对象/绘图图片/落空连线原子创建 API 与 subscribeEvents
+ * [OUTPUT]: 对外提供 graph/session/contextPage(终端框倒序分页)/AI/布局/direct+batch carry/绘图 CAS+receipt/落空连线原子创建 API 与 subscribeEvents
  * [POS]: web 的数据访问唯一通道，组件不直接碰 fetch
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -26,6 +26,29 @@ const post = (path, body) => call(path, {
   body: JSON.stringify(body),
 });
 
+export async function commitDrawingWithReceipt(command, commit, queryStatus) {
+  try {
+    return await commit(command);
+  } catch (error) {
+    if (error?.status === 409 || (error?.status >= 400 && error?.status < 500)) throw error;
+    let status;
+    try {
+      status = await queryStatus(command.opId);
+    } catch {
+      const unknown = new Error('无法确认绘图是否已落盘，请先刷新');
+      unknown.code = 'AUTHORITY_UNKNOWN';
+      unknown.authorityUnknown = true;
+      unknown.cause = error;
+      throw unknown;
+    }
+    if (status?.status === 'committed' && status.opId === command.opId) return status;
+    const notCommitted = new Error('绘图尚未落盘，请重试');
+    notCommitted.code = 'DRAWING_NOT_COMMITTED';
+    notCommitted.cause = error;
+    throw notCommitted;
+  }
+}
+
 export const api = {
   graph: () => call('/api/graph'),
   session: key => call(`/api/session?key=${encodeURIComponent(key)}`),
@@ -46,9 +69,8 @@ export const api = {
   delNote: id => post('/api/note-del', { id }),
   setBoard: board => post('/api/board-set', board),
   delBoard: id => post('/api/board-del', { id }),
-  setDrawing: (elements, files) => post('/api/drawing-set', {
-    elements, ...(files === undefined ? {} : { files }),
-  }),
+  setDrawing: command => post('/api/drawing-set', command),
+  drawingCommitStatus: opId => call(`/api/drawing-commit-status?opId=${encodeURIComponent(opId)}`),
   containerCarry: command => post('/api/container-carry', command),
   containerBatchCarry: command => post('/api/container-batch-carry', command),
   containerCarryStatus: opId => call(`/api/container-carry-status?opId=${encodeURIComponent(opId)}`),
