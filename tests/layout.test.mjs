@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CARD_GAP, COL_W, GAP_IN, GUTTER, HEADER_H, PAD, packWorkspaces, resizedContainerChildren, resolveContainerOverlaps, tidyLayoutEntries } from '../web/src/canvas/layout.js';
+import { buildGraph, CARD_GAP, COL_W, GAP_IN, GUTTER, HEADER_H, PAD, packWorkspaces, resizedContainerChildren, resolveContainerOverlaps, tidyLayoutEntries } from '../web/src/canvas/layout.js';
+import { planBatchCarry } from '../web/src/canvas/container-carry.js';
 
 const ws = (path, count = 1) => ({ path, visibleKeys: Array.from({ length: count }, (_, i) => `${path}:${i}`) });
 const heightOf = item => HEADER_H + item.visibleKeys.length * (62 + CARD_GAP) + 8;
@@ -46,6 +47,18 @@ test('automatic arrangement is deterministic and has no workspace collisions', (
   }
 });
 
+test('membership-only tidy entries reflow as incoming geometry without producing NaN', () => {
+  const items = [ws('/manual-member', 2)];
+  const placed = packWorkspaces(items, {
+    '/manual-member': { d: 'district' },
+  }, 'district', heightOf);
+
+  assert.equal(placed.length, 1);
+  assert.equal(placed[0].x, PAD.l);
+  assert.equal(placed[0].y, PAD.t);
+  assert.ok(Number.isFinite(placed[0].x) && Number.isFinite(placed[0].y));
+});
+
 test('a growing saved district pushes later containers away without changing their horizontal intent', () => {
   const blocks = [
     { key: 'large', x: 0, y: 0, w: 900, h: 700 },
@@ -85,4 +98,32 @@ test('container resize persists React Flow child compensation so absolute positi
     { path: '/alpha', x: 40, y: 60, d: 'board:demo' },
   ]);
   assert.equal(80 + 40, 120); // resize 前 parent.x=100, child.x=20，绝对 x 同为 120
+});
+
+test('production buildGraph planning includes a board displaced only by collision resolution', () => {
+  const workspaces = [{
+    path: '/Users/test/A/X',
+    visibleKeys: ['session:1'],
+    lastActivity: '2026-07-17T00:00:00.000Z',
+  }];
+  const sessions = { 'session:1': { cwd: '/Users/test/A/X' } };
+  const boards = [{ id: 'b1', x: 0, y: 0, w: 520, h: 360 }];
+  const currentLayout = { 'district:A / X': { x: 2000, y: 0 } };
+  const targetLayout = {};
+  const before = buildGraph(workspaces, sessions, currentLayout, boards, [], new Set(), false);
+  const after = buildGraph(workspaces, sessions, targetLayout, boards, [], new Set(), false);
+  const boardBefore = before.nodes.find(node => node.id === 'board:b1');
+  const boardAfter = after.nodes.find(node => node.id === 'board:b1');
+  assert.deepEqual(boardBefore.position, { x: 0, y: 0 });
+  assert.ok(boardAfter.position.y > 0);
+
+  const moves = planBatchCarry(before.nodes, after.nodes, {
+    elements: [{ id: 'board-ink', x: 20, y: 20, width: 10, height: 10 }],
+  });
+  assert.deepEqual(moves.find(move => move.containerId === 'board:b1'), {
+    containerId: 'board:b1',
+    from: { x: 0, y: 0 },
+    to: { ...boardAfter.position },
+    anchorIds: ['board-ink'],
+  });
 });

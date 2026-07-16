@@ -27,6 +27,26 @@ const command = (repo, overrides = {}) => ({
   from: { x: 10.25, y: 20.5 }, to: { x: 15.75, y: 30.25 }, anchorIds: ['shape'],
   ...overrides,
 });
+const batchCommand = (repo, overrides = {}) => ({
+  opId: 'batch-1',
+  baseToken: repo.read().sceneToken,
+  layout: { '/member': { d: 'board:b1' } },
+  moves: [
+    {
+      containerId: 'board:b1',
+      from: { x: 10.25, y: 20.5 },
+      to: { x: 15.75, y: 30.25 },
+      anchorIds: ['shape'],
+    },
+    {
+      containerId: 'district:alpha',
+      from: { x: 5, y: 6 },
+      to: { x: 3, y: 9 },
+      anchorIds: ['other'],
+    },
+  ],
+  ...overrides,
+});
 
 test('scene token is canonical, opaque and rejects non-finite persisted values', () => {
   assert.equal(
@@ -263,4 +283,145 @@ test('ordinary scene mutation advances token under the same lock and status unkn
   assert.notEqual(changed.sceneToken, before);
   assert.deepEqual(repo.status('never-seen'), { status: 'unknown', opId: 'never-seen' });
   assert.equal(repo.read().sceneToken, changed.sceneToken);
+});
+
+test('batch carry replaces layout and moves board plus district anchors in one idempotent receipt', () => {
+  const { repo } = fresh();
+  const first = repo.batchCarry(batchCommand(repo), { districtIds: new Set(['district:alpha']) });
+  assert.equal(first.status, 'committed');
+  assert.deepEqual(first.layout, { '/member': { d: 'board:b1' } });
+  assert.deepEqual(first.movedIds, ['shape', 'other']);
+  assert.equal(first.drawing.find(element => element.id === 'shape').x, 26);
+  assert.equal(first.drawing.find(element => element.id === 'other').x, 398);
+  assert.equal(repo.read().sceneToken, first.sceneToken);
+  assert.deepEqual(repo.batchCarry({ ...batchCommand(repo), baseToken: 'stale' }), first);
+  assert.deepEqual(repo.status(first.opId), first);
+
+  const zero = repo.batchCarry(batchCommand(repo, {
+    opId: 'batch-zero',
+    baseToken: first.sceneToken,
+    layout: first.layout,
+    moves: [{
+      containerId: 'board:b1',
+      from: { x: 0, y: 0 },
+      to: { x: 0, y: 0 },
+      anchorIds: ['shape'],
+    }],
+  }));
+  assert.deepEqual(zero.movedIds, []);
+  assert.equal(zero.sceneToken, first.sceneToken);
+});
+
+test('batch stale token and missing anchors make byte-zero changes', () => {
+  const { repo } = fresh();
+  const stale = batchCommand(repo);
+  repo.mutate(scene => { scene.canvas.notes.push({ id: 'later', x: 1, y: 2 }); });
+  const canvasBytes = fs.readFileSync(repo.paths.canvasFile);
+  const layoutBytes = fs.readFileSync(repo.paths.layoutFile);
+  assert.throws(() => repo.batchCarry(stale), error =>
+    error instanceof SceneError && error.status === 409 && error.code === 'SCENE_CONFLICT');
+  assert.deepEqual(fs.readFileSync(repo.paths.canvasFile), canvasBytes);
+  assert.deepEqual(fs.readFileSync(repo.paths.layoutFile), layoutBytes);
+
+  const missing = batchCommand(repo, {
+    opId: 'batch-missing',
+    baseToken: repo.read().sceneToken,
+    moves: [{
+      containerId: 'board:b1',
+      from: { x: 0, y: 0 },
+      to: { x: 1, y: 1 },
+      anchorIds: ['absent'],
+    }],
+  });
+  assert.throws(() => repo.batchCarry(missing), error => error.code === 'ANCHOR_MISSING');
+  assert.deepEqual(fs.readFileSync(repo.paths.canvasFile), canvasBytes);
+  assert.deepEqual(fs.readFileSync(repo.paths.layoutFile), layoutBytes);
+});
+
+test('batch prepared crash rolls both documents back and committed response loss rolls forward', () => {
+  let preparedFailed = false;
+  const prepared = fresh({
+    fault(stage) {
+      if (!preparedFailed && stage === 'batch-carry:layout') {
+        preparedFailed = true;
+        throw new Error('batch layout crash');
+      }
+    },
+  });
+  const before = prepared.repo.read();
+  assert.throws(() => prepared.repo.batchCarry(
+    batchCommand(prepared.repo, { opId: 'batch-prepared' }),
+    { districtIds: new Set(['district:alpha']) },
+  ), /batch layout crash/);
+  assert.equal(JSON.parse(fs.readFileSync(prepared.repo.paths.journalFile, 'utf8')).phase, 'prepared');
+  assert.equal(prepared.repo.read().sceneToken, before.sceneToken);
+  assert.equal(fs.existsSync(prepared.repo.paths.journalFile), false);
+
+  let committedFailed = false;
+  const committed = fresh({
+    fault(stage) {
+      if (!committedFailed && stage === 'batch-carry:receipt') {
+        committedFailed = true;
+        throw new Error('batch response lost');
+      }
+    },
+  });
+  assert.throws(() => committed.repo.batchCarry(
+    batchCommand(committed.repo, { opId: 'batch-committed' }),
+    { districtIds: new Set(['district:alpha']) },
+  ), /batch response lost/);
+  const journal = JSON.parse(fs.readFileSync(committed.repo.paths.journalFile, 'utf8'));
+  assert.equal(journal.phase, 'committed');
+  const status = committed.repo.status('batch-committed');
+  assert.equal(status.status, 'committed');
+  assert.deepEqual(status.layout, { '/member': { d: 'board:b1' } });
+  assert.equal(fs.existsSync(committed.repo.paths.journalFile), false);
+});
+
+test('batch undo is a new CAS command with reverse moves, not a stale snapshot restore', () => {
+  const { repo } = fresh();
+  const before = repo.read();
+  const forward = repo.batchCarry(
+    batchCommand(repo, { opId: 'batch-forward' }),
+    { districtIds: new Set(['district:alpha']) },
+  );
+  const reverseMoves = forward.moves.map(move => ({
+    ...move,
+    from: move.to,
+    to: move.from,
+  }));
+  const undo = repo.batchCarry({
+    opId: 'batch-undo',
+    baseToken: forward.sceneToken,
+    layout: before.layout,
+    moves: reverseMoves,
+  }, { districtIds: new Set(['district:alpha']) });
+  assert.notEqual(undo.opId, forward.opId);
+  assert.deepEqual(undo.layout, before.layout);
+  assert.deepEqual(undo.drawing, before.canvas.drawing);
+  assert.equal(repo.read().sceneToken, before.sceneToken);
+});
+
+test('damaged batch committed journal blocks recovery before any scene write', () => {
+  let failed = false;
+  const { repo } = fresh({
+    fault(stage) {
+      if (!failed && stage === 'batch-carry:receipt') {
+        failed = true;
+        throw new Error('leave batch journal');
+      }
+    },
+  });
+  assert.throws(() => repo.batchCarry(
+    batchCommand(repo, { opId: 'batch-corrupt' }),
+    { districtIds: new Set(['district:alpha']) },
+  ), /leave batch journal/);
+  const journal = JSON.parse(fs.readFileSync(repo.paths.journalFile, 'utf8'));
+  journal.result.layout['/member'].d = 'board:tampered';
+  fs.writeFileSync(repo.paths.journalFile, JSON.stringify(journal));
+  const canvasBytes = fs.readFileSync(repo.paths.canvasFile);
+  const layoutBytes = fs.readFileSync(repo.paths.layoutFile);
+  assert.throws(() => repo.status('batch-corrupt'), error => error.code === 'JOURNAL_CORRUPT');
+  assert.deepEqual(fs.readFileSync(repo.paths.canvasFile), canvasBytes);
+  assert.deepEqual(fs.readFileSync(repo.paths.layoutFile), layoutBytes);
 });

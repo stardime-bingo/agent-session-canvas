@@ -1,16 +1,16 @@
 /**
  * [INPUT]: 依赖 api 的数据通道、canvas/FlowCanvas 画布、panels 三件套、ui 的 UIHost/toast
  * [OUTPUT]: 对外提供 App 根组件：全局状态、过滤管道、SSE 订阅、岛屿布局（含绘图属性面板动态让位）、
- *           可等待且互斥的整理/单步撤销事务、全部画布/布局写入的单一串行队列与响应丢失 receipt 的 sceneToken 接管、落空连线原子动作分发、
+ *           production buildGraph 同步规划且以 batch carry 原子提交的整理/单步撤销事务、带未知权威屏障的单一串行写队列与响应丢失 receipt 的 sceneToken 接管、落空连线原子动作分发、
  *           committed 绘图 elements/files 原子回写、画布终端框开合
  * [POS]: web 的总装线——数据如河流单向流动：graph → 过滤 → 画布/面板
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
 import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { api, subscribeEvents } from './api.js';
 import FlowCanvas from './canvas/FlowCanvas.jsx';
-import { createSceneMutationQueue } from './canvas/container-carry.js';
-import { createDrawingArrangeUndoTicket } from './canvas/drawing.js';
+import { createSceneMutationQueue, executeBatchArrange } from './canvas/container-carry.js';
 import { tidyLayoutEntries } from './canvas/layout.js';
 import TopBar from './panels/TopBar.jsx';
 import Sidebar from './panels/Sidebar.jsx';
@@ -24,6 +24,7 @@ const DEFAULT_FILTERS = () => ({
   tools: new Set(['claude', 'codex']),
   statuses: new Set(['active', 'dead', 'stale']),     // 空壳与归档默认不看
 });
+const layoutFromEntries = entries => Object.fromEntries(entries.map(({ path, ...entry }) => [path, entry]));
 
 export default function App() {
   const [graph, setGraph] = useState(null);
@@ -69,13 +70,33 @@ export default function App() {
     strip.addEventListener('pointerup', up);
   };
 
-  const reload = useCallback(() => sceneMutationQueue.enqueue(
+  const reload = useCallback(() => sceneMutationQueue.reloadAuthority(
     () => api.graph(),
     g => {
       sceneStaleRef.current = false;
       setGraph(g); setLive(true); setPending(false);
     },
   ), [sceneMutationQueue]);
+
+  const executeArrangeBatch = useCallback((plan, baseToken) => {
+    return executeBatchArrange({
+      queue: sceneMutationQueue,
+      plan,
+      baseToken,
+      commit: value => api.containerBatchCarry(value),
+      queryStatus: opId => api.containerCarryStatus(opId),
+      present: result => actionsRef.current.presentBatchCarryResult?.(result),
+      install: result => setGraph(current => ({
+        ...current,
+        sceneToken: result.sceneToken,
+        layout: result.layout,
+        canvas: { ...current.canvas, drawing: result.drawing },
+      })),
+      // Bridge/target generation 与权威 layout+drawing 必须在同一次同步 commit 内安装；
+      // 浏览器不能观察到“新容器 + 旧 SVG”或“旧容器 + 已平移 SVG”。
+      flush: flushSync,
+    });
+  }, [sceneMutationQueue]);
 
   const undoArrange = useCallback(async () => {
     if (sceneStaleRef.current) return toast('画布已有新修改，请先刷新', 'error');
@@ -89,22 +110,27 @@ export default function App() {
     geometryPendingRef.current = true;
     layoutUndoRef.current = null;
     try {
-      await sceneMutationQueue.enqueue(
-        () => api.layoutBatch(Object.entries(undo.snapshot).map(([path, pos]) => ({ path, ...pos })), true),
-        result => setGraph(g => ({ ...g, sceneToken: result.sceneToken })),
-      );
-      // 容器承载律：撤销整理时，跟着容器走过的墨迹按逆差回家
-      if (undo.undoMoves?.length) await actionsRef.current.followDrawings?.(undo.undoMoves);
-      await reload();
+      const plan = actionsRef.current.planArrangeBatch?.(undo.snapshot);
+      if (!plan) throw new Error('绘图正在换帧，请稍后再试');
+      const baseToken = sceneMutationQueue.authorityRef.current || graph.sceneToken;
+      const outcome = await executeArrangeBatch(plan, baseToken);
       focusRef.current(null);
-      toast('已撤销整理', 'ok');
+      toast(outcome.presentation.status === 'retryable-paint'
+        ? '撤销已保存，批注画面交接失败，请点“重试显示批注”'
+        : '已撤销整理', outcome.presentation.status === 'retryable-paint' ? 'error' : 'ok');
     } catch (e) {
-      layoutUndoRef.current = undo;
-      toast(`撤销失败：${e.message}`, 'error');
+      if (!e.persistedResult) layoutUndoRef.current = undo;
+      if (e.status === 409 || e.authorityUnknown) {
+        sceneStaleRef.current = true;
+        setGraph(current => ({ ...current, sceneStale: true }));
+      }
+      toast(e.persistedResult
+        ? `撤销已保存，但批注显示失败：${e.message}`
+        : `撤销失败：${e.message}`, 'error');
     } finally {
       geometryPendingRef.current = false;
     }
-  }, [reload, sceneMutationQueue]);
+  }, [executeArrangeBatch, graph?.sceneToken, sceneMutationQueue]);
 
   // ---- 自动整理只清几何、不清人工归属；原子替换后可由按钮或 Cmd/Ctrl+Z 撤销 ----
   const arrange = useCallback(async () => {
@@ -112,38 +138,34 @@ export default function App() {
     const prepared = await actionsRef.current.prepareGeometry?.();
     if (prepared === false) return;
     geometryPendingRef.current = true;
-    const snapshot = graph?.layout || {};
-    const rectsBefore = actionsRef.current.containerRects?.() || {};
+    const snapshot = structuredClone(graph?.layout || {});
     try {
-      await sceneMutationQueue.enqueue(
-        () => api.layoutBatch(tidyLayoutEntries(snapshot), true),
-        result => setGraph(g => ({ ...g, sceneToken: result.sceneToken })),
-      );
+      const targetLayout = layoutFromEntries(tidyLayoutEntries(snapshot));
+      const plan = actionsRef.current.planArrangeBatch?.(targetLayout);
+      if (!plan) throw new Error('绘图正在换帧，请稍后再试');
+      const baseToken = sceneMutationQueue.authorityRef.current || graph.sceneToken;
+      const outcome = await executeArrangeBatch(plan, baseToken);
       // 成熟画布的 Cmd+Z 是一次撤一笔：新整理必须覆盖旧票据。
-      layoutUndoRef.current = createDrawingArrangeUndoTicket(snapshot);
-      await reload();
+      layoutUndoRef.current = { snapshot };
       focusRef.current(null);
-      // 容器承载律：新布局由瀑布算法在渲染时定型——等落定后量差，锚定墨迹随容器走
-      await new Promise(resolve => setTimeout(resolve, 120));
-      const after = actionsRef.current.containerRects?.() || {};
-      const moves = [];
-      for (const [id, r] of Object.entries(rectsBefore)) {
-        const n = after[id];
-        if (n && (Math.abs(n.x - r.x) > 0.5 || Math.abs(n.y - r.y) > 0.5)) {
-          moves.push({ rect: r, dx: n.x - r.x, dy: n.y - r.y });
-        }
+      if (outcome.presentation.status === 'retryable-paint') {
+        toast('整理已保存，批注画面交接失败，请点“重试显示批注”', 'error');
+      } else {
+        toast('已整理位置，人工归属保持不变', 'ok', { label: '撤销', onClick: undoArrange });
       }
-      if (moves.length) {
-        await actionsRef.current.followDrawings?.(moves);
-        layoutUndoRef.current = createDrawingArrangeUndoTicket(snapshot, moves);
-      }
-      toast('已整理位置，人工归属保持不变', 'ok', { label: '撤销', onClick: undoArrange });
     } catch (e) {
-      toast(`整理失败：${e.message}`, 'error');
+      if (e.persistedResult) layoutUndoRef.current = { snapshot };
+      if (e.status === 409 || e.authorityUnknown) {
+        sceneStaleRef.current = true;
+        setGraph(current => ({ ...current, sceneStale: true }));
+      }
+      toast(e.persistedResult
+        ? `整理已保存，但批注显示失败：${e.message}`
+        : `整理失败：${e.message}`, 'error');
     } finally {
       geometryPendingRef.current = false;
     }
-  }, [graph?.layout, reload, sceneMutationQueue, undoArrange]);
+  }, [executeArrangeBatch, graph?.layout, graph?.sceneToken, sceneMutationQueue, undoArrange]);
 
   const installCarryResult = useCallback(result => {
     setGraph(g => {
@@ -189,7 +211,7 @@ export default function App() {
     }));
     const recover = e => {
       toast(`操作失败：${e.message}`, 'error');
-      return sceneMutationQueue.enqueue(() => api.graph(), setGraph).catch(() => {});
+      return sceneMutationQueue.reloadAuthority(() => api.graph(), setGraph).catch(() => {});
     };
     if (action === 'openContext') {
       setCtxFrame(payload);   // 纯视图动作：画布就地弹终端框，不碰盘
@@ -398,7 +420,7 @@ export default function App() {
                 }
                 return { ...g, sceneToken: result.sceneToken, layout };
               }),
-            ).catch(() => sceneMutationQueue.enqueue(() => api.graph(), setGraph).catch(() => {}));
+            ).catch(() => sceneMutationQueue.reloadAuthority(() => api.graph(), setGraph).catch(() => {}));
           }}
           onSelect={k => { setSelectedKey(k); if (k) setRightOpen(true); }}
           onChanged={reload}

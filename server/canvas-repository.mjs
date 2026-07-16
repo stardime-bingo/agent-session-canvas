@@ -1,11 +1,13 @@
 /**
- * Durable canvas/layout repository and semantic container-carry service.
+ * Durable canvas/layout repository and direct/batch semantic container-carry service.
  * Every scene read/write shares one cross-process lock; drawing files are out of scope.
  */
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { applyCarry, validateCarryCommand } from '../shared/canvas-carry.mjs';
+import {
+  applyBatchCarry, applyCarry, validateBatchCarryCommand, validateCarryCommand,
+} from '../shared/canvas-carry.mjs';
 
 const EMPTY_CANVAS = Object.freeze({ edges: [], notes: [], boards: [], drawing: [] });
 const sleep = ms => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -120,7 +122,7 @@ export function createCanvasRepository(dataDir, options = {}) {
     assertJson(scene, '$', code);
     return scene;
   };
-  const validateResult = (result, opId, code) => {
+  const validateDirectResult = (result, opId, code) => {
     if (!exactKeys(result, ['status', 'opId', 'sceneToken', 'container', 'drawing', 'movedIds'])
       || result.status !== 'committed' || result.opId !== opId || !tokenPattern.test(result.sceneToken)
       || !exactKeys(result.container, ['kind', 'id', 'x', 'y'])
@@ -143,17 +145,61 @@ export function createCanvasRepository(dataDir, options = {}) {
     }
     return result;
   };
+  const validateBatchResult = (result, opId, code) => {
+    if (!exactKeys(result, ['status', 'opId', 'sceneToken', 'layout', 'drawing', 'movedIds', 'moves'])
+      || result.status !== 'committed' || result.opId !== opId || !tokenPattern.test(result.sceneToken)
+      || !plainObject(result.layout) || !Array.isArray(result.drawing)
+      || !Array.isArray(result.movedIds) || !Array.isArray(result.moves)) {
+      corrupt(code, 'batch carry result schema mismatch');
+    }
+    let normalized;
+    try {
+      normalized = validateBatchCarryCommand({
+        opId: result.opId,
+        baseToken: result.sceneToken,
+        layout: result.layout,
+        moves: result.moves,
+      });
+    } catch (error) {
+      corrupt(code, `batch carry result schema mismatch: ${error.message}`);
+    }
+    if (canonical(normalized.layout) !== canonical(result.layout)
+      || canonical(normalized.moves) !== canonical(result.moves)) {
+      corrupt(code, 'batch carry result normalization mismatch');
+    }
+    const drawingIds = new Set();
+    for (const element of result.drawing) {
+      if (!plainObject(element) || typeof element.id !== 'string' || !element.id || drawingIds.has(element.id)) {
+        corrupt(code, 'batch carry result drawing schema mismatch');
+      }
+      drawingIds.add(element.id);
+    }
+    const moved = new Set(result.movedIds);
+    if (moved.size !== result.movedIds.length
+      || result.movedIds.some(id => typeof id !== 'string' || !drawingIds.has(id))) {
+      corrupt(code, 'batch carry result movedIds mismatch');
+    }
+    return result;
+  };
+  const validateResult = (result, opId, code) => (
+    plainObject(result) && Object.hasOwn(result, 'layout')
+      ? validateBatchResult(result, opId, code)
+      : validateDirectResult(result, opId, code)
+  );
   const validateReceipt = (receipt, opId) => {
     const code = 'RECEIPT_CORRUPT';
     if (!exactKeys(receipt, ['schemaVersion', 'opId', 'committedAt', 'result'])
-      || receipt.schemaVersion !== 1 || receipt.opId !== opId
+      || ![1, 2].includes(receipt.schemaVersion) || receipt.opId !== opId
       || !isoTimestamp(receipt.committedAt)) {
       corrupt(code, 'carry receipt schema mismatch');
     }
     validateResult(receipt.result, opId, code);
+    if ((receipt.schemaVersion === 1) !== !Object.hasOwn(receipt.result, 'layout')) {
+      corrupt(code, 'carry receipt version mismatch');
+    }
     return receipt;
   };
-  const validateJournal = journal => {
+  const validateDirectJournal = journal => {
     const code = 'JOURNAL_CORRUPT';
     if (!exactKeys(journal, [
       'schemaVersion', 'phase', 'opId', 'baseToken', 'afterToken', 'createdAt',
@@ -213,6 +259,53 @@ export function createCanvasRepository(dataDir, options = {}) {
     if (canonical(changed) !== canonical(journal.result.movedIds)) corrupt(code, 'carry journal movedIds mismatch');
     return journal;
   };
+  const validateBatchJournal = journal => {
+    const code = 'JOURNAL_CORRUPT';
+    if (!exactKeys(journal, [
+      'schemaVersion', 'kind', 'phase', 'opId', 'baseToken', 'afterToken', 'createdAt',
+      'before', 'after', 'result',
+    ]) || journal.schemaVersion !== 2 || journal.kind !== 'batch'
+      || !['prepared', 'committed'].includes(journal.phase)
+      || typeof journal.opId !== 'string' || !journal.opId
+      || !tokenPattern.test(journal.baseToken) || !tokenPattern.test(journal.afterToken)
+      || !isoTimestamp(journal.createdAt)) {
+      corrupt(code, 'batch carry journal schema mismatch');
+    }
+    validateScene(journal.before, code, 'journal.before');
+    validateScene(journal.after, code, 'journal.after');
+    validateBatchResult(journal.result, journal.opId, code);
+    if (sceneToken(journal.before) !== journal.baseToken
+      || sceneToken(journal.after) !== journal.afterToken
+      || journal.result.sceneToken !== journal.afterToken
+      || canonical(journal.result.layout) !== canonical(journal.after.layout)
+      || canonical(journal.result.drawing) !== canonical(journal.after.canvas.drawing)) {
+      corrupt(code, 'batch carry journal token/result mismatch');
+    }
+    const stableBefore = clone(journal.before);
+    const stableAfter = clone(journal.after);
+    stableAfter.layout = stableBefore.layout;
+    stableAfter.canvas.drawing = stableBefore.canvas.drawing;
+    if (canonical(stableBefore) !== canonical(stableAfter)) {
+      corrupt(code, 'batch carry journal unrelated scene mismatch');
+    }
+    const beforeIds = new Set(journal.before.canvas.drawing.map(element => element.id));
+    if (journal.result.moves.some(move => move.anchorIds.some(id => !beforeIds.has(id)))) {
+      corrupt(code, 'batch carry journal anchor mismatch');
+    }
+    const expectedDrawing = applyBatchCarry(journal.before.canvas.drawing, journal.result.moves);
+    if (canonical(expectedDrawing) !== canonical(journal.after.canvas.drawing)) {
+      corrupt(code, 'batch carry journal drawing mismatch');
+    }
+    const changed = journal.after.canvas.drawing.flatMap((element, index) =>
+      canonical(element) === canonical(journal.before.canvas.drawing[index]) ? [] : [element.id]);
+    if (canonical(changed) !== canonical(journal.result.movedIds)) {
+      corrupt(code, 'batch carry journal movedIds mismatch');
+    }
+    return journal;
+  };
+  const validateJournal = journal => journal?.schemaVersion === 2
+    ? validateBatchJournal(journal)
+    : validateDirectJournal(journal);
   const readUnlocked = () => {
     const canvas = { ...clone(EMPTY_CANVAS), ...strictRead(canvasFile, {}, 'canvas') };
     return validateScene({ canvas, layout: strictRead(layoutFile, {}, 'layout') });
@@ -246,7 +339,7 @@ export function createCanvasRepository(dataDir, options = {}) {
     }
     writeScene(journal.after, 'recover-committed');
     if (!existing) durableWrite(receiptFile(journal.opId), {
-      schemaVersion: 1, opId: journal.opId, committedAt: journal.createdAt, result: journal.result,
+      schemaVersion: journal.schemaVersion, opId: journal.opId, committedAt: journal.createdAt, result: journal.result,
     }, 'recover:receipt');
     durableDelete(journalFile);
   };
@@ -373,6 +466,78 @@ export function createCanvasRepository(dataDir, options = {}) {
         durableWrite(receiptFile(command.opId), {
           schemaVersion: 1, opId: command.opId, committedAt: new Date().toISOString(), result,
         }, 'carry:receipt');
+        durableDelete(journalFile);
+        pruneReceipts(command.opId);
+        return clone(result);
+      });
+    },
+    batchCarry(raw, context = {}) {
+      let command;
+      try { command = validateBatchCarryCommand(raw); }
+      catch (error) { throw new SceneError(400, 'INVALID_BATCH_CARRY', error.message); }
+      return withLock(() => {
+        recoverUnlocked();
+        const prior = readReceipt(command.opId);
+        if (prior) return clone(prior.result);
+        const before = readUnlocked();
+        const currentToken = sceneToken(before);
+        if (command.baseToken !== currentToken) {
+          throw new SceneError(409, 'SCENE_CONFLICT', 'canvas scene has changed', { sceneToken: currentToken });
+        }
+        for (const move of command.moves) {
+          const boardId = move.containerId.startsWith('board:') ? move.containerId.slice(6) : null;
+          const boardExists = boardId !== null
+            && before.canvas.boards.some(board => String(board.id) === boardId);
+          const districtExists = move.containerId.startsWith('district:')
+            && (context.districtIds?.has(move.containerId)
+              || Object.hasOwn(before.layout, move.containerId)
+              || Object.hasOwn(command.layout, move.containerId));
+          if (!boardExists && !districtExists) {
+            throw new SceneError(409, 'CONTAINER_MISSING', 'container no longer exists', { sceneToken: currentToken });
+          }
+        }
+        const drawingIds = new Set(before.canvas.drawing.map(element => element.id));
+        if (command.moves.some(move => move.anchorIds.some(id => !drawingIds.has(id)))) {
+          throw new SceneError(409, 'ANCHOR_MISSING', 'anchored drawing no longer exists', { sceneToken: currentToken });
+        }
+        const after = clone(before);
+        after.layout = clone(command.layout);
+        after.canvas.drawing = applyBatchCarry(after.canvas.drawing, command.moves);
+        const movedIds = after.canvas.drawing.flatMap((element, index) =>
+          canonical(element) === canonical(before.canvas.drawing[index]) ? [] : [element.id]);
+        const afterToken = sceneToken(after);
+        const result = {
+          status: 'committed',
+          opId: command.opId,
+          sceneToken: afterToken,
+          layout: after.layout,
+          drawing: after.canvas.drawing,
+          movedIds,
+          moves: command.moves,
+        };
+        const createdAt = new Date().toISOString();
+        const journal = {
+          schemaVersion: 2,
+          kind: 'batch',
+          phase: 'prepared',
+          opId: command.opId,
+          baseToken: command.baseToken,
+          afterToken,
+          createdAt,
+          before,
+          after,
+          result,
+        };
+        durableWrite(journalFile, journal, 'batch-carry:prepared');
+        durableWrite(canvasFile, after.canvas, 'batch-carry:canvas');
+        durableWrite(layoutFile, after.layout, 'batch-carry:layout');
+        durableWrite(journalFile, { ...journal, phase: 'committed' }, 'batch-carry:committed');
+        durableWrite(receiptFile(command.opId), {
+          schemaVersion: 2,
+          opId: command.opId,
+          committedAt: new Date().toISOString(),
+          result,
+        }, 'batch-carry:receipt');
         durableDelete(journalFile);
         pruneReceipts(command.opId);
         return clone(result);

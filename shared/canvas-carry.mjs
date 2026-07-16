@@ -1,10 +1,13 @@
 /**
- * Pure container-carry domain: painted-world ownership, semantic mutation and
- * the tx/op/frame state machine. No DOM, React or filesystem dependencies.
+ * Pure container-carry domain: painted-world ownership, direct/batch semantic
+ * mutation validation and the tx/op/frame state machine. No DOM, React or filesystem dependencies.
  */
 
 const finite = value => typeof value === 'number' && Number.isFinite(value);
 const point = value => value && finite(value.x) && finite(value.y);
+const plainObject = value => !!value && typeof value === 'object' && !Array.isArray(value);
+const exactKeys = (value, keys) => plainObject(value)
+  && Object.keys(value).sort().join('\0') === [...keys].sort().join('\0');
 const idle = stale => ({
   phase: stale ? 'CONFLICT_STALE' : 'IDLE',
   txId: null, opId: null, targetFrameId: null, containerId: null,
@@ -49,6 +52,97 @@ export function applyCarry(elements = [], anchorIds = [], dx = 0, dy = 0) {
   return elements.map(element => ids.has(element?.id)
     ? { ...element, x: Number(element.x) + dx, y: Number(element.y) + dy }
     : element);
+}
+
+export function applyBatchCarry(elements = [], moves = []) {
+  const deltas = new Map();
+  for (const move of moves) {
+    const dx = move.to.x - move.from.x;
+    const dy = move.to.y - move.from.y;
+    if (!finite(dx) || !finite(dy)) throw new TypeError('batch carry delta must be finite');
+    if (!dx && !dy) continue;
+    for (const id of move.anchorIds) {
+      if (deltas.has(id)) throw new TypeError('batch anchorIds must be globally unique');
+      deltas.set(id, { dx, dy });
+    }
+  }
+  if (!deltas.size) return elements;
+  return elements.map(element => {
+    const delta = deltas.get(element?.id);
+    return delta
+      ? { ...element, x: Number(element.x) + delta.dx, y: Number(element.y) + delta.dy }
+      : element;
+  });
+}
+
+export function validateLayoutSnapshot(raw) {
+  if (!plainObject(raw)) throw new TypeError('layout must be an object');
+  const layout = {};
+  for (const [path, entry] of Object.entries(raw)) {
+    if (!path || path.length > 4096 || !plainObject(entry)) throw new TypeError('invalid layout entry');
+    const keys = Object.keys(entry);
+    if (keys.some(key => !['x', 'y', 'd', 'w', 'h'].includes(key))) throw new TypeError('invalid layout fields');
+    const next = {};
+    for (const key of ['x', 'y', 'w', 'h']) {
+      if (entry[key] === undefined) continue;
+      if (!finite(entry[key]) || ((key === 'w' || key === 'h') && entry[key] < 0)) {
+        throw new TypeError(`invalid layout ${key}`);
+      }
+      next[key] = entry[key];
+    }
+    if (entry.d !== undefined) {
+      if (typeof entry.d !== 'string' || entry.d.length > 4096) throw new TypeError('invalid layout d');
+      next.d = entry.d;
+    }
+    layout[path] = next;
+  }
+  return layout;
+}
+
+function validateBatchMoves(raw) {
+  if (!Array.isArray(raw) || raw.length > 2000) throw new TypeError('invalid batch moves');
+  const containers = new Set();
+  const anchors = new Set();
+  return raw.map(move => {
+    if (!exactKeys(move, ['containerId', 'from', 'to', 'anchorIds'])
+      || typeof move.containerId !== 'string'
+      || (!move.containerId.startsWith('board:') && !move.containerId.startsWith('district:'))
+      || !point(move.from) || !point(move.to)
+      || !Array.isArray(move.anchorIds) || move.anchorIds.length > 10000
+      || containers.has(move.containerId)) {
+      throw new TypeError('invalid batch move');
+    }
+    containers.add(move.containerId);
+    const anchorIds = [];
+    for (const id of move.anchorIds) {
+      if (typeof id !== 'string' || !id || anchors.has(id)) {
+        throw new TypeError('batch anchorIds must be globally unique non-empty strings');
+      }
+      anchors.add(id);
+      anchorIds.push(id);
+    }
+    return {
+      containerId: move.containerId,
+      from: { x: move.from.x, y: move.from.y },
+      to: { x: move.to.x, y: move.to.y },
+      anchorIds,
+    };
+  });
+}
+
+export function validateBatchCarryCommand(raw) {
+  if (!exactKeys(raw, ['opId', 'baseToken', 'layout', 'moves'])) {
+    throw new TypeError('invalid batch carry command fields');
+  }
+  for (const key of ['opId', 'baseToken']) {
+    if (typeof raw[key] !== 'string' || !raw[key] || raw[key].length > 512) throw new TypeError(`invalid ${key}`);
+  }
+  return {
+    opId: raw.opId,
+    baseToken: raw.baseToken,
+    layout: validateLayoutSnapshot(raw.layout),
+    moves: validateBatchMoves(raw.moves),
+  };
 }
 
 export function validateCarryCommand(raw) {

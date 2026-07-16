@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖浏览器 fetch / EventSource，对接 server/index.mjs 的 API 契约
- * [OUTPUT]: 对外提供 graph/session/contextPage(终端框倒序分页)/AI/布局/画布对象/绘图图片/落空连线原子创建 API 与 subscribeEvents
+ * [OUTPUT]: 对外提供 graph/session/contextPage(终端框倒序分页)/AI/布局/direct+batch carry/画布对象/绘图图片/落空连线原子创建 API 与 subscribeEvents
  * [POS]: web 的数据访问唯一通道，组件不直接碰 fetch
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -50,6 +50,7 @@ export const api = {
     elements, ...(files === undefined ? {} : { files }),
   }),
   containerCarry: command => post('/api/container-carry', command),
+  containerBatchCarry: command => post('/api/container-batch-carry', command),
   containerCarryStatus: opId => call(`/api/container-carry-status?opId=${encodeURIComponent(opId)}`),
   createFromEdge: payload => post('/api/node-from-edge', payload),
   del: (key, force) => post('/api/delete', { key, force }),

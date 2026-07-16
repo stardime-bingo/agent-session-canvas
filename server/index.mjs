@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 scanner 的图数据、launcher 的终端拉起、ai 的摘要/接力、store 的增强仓与静态目录
- * [OUTPUT]: 对外提供 HTTP 服务（:4517）：graph/session/context(深档上下文)/scan/launch/AI/rename/events + 画布布局/图片资产/原子建点连线 API + 前端静态托管
+ * [OUTPUT]: 对外提供 HTTP 服务（:4517）：graph/session/context(深档上下文)/scan/launch/AI/rename/events + 画布布局/direct+batch carry/图片资产/原子建点连线 API + 前端静态托管
  * [POS]: server 的总入口与路由层，前端画布与本地地形之间唯一的桥
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -236,6 +236,9 @@ const routes = {
 
   'POST /api/container-carry': async body =>
     canvasRepository.carry(body, { districtIds: districtIds() }),
+
+  'POST /api/container-batch-carry': async body =>
+    canvasRepository.batchCarry(body, { districtIds: districtIds() }),
 
   'GET /api/container-carry-status': async (_, query) =>
     canvasRepository.status(query.opId),

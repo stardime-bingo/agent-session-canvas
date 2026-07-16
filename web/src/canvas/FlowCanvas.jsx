@@ -6,7 +6,7 @@
  *           committed ink 与节点共用 ViewportPortal 唯一相机、commit-bound requested generation 与已 paint rendered world 统一像素/命中/MiniMap、cold/stale 可见回执、编辑态 wheel/key/Safari gesture/pointer 全入口 RF 相机事务（Shift+1/2/3 统一全景 fit）、唯一 Excal 对齐入口与成功/acquire/cleanup 只读计数及 live 隐藏期同层输入盾/可见缩放岛、
  *           目标关系闭包局部事务、新建大底板落笔即退场/自动沉层与稳定排空撤销、屏幕/队列/持久化三真相收口、opening request 身份门与纯取消、无双影帧交接与真实阶段回执、
  *           普通模式绘图命中（pane/容器面同河、nodrag/连接点等功能件优先）与 Backspace 删除治理；4518 seam 只驱动真实 open/exit 动作并替换 Ink exporter
- *           容器承载事务受 App 场景变更队列硬闸门约束，Escape/pointercancel 只取消当前指针的 DRAGGING 并阻断迟到 DROP
+ *           direct 容器承载只在 RF node.position 已进 DOM 的 layout effect 同步桥与最终 DROP；同步 buildGraph batch 整理规划共用 rendered world 所有权，batch 多 delta bridge 只由精确目标 generation DOM-ready 清除且向 4518 probe 只读公开其代际/桥状态；事务受 App 场景变更队列硬闸门约束，Escape/pointercancel 只取消当前指针的 DRAGGING 并阻断迟到 DROP
  * [POS]: canvas 的画布引擎。归属律：layout.d 手动指定 > 路径推断；容器永远生长包住成员；
  *        每一次点击必有可感知的回应：选中态/菜单/提示三选一
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -18,17 +18,19 @@ import SessionNode from './SessionNode.jsx';
 import DistrictNode from './DistrictNode.jsx';
 import BoardNode, { BOARD_COLORS } from './BoardNode.jsx';
 import NoteNode from './NoteNode.jsx';
-import { COL_W, PAD, BREATH, GUTTER, ROW_MAX_W, HEADER_H, CARD_H, CARD_GAP, MAX_SHOW, packWorkspaces, resizedContainerChildren, resolveContainerOverlaps } from './layout.js';
+import { buildGraph, COL_W, resizedContainerChildren } from './layout.js';
 import { sessionMenu, workspaceMenu, districtMenu, boardMenu, noteMenu, paneMenu, edgeMenu, deleteBoardFlow, deleteNoteFlow } from './menus.jsx';
 import { connectionDrop, syncHandleHitArea } from './connections.js';
 import {
-  advanceDrawingTransaction, anchoredDrawingIds, autoSinkLargeNewDrawingDraft, canvasGeometryAllowed, canvasGeometryPreparation, createDrawingCommitQueue, createDrawingTransaction,
+  advanceDrawingTransaction, autoSinkLargeNewDrawingDraft, canvasGeometryAllowed, canvasGeometryPreparation, createDrawingCommitQueue, createDrawingTransaction,
   deleteDrawingElement, DRAWING_HIT_BLOCK, drawingCameraExitPolicy, drawingCameraPresentation, drawingCameraStep, drawingClosingHandoffStep, drawingCompositionStep, drawingExitAction, drawingExitFailureNotice, drawingFrameHitElements, drawingFrameTruthStep, drawingOpeningRequestCurrent, drawingRestoredWorldOverride, drawingTransactionVisibleElements, drawingWorldInputStep, drawingWorldSyncStep, hitDrawingElement, mergeDrawingTransaction,
-  setDrawingElementPlane, translateDrawingElements,
+  setDrawingElementPlane,
 } from './drawing.js';
 import InkWorldLayer from './InkWorldLayer.jsx';
 import MiniMapInk from './MiniMapInk.jsx';
-import { createContainerCarryController, createInkDomAdapter, presentedWorld } from './container-carry.js';
+import {
+  createBatchCarryBridge, createContainerCarryController, createInkDomAdapter, planBatchCarry, presentedWorld,
+} from './container-carry.js';
 import {
   createPointerListenerResource, drawingGestureCapture, drawingGestureRoute, drawingWheelRoute, drawingZoomKeyCommand, keyboardViewport, panViewport, scaleViewport,
   wheelDevice, wheelViewport, zoomViewport, WHEEL_MODES, nextWheelMode,
@@ -45,162 +47,6 @@ const NO_DRAWING_IDS = Object.freeze([]);
 const CAMERA_EXTERNAL_EXCLUDE = '.nowheel, .react-flow__minimap, .react-flow__controls, .ctx-menu, .island';
 const CAMERA_EXCAL_UI = '.Island, button, input, textarea, select, [contenteditable="true"], [role="menu"], [role="dialog"]';
 const CAMERA_TAIL_MS = 180;
-
-// ============================================================
-//  街区识别：路径亲缘即城市区域（HOME 下前两段路径）
-// ============================================================
-function districtOf(path) {
-  const parts = path.split('/').filter(Boolean);
-  if (parts[0] === 'Users') {
-    const segs = parts.slice(2, 4);
-    return segs.length ? segs.join(' / ') : '~';
-  }
-  return '/' + parts[0];
-}
-
-// 街区对应的真实目录（供 Finder 打开）：从成员路径截前缀，不做字符串拼接魔术
-function districtDir(memberPath) {
-  const parts = memberPath.split('/').filter(Boolean);
-  if (parts[0] === 'Users') return '/' + parts.slice(0, Math.min(4, parts.length)).join('/');
-  return '/' + parts[0];
-}
-
-// ============================================================
-//  统一容器布局：
-//  归属 = layout.d 手动指定（含 board:*）> 路径街区；
-//  容器尺寸 = 内容包络（弹性生长）；搜索与展开时工作区显示全部会话
-// ============================================================
-function buildGraph(workspaces, sessionsByKey, layout, boards, relEdges, expanded, searching) {
-  const boardById = new Map((boards || []).map(b => [`board:${b.id}`, b]));
-
-  const showAllOf = ws => searching || expanded.has(ws.path);
-  const heightOf = ws => {
-    const len = ws.visibleKeys.length;
-    const shown = showAllOf(ws) ? len : Math.min(len, MAX_SHOW);
-    return HEADER_H + shown * (CARD_H + CARD_GAP) + ((!searching && len > MAX_SHOW) ? 26 : 8);
-  };
-
-  // ---- 分组：手动归属优先，悬空画板引用回落路径街区 ----
-  const groups = new Map();
-  const wsGroup = new Map();   // ws.path → 容器 key，供关联引力换算
-  for (const ws of workspaces) {
-    let key = layout?.[ws.path]?.d;
-    if (!key || (key.startsWith('board:') && !boardById.has(key))) key = districtOf(ws.path);
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(ws);
-    wsGroup.set(ws.path, key);
-  }
-  for (const bid of boardById.keys()) if (!groups.has(bid)) groups.set(bid, []);   // 空画板也在场
-
-  // ---- 逐容器打包：算法成员进瀑布，被拖过的用记忆坐标 ----
-  const blocks = [];
-  for (const [key, members] of groups) {
-    const isBoard = key.startsWith('board:');
-    const placed = packWorkspaces(members, layout, key, heightOf);
-
-    // 弹性生长：容器包住全部成员；用户手拉的尺寸是"下限"，内容超出照样撑大
-    const maxX = Math.max(...placed.map(p => p.x + COL_W), PAD.l + COL_W);
-    const maxY = Math.max(...placed.map(p => p.y + p.h), PAD.t + 40);
-    const board = boardById.get(key);
-    const savedD = isBoard ? board : layout?.[`district:${key}`];
-    const minW = maxX + PAD.r, minH = maxY + PAD.b;
-    blocks.push({
-      key, isBoard, board, placed, minW, minH,
-      w: Math.max(minW + (isBoard || savedD?.w ? 0 : BREATH.w), savedD?.w || 0),
-      h: Math.max(minH + (isBoard || savedD?.h ? 0 : BREATH.h), savedD?.h || 0),
-      count: members.length,
-      activity: members[0]?.lastActivity || '0',
-    });
-  }
-
-  // ---- 关联即引力：有连线的容器分进同一簇，排布时紧邻——
-  //      线短了自然舒展，整齐让位于亲缘 ----
-  const groupOf = end => {
-    const p = end.includes(':') ? (sessionsByKey[end]?.cwd || '') : end;
-    return wsGroup.get(p) || null;
-  };
-  const parent = new Map(blocks.map(b => [b.key, b.key]));
-  const find = x => parent.get(x) === x ? x : find(parent.get(x));
-  for (const e of relEdges || []) {
-    const a = groupOf(e.from), b = groupOf(e.to);
-    if (a && b && a !== b && parent.has(a) && parent.has(b)) parent.set(find(a), find(b));
-  }
-
-  // ---- 容器排布：画板/被拖过的街区用记忆坐标，其余按「簇 → 活跃度」行流式 ----
-  const clusterAct = new Map();
-  const flowBlocks = blocks.filter(b => !b.isBoard && !layout?.[`district:${b.key}`]);
-  for (const b of flowBlocks) {
-    const r = find(b.key);
-    if (!clusterAct.has(r) || b.activity > clusterAct.get(r)) clusterAct.set(r, b.activity);
-  }
-  flowBlocks.sort((a, b) => {
-    const ra = find(a.key), rb = find(b.key);
-    if (ra !== rb) return clusterAct.get(rb).localeCompare(clusterAct.get(ra));   // 簇间按簇活跃度
-    return b.activity.localeCompare(a.activity);                                  // 簇内按各自活跃度
-  });
-  let cx = 0, cy = 0, rowH = 0;
-  for (const b of flowBlocks) {
-    if (cx > 0 && cx + b.w > ROW_MAX_W) { cx = 0; cy += rowH + GUTTER; rowH = 0; }
-    b.x = cx; b.y = cy;
-    cx += b.w + GUTTER;
-    rowH = Math.max(rowH, b.h);
-  }
-  for (const b of blocks) {
-    if (b.isBoard) { b.x = b.board.x; b.y = b.board.y; }
-    else if (layout?.[`district:${b.key}`]) { b.x = layout[`district:${b.key}`].x; b.y = layout[`district:${b.key}`].y; }
-  }
-  // 手工坐标仍是锚点，但容器会随增量内容长大；长大后统一向下避让，不能侵入邻居。
-  resolveContainerOverlaps(blocks);
-
-  // ---- 生成节点：父先于子。删除主权：只有便签/画板/手动边可被 Backspace 触达 ----
-  const nodes = [];
-  const positions = {};
-  for (const b of blocks) {
-    const containerId = b.isBoard ? b.key : `district:${b.key}`;
-    nodes.push(b.isBoard
-      ? {
-          id: containerId, type: 'board', position: { x: b.x, y: b.y },
-          width: b.w, height: b.h,
-          data: { board: b.board, count: b.count, _w: b.w, _h: b.h },
-          draggable: true, dragHandle: '.container-drag-handle', selectable: true, deletable: true,
-        }
-      : {
-          id: containerId, type: 'district', position: { x: b.x, y: b.y },
-          width: b.w, height: b.h,
-          data: {
-            name: b.key, count: b.count, _w: b.w, _h: b.h, _minW: b.minW, _minH: b.minH,
-            _dir: b.placed[0] ? districtDir(b.placed[0].ws.path) : null,
-          },
-          draggable: true, dragHandle: '.container-drag-handle', selectable: true, deletable: false,
-        });
-
-    for (const { ws, x, y } of b.placed) {
-      const h = heightOf(ws);
-      const showAll = showAllOf(ws);
-      const shown = showAll ? ws.visibleKeys.length : Math.min(ws.visibleKeys.length, MAX_SHOW);
-      positions[ws.path] = { x: b.x + x, y: b.y + y, w: COL_W, h };
-      nodes.push({
-        id: ws.path, type: 'workspace', parentId: containerId,
-        position: { x, y },
-        data: {
-          workspace: ws, width: COL_W, height: h,
-          hidden: ws.visibleKeys.length - shown,
-          expanded: expanded.has(ws.path), searching,
-        },
-        draggable: true, selectable: true, deletable: false,
-      });
-      ws.visibleKeys.slice(0, shown).forEach((key, i) => {
-        nodes.push({
-          id: key, type: 'session', parentId: ws.path, extent: 'parent',
-          position: { x: 10, y: HEADER_H + i * (CARD_H + CARD_GAP) },
-          data: { session: sessionsByKey[key], width: COL_W - 20, height: CARD_H },
-          draggable: false, deletable: false,
-        });
-      });
-    }
-  }
-  return { nodes, positions };
-}
 
 const containerKey = id => id.startsWith('district:') ? id.slice(9) : id;
 
@@ -273,13 +119,19 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   const rootRef = useRef(null);
   const carryControllerRef = useRef(null);
   const carryPendingFrameRef = useRef(null);
+  const batchCarryBridgeRef = useRef(null);
   const carryFrameSequenceRef = useRef(0);
   const carryBeginDurationRef = useRef(0);
   const carryMoveDurationsRef = useRef([]);
   const carryPointerDownRef = useRef(null);
+  const carryMoveRef = useRef(null);
+  const carryDropRef = useRef(null);
+  const dragStartRef = useRef(new Map());
+  const cancelledCarryRef = useRef(new Map());
   const [carryView, setCarryView] = useState({ phase: 'IDLE', anchorIds: [], dx: 0, dy: 0 });
   const [carryTargetWorld, setCarryTargetWorld] = useState(null);
   const [carryRetryToken, setCarryRetryToken] = useState(0);
+  const [batchCarryRetryable, setBatchCarryRetryable] = useState(false);
   const clearSelectionRef = useRef(() => {});       // 进绘图前清 RF 选中——Delete 不许一键双雷（定义在下方，ref 解前向引用）
   const drawingCommitQueueRef = useRef(null);
   if (!drawingCommitQueueRef.current) {
@@ -326,7 +178,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   const geometryAllowed = useCallback(() => canvasGeometryAllowed({
     opening: openingRef.current,
     drawing: penActiveRef.current,
-    pending: geometryPendingRef?.current,
+    pending: geometryPendingRef?.current || carryPendingFrameRef.current?.kind === 'batch',
   }), [geometryPendingRef]);
   // App 的全局整理只和 opening/pending 互斥；已进入绘图后的全局动作政策保持不变。
   const geometryLocked = useCallback(() => !canvasGeometryAllowed({
@@ -668,7 +520,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
 
   const carryBlocksDrawing = useCallback(() => {
     const phase = carryControllerRef.current?.state().phase || 'IDLE';
-    return phase !== 'IDLE';
+    return phase !== 'IDLE' || carryPendingFrameRef.current?.kind === 'batch';
   }, []);
 
   // ---- 绘图编辑：静态 committed 世界常驻；局部 draft 只在 hole SVG 进入 DOM 后显现。 ----
@@ -680,11 +532,23 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       && carryFrame.requestedExcludedIds === renderedWorld.excludedIds
       && renderedWorld.generationId === carryFrame.targetFrameId
       && requestedWorldRef.current?.generationId === carryFrame.targetFrameId) {
-      carryControllerRef.current?.frameReady(carryFrame.txId, carryFrame.targetFrameId);
+      if (carryFrame.kind === 'batch') {
+        carryFrame.settleOutcome?.({ status: 'ready' });
+        batchCarryBridgeRef.current?.clear();
+        carryPendingFrameRef.current = null;
+        setBatchCarryRetryable(false);
+        setCarryTargetWorld(current => current?.txId === carryFrame.txId
+          && current.targetFrameId === carryFrame.targetFrameId ? null : current);
+      } else {
+        carryControllerRef.current?.frameReady(carryFrame.txId, carryFrame.targetFrameId);
+      }
     }
     if (frameTestProbeRef) frameTestEventsRef.current = [
       ...frameTestEventsRef.current,
-      { type: 'ready', source, revision, attempt: metrics?.attempt || 1 },
+      {
+        type: 'ready', source, revision, attempt: metrics?.attempt || 1,
+        generationId: renderedWorld?.generationId ?? null,
+      },
     ].slice(-24);
     setInkFrame(current => {
       const requested = current?.requestedRevision === revision
@@ -759,7 +623,13 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       && carryFrame.requestedExcludedIds === result.excludedIds
       && result.generationId === carryFrame.targetFrameId
       && requestedWorldRef.current?.generationId === carryFrame.targetFrameId) {
-      carryControllerRef.current?.frameError(carryFrame.txId, carryFrame.targetFrameId);
+      if (carryFrame.kind === 'batch') {
+        carryFrame.failed = true;
+        setBatchCarryRetryable(true);
+        carryFrame.settleOutcome?.({ status: 'retryable-paint', error });
+      } else {
+        carryControllerRef.current?.frameError(carryFrame.txId, carryFrame.targetFrameId);
+      }
     }
     const handoff = worldHandoffRef.current;
     if (!handoff || handoff.revision !== revision) return;
@@ -1197,7 +1067,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
           generationId: targetFrameId,
         };
         carryPendingFrameRef.current = {
-          txId, targetFrameId, requestedRevision: null, requestedExcludedIds: null,
+          kind: 'direct', txId, targetFrameId, requestedRevision: null, requestedExcludedIds: null,
         };
         setCarryTargetWorld({ txId, targetFrameId, world: targetWorld });
         return targetFrameId;
@@ -1226,6 +1096,28 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       if (carryControllerRef.current === controller) carryControllerRef.current = null;
     };
   }, [onCanvasAction, setNodes]);
+
+  // RF 是容器可见几何的唯一权威：DOM node.position 提交后，layout effect 才同步墨迹桥。
+  // pointermove 不提前写 CSS；最终 DROP 也在同一提交点先补最后一笔 MOVE 再落盘。
+  useLayoutEffect(() => {
+    const controller = carryControllerRef.current;
+    const state = controller?.state();
+    if (!state || state.phase !== 'DRAGGING') return;
+    const drop = carryDropRef.current;
+    const move = drop?.txId === state.txId && drop.containerId === state.containerId
+      ? drop
+      : carryMoveRef.current;
+    if (!move || move.txId !== state.txId || move.containerId !== state.containerId) return;
+    carryMoveRef.current = null;
+    const moveStarted = performance.now();
+    controller.move(state.txId, move.position);
+    carryMoveDurationsRef.current.push(performance.now() - moveStarted);
+    if (carryMoveDurationsRef.current.length > 256) carryMoveDurationsRef.current.shift();
+    if (drop?.txId === state.txId && drop.containerId === state.containerId) {
+      carryDropRef.current = null;
+      controller.drop(state.txId, move.position);
+    }
+  }, [nodes]);
 
   // ---- 边：三种系统边 + 紫色人笔；半受控（选中/删除交 RF），悬空端点直接丢弃 ----
   // 箭头语义：有方向的关系（分支/接力/手动）带箭头，亲缘无先后不带
@@ -1414,7 +1306,9 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   // 平面感知命中：卡片/容器上只认浮层（沉层垫在它们下面，视觉都被盖住了）；
   // 纯空地(pane)先浮后沉——看得见谁就点得到谁
   const hitDrawingAt = (fx, fy, planes = 'above') => {
-    const painted = presentedWorld(inkFrame?.renderedWorld, carryControllerRef.current?.state());
+    const painted = carryTargetWorld?.kind === 'batch'
+      ? carryTargetWorld.world
+      : presentedWorld(inkFrame?.renderedWorld, carryControllerRef.current?.state());
     const els = penActiveRef.current ? (drawRef.current?.getElements?.() || []) : (painted?.elements || []);
     const tol = 8 / (instRef.current?.getZoom() || 1);
     const above = hitDrawingElement(els.filter(el => !el.customData?.below), fx, fy, tol);
@@ -1541,12 +1435,12 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   //  容器承载律（FigJam/Miro 共识）：容器搬家，锚定其内的墨迹一起走。
   //  多容器重叠时面积小者优先认领，一个元素只跟一个容器
   // ============================================================
-  const dragStartRef = useRef(new Map());
-  const cancelledCarryRef = useRef(new Map());
   const onNodeDragStart = useCallback((event, node) => {
     if (!geometryAllowed()) return;
     if (node.type === 'district' || node.type === 'board') {
       cancelledCarryRef.current.delete(node.id);
+      carryMoveRef.current = null;
+      carryDropRef.current = null;
       const pointerDown = carryPointerDownRef.current;
       const from = pointerDown?.nodeId === node.id
         && Number.isFinite(pointerDown.x) && Number.isFinite(pointerDown.y)
@@ -1578,39 +1472,81 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       dragStartRef.current.set(node.id, {
         ...from, w: node.width ?? node.data._w, h: node.height ?? node.data._h,
         txId, pointerId, blocked: !txId,
-        activationX: event?.clientX ?? event?.nativeEvent?.clientX,
-        activationY: event?.clientY ?? event?.nativeEvent?.clientY,
-        zoom: instRef.current?.getZoom() || 1,
       });
       if (!txId) toast('正在保存上一笔画布操作');
     }
   }, [drawingCommitQueue, geometryAllowed, inkFrame, sceneMutationPendingRef, sceneToken]);
 
-  const followAnchoredDrawings = useCallback(moves => {
-    return commitDrawing(base => {
-      const els = base.elements;
-      if (!els.length) return null;
-      const claimed = new Set();
-      let next = els;
-      for (const m of [...moves].sort((a, b) => a.rect.w * a.rect.h - b.rect.w * b.rect.h)) {
-        if (!m.dx && !m.dy) continue;
-        const ids = anchoredDrawingIds(els, m.rect).filter(id => !claimed.has(id));
-        if (!ids.length) continue;
-        ids.forEach(id => claimed.add(id));
-        next = translateDrawingElements(next, ids, m.dx, m.dy);
-      }
-      return next === els ? null : { elements: next, files: base.files };
-    });
-  }, [commitDrawing]);
-
-  const containerRects = useCallback(() => {
-    const out = {};
-    for (const n of instRef.current?.getNodes() || []) {
-      if (n.type === 'district' || n.type === 'board') {
-        out[n.id] = { x: n.position.x, y: n.position.y, w: n.width ?? n.data._w, h: n.height ?? n.data._h };
-      }
+  const planArrangeBatch = useCallback(nextLayout => {
+    const rendered = inkFrame?.renderedWorld || null;
+    const requested = requestedWorldRef.current;
+    if ((canvas?.drawing || []).length
+      && (!rendered || rendered.revision !== requested?.revision || rendered.excludedIds !== requested.excludedIds)) {
+      return null;
     }
-    return out;
+    const before = buildGraph(
+      workspaces, sessionsByKey, layout, canvas?.boards, edges, expanded, searching,
+    );
+    const after = buildGraph(
+      workspaces, sessionsByKey, nextLayout, canvas?.boards, edges, expanded, searching,
+    );
+    return {
+      layout: nextLayout,
+      moves: planBatchCarry(before.nodes, after.nodes, rendered),
+    };
+  }, [canvas?.boards, canvas?.drawing, edges, expanded, inkFrame, layout, searching, sessionsByKey, workspaces]);
+
+  const presentBatchCarryResult = useCallback(result => {
+    if (!result?.movedIds?.length) return Promise.resolve({ status: 'ready' });
+    if (carryPendingFrameRef.current) return Promise.reject(new Error('已有容器承载正在交接'));
+    const targetFrameId = ++carryFrameSequenceRef.current;
+    const txId = `batch:${result.opId}`;
+    const requested = requestedWorldRef.current;
+    batchCarryBridgeRef.current ||= createBatchCarryBridge(rootRef.current);
+    batchCarryBridgeRef.current.present(result.moves);
+    setBatchCarryRetryable(false);
+    let settle;
+    let settled = false;
+    const handoff = new Promise(resolve => { settle = resolve; });
+    const settleOutcome = outcome => {
+      if (settled) return false;
+      settled = true;
+      settle(outcome);
+      return true;
+    };
+    {
+      carryPendingFrameRef.current = {
+        kind: 'batch',
+        txId,
+        opId: result.opId,
+        targetFrameId,
+        requestedRevision: null,
+        requestedExcludedIds: null,
+        settleOutcome,
+        failed: false,
+      };
+    }
+    setCarryTargetWorld({
+      kind: 'batch',
+      txId,
+      targetFrameId,
+      world: {
+        elements: result.drawing,
+        files: requested?.files || {},
+        excludedIds: NO_DRAWING_IDS,
+        revision: Math.max(worldRevisionRef.current, requested?.revision || 0) + 1,
+        generationId: targetFrameId,
+      },
+    });
+    return handoff;
+  }, []);
+
+  useEffect(() => () => {
+    const pending = carryPendingFrameRef.current;
+    if (pending?.kind !== 'batch') return;
+    pending.settleOutcome?.({ status: 'disposed' });
+    batchCarryBridgeRef.current?.clear();
+    carryPendingFrameRef.current = null;
   }, []);
 
   // 清空画布选中：Esc 与关面板共用（选中态与面板永不脱钩）
@@ -1688,9 +1624,9 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     if (actionsRef) actionsRef.current = {
       addNote, addBoard, fit: () => focusRef.current(null), toggleDraw: togglePen, clearSelection,
       geometryLocked, opening, prepareGeometry,
-      containerRects, followDrawings: followAnchoredDrawings,   // 容器承载律：整理/撤销的墨迹跟随出口
+      planArrangeBatch, presentBatchCarryResult,
     };
-  }, [built, focusRef, actionsRef, addNote, addBoard, togglePen, navigateDrawingFit, clearSelection, geometryLocked, opening, prepareGeometry, containerRects, followAnchoredDrawings]);
+  }, [built, focusRef, actionsRef, addNote, addBoard, togglePen, navigateDrawingFit, clearSelection, geometryLocked, opening, prepareGeometry, planArrangeBatch, presentBatchCarryResult]);
 
   const onNodeClick = useCallback((e, node) => {
     const hit = drawingHitFromEvent(e);   // 视觉最上层者赢：描边带上的点击优先归绘图，空心区照常穿透给卡片
@@ -1727,6 +1663,8 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     const start = dragStartRef.current.get(state.containerId);
     if (!start || start.txId !== state.txId) return false;
     if (pointerId !== undefined && start.pointerId !== pointerId) return false;
+    carryMoveRef.current = null;
+    carryDropRef.current = null;
     dragStartRef.current.delete(state.containerId);
     cancelledCarryRef.current.set(state.containerId, start);
     setDropHi(null);
@@ -1753,17 +1691,6 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     };
   }, [cancelActiveCarry]);
 
-  const visibleCarryPosition = (event, fallback, start) => {
-    const clientX = event?.clientX ?? event?.nativeEvent?.clientX;
-    const clientY = event?.clientY ?? event?.nativeEvent?.clientY;
-    if (!Number.isFinite(clientX) || !Number.isFinite(clientY)
-      || !Number.isFinite(start?.activationX) || !Number.isFinite(start?.activationY)) return fallback;
-    return {
-      x: start.x + (clientX - start.activationX) / start.zoom,
-      y: start.y + (clientY - start.activationY) / start.zoom,
-    };
-  };
-
   const onNodeDrag = useCallback((event, node) => {
     if (!geometryAllowed()) return;
     if (node.type === 'district' || node.type === 'board') {
@@ -1779,10 +1706,11 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
         setNodes(current => current.map(candidate => candidate.id === node.id
           ? { ...candidate, position: { x: start.x, y: start.y } } : candidate));
       } else if (start?.txId) {
-        const moveStarted = performance.now();
-        carryControllerRef.current?.move(start.txId, visibleCarryPosition(event, node.position, start));
-        carryMoveDurationsRef.current.push(performance.now() - moveStarted);
-        if (carryMoveDurationsRef.current.length > 256) carryMoveDurationsRef.current.shift();
+        carryMoveRef.current = {
+          txId: start.txId,
+          containerId: node.id,
+          position: { ...node.position },
+        };
       }
       return;
     }
@@ -1833,7 +1761,13 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
         setNodes(current => current.map(candidate => candidate.id === node.id
           ? { ...candidate, position: { x: start.x, y: start.y } } : candidate));
       } else if (start?.txId) {
-        carryControllerRef.current?.drop(start.txId, visibleCarryPosition(event, node.position, start));
+        carryDropRef.current = {
+          txId: start.txId,
+          containerId: node.id,
+          position: { ...node.position },
+        };
+        setNodes(current => current.map(candidate => candidate.id === node.id
+          ? { ...candidate, position: { ...node.position } } : candidate));
       }
     } else if (node.type === 'note') {
       onCanvasAction('setNote', { id: node.id, x: Math.round(node.position.x), y: Math.round(node.position.y) });
@@ -1900,8 +1834,10 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       const hitElements = drawingFrameHitElements(inkFrame);
       return {
         requestedRevision: requestedWorld?.revision ?? null,
+        requestedGenerationId: requestedWorld?.generationId ?? null,
         requestedElementIds: (requestedWorld?.elements || []).map(element => element.id),
         renderedRevision: rendered?.revision ?? null,
+        renderedGenerationId: rendered?.generationId ?? null,
         renderedElementIds: (rendered?.elements || []).map(element => element.id),
         hitRevision: hitElements === rendered?.elements ? (rendered?.revision ?? null) : null,
         hitElementIds: hitElements.map(element => element.id),
@@ -1936,13 +1872,18 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
         carryTargetFrame: (() => {
           const pending = carryPendingFrameRef.current;
           return pending ? {
+            kind: pending.kind,
             txId: pending.txId,
+            opId: pending.opId || null,
             targetFrameId: pending.targetFrameId,
             requestedRevision: pending.requestedRevision,
             excludedIdsCurrent: pending.requestedExcludedIds === requestedWorldRef.current?.excludedIds,
             generationCurrent: pending.targetFrameId === requestedWorldRef.current?.generationId,
+            failed: !!pending.failed,
           } : null;
         })(),
+        batchBridgeCount: batchCarryBridgeRef.current?.count() || 0,
+        batchCarryRetryable,
         viewport: instRef.current?.getViewport() || null,
         callbackEvents: [...frameTestEventsRef.current],
       };
@@ -1957,7 +1898,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     return () => {
       if (frameTestProbeRef.current === probe) frameTestProbeRef.current = null;
     };
-  }, [commitDrawing, exitDrawing, frameTestProbeRef, inkFrame, openDrawing, world.revision]);
+  }, [batchCarryRetryable, commitDrawing, exitDrawing, frameTestProbeRef, inkFrame, openDrawing, world.revision]);
 
   return (
     <div ref={rootRef} onPointerDownCapture={onRootPointerDownCapture}
@@ -2113,8 +2054,17 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
         {inkStatus}
       </div>
     )}
-    {carryView.phase === 'RETRYABLE_PAINT' && (
-      <button type="button" className="ink-carry-retry" onClick={() => carryControllerRef.current?.retry()}>
+    {(carryView.phase === 'RETRYABLE_PAINT' || batchCarryRetryable) && (
+      <button type="button" className="ink-carry-retry" onClick={() => {
+        const pendingFrame = carryPendingFrameRef.current;
+        if (pendingFrame?.kind === 'batch') {
+          pendingFrame.failed = false;
+          setBatchCarryRetryable(false);
+          setCarryRetryToken(token => token + 1);
+        } else {
+          carryControllerRef.current?.retry();
+        }
+      }}>
         重试显示批注
       </button>
     )}
