@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 4518 query(mode=performance|interaction, size=300|800, autorun=0|1) 与真实画布组件
- * [OUTPUT]: 性能报告/探针（含 DOM/rendered world revision 原子交接与 300/800 hole 开合局部分组指标）；interaction 动态加载真实 FlowCanvas 全内存验收页并共享 console/page error 原始 transcript
+ * [OUTPUT]: paint 后性能报告/探针（含 DOM/rendered world revision 原子交接与 300/800 hole 开合局部分组指标）；interaction 动态加载真实 FlowCanvas 全内存验收页并共享 console/page error 原始 transcript
  * [POS]: 无 API/无持久化的画布验收路由；performance 首屏闭包不静态引入 FlowCanvas
  * [PROTOCOL]: 变更时更新此头部，然后检查 README/web/CLAUDE.md
  */
@@ -8,10 +8,11 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client';
 import { ReactFlow, ReactFlowProvider } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import InkWorldLayer from '../../../web/src/canvas/InkWorldLayer.jsx';
+import '../../../web/src/theme.css';
 import {
   ACCEPTANCE_REDLINES, ACCEPTANCE_SAMPLES, createCanvasAcceptanceElements, mutateBelowPlane, mutateEarlyUniqueText,
 } from './fixture-data.js';
+import InkWorldLayer from '../../../web/src/canvas/InkWorldLayer.jsx';
 
 const BOOT_STARTED = performance.now();
 const params = new URLSearchParams(location.search);
@@ -74,6 +75,10 @@ const p95 = values => {
 };
 const summarize = values => ({ p95: p95(values), max: values.length ? Math.max(...values) : 0 });
 const nextFrame = () => new Promise(resolve => requestAnimationFrame(resolve));
+const afterPaint = async () => {
+  await nextFrame();
+  await nextFrame();
+};
 const ProbeNode = () => <div data-flow-anchor="true" />;
 
 async function measureViewportDrift(instance) {
@@ -102,6 +107,7 @@ function AcceptanceCanvas() {
   const worldRef = useRef(initialWorld.current);
   const revisionRef = useRef(1);
   const waitersRef = useRef(new Map());
+  const settlingRevisionsRef = useRef(new Set());
   const readiesRef = useRef([]);
   const instanceRef = useRef(null);
   const runSuiteRef = useRef(null);
@@ -137,26 +143,37 @@ function AcceptanceCanvas() {
   }, []);
 
   const onSnapshotReady = useCallback((revision, metrics, renderedWorld) => {
-    const ended = performance.now();
+    if (settlingRevisionsRef.current.has(revision)) return;
     const waiter = waitersRef.current.get(revision);
-    const domRevision = Number(document.querySelector('.ink-world')?.dataset.renderedRevision);
-    const result = {
-      revision, kind: waiter?.kind || 'untracked', metrics,
-      renderedRevision: renderedWorld?.revision,
-      domRevision,
-      renderedElementCount: renderedWorld?.elements?.length,
-      atomic: renderedWorld?.revision === revision && domRevision === revision,
-      started: waiter?.started ?? ended, ended,
-      duration: ended - (waiter?.started ?? ended),
-    };
-    readiesRef.current.push(result);
-    document.documentElement.dataset.lastReady = JSON.stringify(result);
     if (!waiter) return;
+    settlingRevisionsRef.current.add(revision);
     waitersRef.current.delete(revision);
-    waiter.resolve(result);
-    if (waiter.kind === 'cold-join' && AUTORUN && !startedRef.current) {
-      setTimeout(() => runSuiteRef.current?.(result), 0);
-    }
+    const domReadyAt = performance.now();
+    afterPaint().then(() => {
+      const paintSampleAt = performance.now();
+      const domRevision = Number(document.querySelector('.ink-world')?.dataset.renderedRevision);
+      const result = {
+        revision, kind: waiter?.kind || 'untracked', metrics,
+        renderedRevision: renderedWorld?.revision,
+        domRevision,
+        renderedElementCount: renderedWorld?.elements?.length,
+        atomic: renderedWorld?.revision === revision && domRevision === revision,
+        sampledAfterPaint: true,
+        timingBoundary: 'dom-ready+double-rAF-paint',
+        domReadyAt,
+        paintSampleAt,
+        started: waiter?.started ?? paintSampleAt,
+        ended: paintSampleAt,
+        duration: paintSampleAt - (waiter?.started ?? paintSampleAt),
+      };
+      readiesRef.current.push(result);
+      settlingRevisionsRef.current.delete(revision);
+      document.documentElement.dataset.lastReady = JSON.stringify(result);
+      waiter.resolve(result);
+      if (waiter.kind === 'cold-join' && AUTORUN && !startedRef.current) {
+        setTimeout(() => runSuiteRef.current?.(result), 0);
+      }
+    });
   }, []);
 
   const onSnapshotError = useCallback((revision, error, result) => {
@@ -218,6 +235,8 @@ function AcceptanceCanvas() {
         && readyReuse.metrics?.font?.reused === 1,
       renderedRevisionAtomic: [cold, readyReuse, holeOpen, holeClose, ...warm, fontChange, fontReadyReuse]
         .every(sample => sample.atomic && sample.renderedRevision === sample.revision && sample.domRevision === sample.revision),
+      sampledAfterPaint: [cold, readyReuse, holeOpen, holeClose, ...warm, fontChange, fontReadyReuse]
+        .every(sample => sample.sampledAfterPaint === true),
       holeOpenCloseLocal: [holeOpen, holeClose].every(sample => {
         const below = sample.metrics?.groupCounts?.below;
         const above = sample.metrics?.groupCounts?.above;
@@ -240,6 +259,8 @@ function AcceptanceCanvas() {
       frameCadence: drift.frameGaps.p95 <= ACCEPTANCE_REDLINES.rafP95
         && drift.frameGaps.max <= ACCEPTANCE_REDLINES.rafMax,
       pageErrors: PAGE_ERRORS.length === 0,
+      consoleErrors: CONSOLE_ERRORS.length === 0,
+      consoleWarnings: CONSOLE_WARNINGS.length === 0,
     };
     const report = {
       size: SIZE,
@@ -264,6 +285,8 @@ function AcceptanceCanvas() {
       checks,
       readies: readiesRef.current.length,
       pageErrors: [...PAGE_ERRORS],
+      consoleErrors: [...CONSOLE_ERRORS],
+      consoleWarnings: [...CONSOLE_WARNINGS],
     };
     const status = Object.values(checks).every(Boolean) ? 'pass' : 'fail';
     publish(status, report);

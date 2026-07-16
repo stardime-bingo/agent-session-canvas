@@ -16,6 +16,8 @@ npm run acceptance:canvas
 
 机器探针是 `window.__CANVAS_ACCEPTANCE__`，同时镜像到 `html[data-acceptance-status]` 与 `html[data-acceptance-report]`。完成时页面会发出 `canvas-acceptance-complete` 事件。
 
+`tests/canvas-browser.test.mjs` 会在 production static 4518 上依次重跑 300/800 两档。页面 CSP 不含 `unsafe-eval`，只有构建后识别出的真实 subset worker 入口响应拥有 worker 专属 `unsafe-eval + wasm-unsafe-eval`；验收同时要求 Worker 请求真实出现、页面自身 `status=pass`、全部 checks 与 paint 后采样为真，并且 console/page error、warning、外联与 API 资源均为零。
+
 交互模式只读探针是 `window.__CANVAS_INTERACTION__`，镜像到 `html[data-interaction-*]`：绘图总数与沉/浮面、action/commit log、选中 synthetic card、viewport、API resource 数以及 `pointerup → drawing-opening` 延迟。延迟探针只观察 pointerup 后 100ms：超时立即清空候选，因此小形状或已有元素稍后手动退出不会冒充自动退场。探针没有修改方法；所有验收动作必须通过真实 UI。`drawingCommit` 原样回写同一组 elements/files 引用，才能真实覆盖三真相收口。
 
 交互验收顺序：画大实心 rectangle/ellipse/diamond 后退场延迟 `<100ms`、单次 commit 且 below；点击被覆盖会话卡；toast 撤销；右键浮起/沉底；小形状/透明形状/selection 编辑不自动退；滚轮/捏合/平移相机不新增 commit。最后要求 console error/warning 为零、API resource 数为零。
@@ -43,7 +45,7 @@ curl -i http://127.0.0.1:4518/api/probe
 
 - 300 元素：cold 419.9ms，warm p95 12.1ms、max 12.4ms；每面 4 组，单次只新导出 below 1 组。
 - 800 元素：cold 400.3ms，warm p95 14.8ms、max 20.4ms；每面 9 组，单次只新导出 below 1 组。
-- 早期唯一字“龘→靐”使 font `exported=1`，同内容下一帧 `reused=1`；DOM 只有一个 `style[data-ink-fonts]`，几何组内 `@font-face` 数为 0，胶囊同时含 Virgil 与 Excalifont。
+- 早期唯一字“Q→Z”使 font `exported=1`，同内容下一帧 `reused=1`；两字符均受夹具字体支持，避免零字形 WOFF2 噪音。DOM 只有一个 `style[data-ink-fonts]`，几何组内 `@font-face` 数为 0，胶囊同时含 Virgil 与 Excalifont。
 - 两档视口漂移 max 0.0041px、页面异常 0、全部检查 PASS。
 
 被证伪的方案也保留：每组重复内联字体时 300 cold 587.4ms；“末个文字组持有字体”会漏掉早期组独有字符，因此即使性能过线也按正确性 FAIL。没有放宽红线，也没有用文案掩盖缺口。生产 build 另由 subset-worker 递归闭包硬门守住，不以 console 过滤或关闭 Worker 过关。

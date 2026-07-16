@@ -3,33 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; worker-src 'self' blob:; connect-src 'self'; form-action 'none'; object-src 'none'; base-uri 'none'" />
     <title>Canvas Acceptance 4518</title>
-    <style>
-      html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; }
-      body { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; background: #f8fafc; color: #0f172a; }
-      * { box-sizing: border-box; }
-      .fixture-shell { position: relative; width: 100%; height: 100%; }
-      .fixture-flow { width: 100%; height: 100%; }
-      .fixture-panel { position: absolute; z-index: 2000; top: 12px; right: 12px; width: min(430px, 42vw); max-height: calc(100% - 24px); overflow: auto; padding: 12px; border: 1px solid #cbd5e1; border-radius: 10px; background: rgb(255 255 255 / 94%); box-shadow: 0 8px 28px rgb(15 23 42 / 14%); }
-      .fixture-panel h1 { margin: 0 0 8px; font: 700 14px/1.2 ui-sans-serif, system-ui; }
-      .fixture-panel pre { margin: 0; white-space: pre-wrap; word-break: break-word; font-size: 10px; line-height: 1.45; }
-      .fixture-status { display: inline-block; margin-bottom: 8px; padding: 3px 7px; border-radius: 999px; background: #e2e8f0; font-size: 11px; }
-      .fixture-status[data-status="pass"] { background: #dcfce7; color: #166534; }
-      .fixture-status[data-status="fail"], .fixture-status[data-status="error"] { background: #fee2e2; color: #991b1b; }
-      .react-flow__viewport-portal { pointer-events: none; }
-      .ink-world { position: absolute; inset: 0; pointer-events: none; }
-      .ink-world-plane { position: absolute; pointer-events: none; transform-origin: 0 0; user-select: none; }
-      .ink-world-below { z-index: -1; }
-      .ink-world-above { z-index: 1000; }
-      .react-flow__node-probe { width: 1px !important; height: 1px !important; min-width: 1px; min-height: 1px; border: 0; padding: 0; pointer-events: none; }
-      [data-flow-anchor] { width: 1px; height: 1px; }
-      .interaction-panel { position: fixed; z-index: 3000; right: 12px; bottom: 12px; display: grid; gap: 3px; min-width: 230px; padding: 10px 12px; border: 1px solid #cbd5e1; border-radius: 10px; background: rgb(255 255 255 / 94%); box-shadow: 0 8px 28px rgb(15 23 42 / 14%); pointer-events: none; font: 11px/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; }
-      .interaction-panel strong { font: 700 13px/1.3 ui-sans-serif, system-ui; }
-    </style>
   </head>
   <body>
     <div id="root"></div>
-    <script>window.EXCALIDRAW_ASSET_PATH = '/';</script>
     <script type="module" src="/main.jsx"></script>
   </body>
 </html>

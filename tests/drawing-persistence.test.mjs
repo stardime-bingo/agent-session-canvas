@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createCanvasRepository, SceneError } from '../server/canvas-repository.mjs';
 import {
-  createDrawingDraftStore, drawingDraftClosureFingerprint,
+  createDrawingDraftCoordinator, createDrawingDraftStore, drawingDraftClosureFingerprint,
 } from '../web/src/canvas/drawing-draft-store.js';
 
 const dirs = [];
@@ -357,13 +357,126 @@ test('draft IndexedDB/quota failure is non-fatal and reports only once', async (
   assert.equal(warnings, 1);
 });
 
-test('draft integration gates hydration and rebases a failed closing journal to the committed token', () => {
-  const drawLayer = fs.readFileSync(new URL('../web/src/canvas/DrawLayer.jsx', import.meta.url), 'utf8');
-  const flowCanvas = fs.readFileSync(new URL('../web/src/canvas/FlowCanvas.jsx', import.meta.url), 'utf8');
-  assert.match(drawLayer, /advanceHandshake\('change'[\s\S]+if \(handshakeRef\.current\.ready\)[\s\S]+onDraftChange/s);
-  assert.match(flowCanvas, /const requestId = recovered\?\.requestId/s);
-  assert.match(flowCanvas, /draftJournal\.recover\(\{\s*sceneToken: sceneTokenRef\.current/s);
-  assert.match(flowCanvas, /const closedOk = await closed;[\s\S]+if \(closedOk && draftRequestRef\.current\)[\s\S]+draftJournal\.clear/s);
-  assert.match(flowCanvas, /if \(persisted && editBaseRef\.current && editTransactionRef\.current\)[\s\S]+sceneToken: committedSceneToken[\s\S]+draftJournal\.flush\(liveDraft\)/s);
-  assert.doesNotMatch(flowCanvas, /if \(persisted && editBaseRef\.current && editTransactionRef\.current\)[\s\S]{0,500}draftJournal\.clear/s);
+test('draft coordinator gates hydration, preserves conflicts, conditionally clears success and rebases closing failure locally', async () => {
+  const adapter = memoryDraftAdapter();
+  const coordinator = createDrawingDraftCoordinator(createDrawingDraftStore({ adapter, debounceMs: 0 }));
+  const baselineSnapshot = { elements: [rect('base')], files: {} };
+  const identity = coordinator.begin({
+    requestId: 'opening', sceneToken: 'scene-1', closureFingerprint: 'closure-1', baselineSnapshot,
+    mergeDraft: draft => draft,
+  });
+  const hydration = { elements: [rect('hydrated')], files: {} };
+  assert.equal(coordinator.schedule(hydration), 0, 'onReady 前不得写');
+  assert.equal(coordinator.markHydrated(identity), true);
+  assert.equal(coordinator.schedule(hydration), 0, '触发 onReady 的同一个 hydration change 不得写');
+  await coordinator.idle();
+  assert.equal(adapter.value(), null);
+
+  const changed = { elements: [rect('changed')], files: {} };
+  assert.equal(coordinator.schedule(changed), 1);
+  await coordinator.flush();
+  assert.equal(adapter.value().draft.elements[0].id, 'changed');
+  const conflict = await coordinator.recover({
+    sceneToken: 'scene-2', closureFingerprint: 'closure-1', baselineSnapshot,
+  });
+  assert.equal(conflict.status, 'conflict');
+  assert.equal(adapter.value().requestId, 'opening', '冲突必须保留原 journal');
+
+  const newer = coordinator.begin({
+    requestId: 'newer', sceneToken: 'scene-2', closureFingerprint: 'closure-2', baselineSnapshot,
+    mergeDraft: draft => draft,
+  });
+  coordinator.markHydrated(newer);
+  coordinator.schedule(hydration);
+  await coordinator.flush(changed);
+  assert.equal(await coordinator.clear(identity), false, '旧 closing success 不得清新 request');
+  assert.equal(adapter.value().requestId, 'newer');
+
+  let mergeCalls = 0;
+  const advancedBaseline = { elements: [rect('committed')], files: {} };
+  const rebased = await coordinator.rebaseAfterClosingFailure({
+    requestId: 'retry', sceneToken: 'scene-3', closureFingerprint: 'advanced-closure',
+    baselineSnapshot: advancedBaseline,
+    mergeDraft: draft => { mergeCalls++; return draft; },
+  }, { elements: [rect('retry-draft')], files: {} });
+  assert.equal(rebased.requestId, 'retry');
+  assert.equal(adapter.value().sceneToken, 'scene-3');
+  assert.equal(adapter.value().closureFingerprint, 'advanced-closure');
+  assert.equal(adapter.value().draft.elements[0].id, 'retry-draft');
+  const beforeLocalFlush = mergeCalls;
+  await coordinator.flush();
+  assert.equal(mergeCalls, beforeLocalFlush,
+    'pagehide/hidden 对应的无参 flush 只排空本地 journal，不触发提交或重算');
+});
+
+test('draft hydration skip only covers the synchronous ready-triggering change in both API/change orders', async () => {
+  const adapter = memoryDraftAdapter();
+  const coordinator = createDrawingDraftCoordinator(createDrawingDraftStore({ adapter, debounceMs: 0 }));
+  const input = requestId => ({
+    requestId, sceneToken: 'scene', closureFingerprint: 'closure',
+    baselineSnapshot: { elements: [], files: {} },
+    mergeDraft: draft => draft,
+  });
+  const hydration = { elements: [rect('hydration')], files: {} };
+  const user = { elements: [rect('user')], files: {} };
+
+  // API 先到：随后同一 onChange stack 内 onReady→onDraftChange，必须只跳过 hydration。
+  let identity = coordinator.begin(input('api-first'));
+  coordinator.markHydrated(identity);
+  assert.equal(coordinator.schedule(hydration), 0);
+  assert.equal(coordinator.schedule(user), 1);
+  await coordinator.flush();
+  assert.equal(adapter.value().draft.elements[0].id, 'user');
+
+  // change 先到：API 后到只触发 onReady，没有同 stack onDraftChange；microtask 后首笔用户 change 必须可写。
+  identity = coordinator.begin(input('change-first'));
+  coordinator.markHydrated(identity);
+  await Promise.resolve();
+  assert.equal(coordinator.schedule(user), 1);
+  await coordinator.flush();
+  assert.equal(adapter.value().requestId, 'change-first');
+  assert.equal(adapter.value().draft.elements[0].id, 'user');
+});
+
+test('draft late A put and clear cannot overwrite or delete active B across requestId/epoch/seq', async () => {
+  let value = null;
+  let releaseA;
+  let enteredA;
+  const aEntered = new Promise(resolve => { enteredA = resolve; });
+  const aGate = new Promise(resolve => { releaseA = resolve; });
+  const adapter = {
+    async get() { return structuredClone(value); },
+    async put(record) {
+      if (record.requestId === 'A') {
+        enteredA();
+        await aGate;
+      }
+      value = structuredClone(record);
+    },
+    async deleteIfIdentity(identity) {
+      if (value?.requestId !== identity?.requestId || value?.epoch !== identity?.epoch) return false;
+      value = null;
+      return true;
+    },
+  };
+  const store = createDrawingDraftStore({ adapter, debounceMs: 0 });
+  const baselineSnapshot = { elements: [], files: {} };
+  const A = store.begin({
+    requestId: 'A', sceneToken: 'scene-A', closureFingerprint: 'closure-A', baselineSnapshot,
+    mergeDraft: draft => draft,
+  });
+  const writingA = store.flush({ elements: [rect('A')], files: {} });
+  await aEntered;
+  const B = store.begin({
+    requestId: 'B', sceneToken: 'scene-B', closureFingerprint: 'closure-B', baselineSnapshot,
+    mergeDraft: draft => draft,
+  });
+  const writingB = store.flush({ elements: [rect('B')], files: {} });
+  const lateClearA = store.clear(A);
+  releaseA();
+  await Promise.all([writingA, writingB, lateClearA]);
+  assert.deepEqual(
+    { requestId: value.requestId, epoch: value.epoch, seq: value.seq, id: value.draft.elements[0].id },
+    { requestId: 'B', epoch: B.epoch, seq: 1, id: 'B' },
+  );
 });

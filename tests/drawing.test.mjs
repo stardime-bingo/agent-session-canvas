@@ -11,6 +11,18 @@ import {
   drawingAutoExitGestureStep, drawingClosingHandoffStep, drawingExitAction, drawingExitFailureNotice, drawingFilesSignature, drawingFontSignature, drawingFontSignaturesEqual, drawingFontWorkRoute, drawingFrameHitElements, drawingFrameRetryDecision, drawingFrameTruthStep, drawingOpeningRequestCurrent, drawingPlaneDirtyPlan, drawingPlaneGroupPlan, drawingPlaneGroups, drawingPlaneSignature, drawingPlaneSignaturesEqual, drawingPlaneSettledInFlight, drawingPlaneWorkRoute, drawingRestoredWorldOverride, drawingSnapshot, drawingWorldInputStep, drawingWorldSyncStep, hitDrawingElement, isLargeFilledDrawingElement, setDrawingElementPlane, splitDrawingPlanes,
   mergeDrawingTransaction, translateDrawingElements,
 } from '../web/src/canvas/drawing.js';
+import {
+  advanceAutoSinkUndoTicket, submitAutoSinkUndo,
+} from '../web/src/canvas/drawing-draft-store.js';
+import {
+  acceptanceCspFor, classifyAcceptanceRequest, selectAcceptanceFixture,
+} from '../scripts/serve-canvas-acceptance.mjs';
+import {
+  assertSharedChunkBudget, assertWorkerCoreIsolation, collectStaticClosure,
+} from '../scripts/verify-subset-worker-build.mjs';
+import {
+  EXCALIDRAW_FONT_LOCK, excalidrawLocalFonts,
+} from '../scripts/excalidraw-local-fonts.mjs';
 import { loadDrawingFiles, normalizeDrawingFiles, saveDrawingFiles } from '../server/drawing-files.mjs';
 import { createCanvasAcceptanceElements, mutateBelowPlane } from './fixtures/canvas-acceptance/fixture-data.js';
 
@@ -2239,23 +2251,35 @@ test('committed 队列单笔 reject 不推进基线也不毒死后续提交', as
   assert.deepEqual(final.elements.map(e => [e.id, e.x, e.y]), [['host', 15, 26]]);
 });
 
-test('自动沉底撤销按成功代际恢复完整 pre-commit elements/files，props 原样回读不破坏身份门', async () => {
+test('自动沉底撤销只浮起票据底板与绑定文字，新建及后续元素和文件必须保留', async () => {
   const beforeElements = [image('photo'), rect('host', 0, 0, 50, 50)];
   const beforeFiles = { photo: binary('photo') };
   const writes = [];
   const queue = createDrawingCommitQueue({ elements: beforeElements, files: beforeFiles }, async snapshot => { writes.push(snapshot); });
-  const before = queue.snapshot();
   const after = await queue.submit(base => ({
-    elements: [rect('zone', 0, 0, 500, 400, { backgroundColor: '#fff', customData: { below: true } })],
+    elements: [
+      ...base.elements,
+      rect('zone', 0, 0, 500, 400, { backgroundColor: '#fff', customData: { below: true } }),
+      { id: 'zone-label', type: 'text', containerId: 'zone', customData: { below: true } },
+    ],
     files: base.files,
   }));
+  const withLaterContent = await queue.submit(base => ({
+    elements: [...base.elements, rect('unrelated', 560, 0, 30, 30), image('later')],
+    files: { ...base.files, later: binary('later') },
+  }));
+  const ticket = { after: withLaterContent, sunkIds: ['zone'] };
 
-  assert.equal(queue.sync({ elements: after.elements, files: after.files }), after, '落盘 payload 的 props echo 必须保留同一成功代际');
-  const result = await queue.guardedRestore(after, before);
+  assert.equal(after.elements.find(element => element.id === 'zone').customData.below, true);
+  const result = await submitAutoSinkUndo(queue, ticket, setDrawingElementPlane);
   assert.equal(result.restored, true);
-  assert.deepEqual(result.snapshot.elements.map(el => el.id), ['element-photo', 'host']);
-  assert.deepEqual(result.snapshot.files, { photo: binary('photo') });
-  assert.equal(writes.length, 2);
+  assert.deepEqual(result.snapshot.elements.map(el => el.id), [
+    'element-photo', 'host', 'zone', 'zone-label', 'unrelated', 'element-later',
+  ]);
+  assert.equal(result.snapshot.elements.find(el => el.id === 'zone').customData.below, false);
+  assert.equal(result.snapshot.elements.find(el => el.id === 'zone-label').customData.below, false);
+  assert.deepEqual(result.snapshot.files, { photo: binary('photo'), later: binary('later') });
+  assert.equal(writes.length, 3);
 });
 
 test('自动沉底撤销在真正出队时判代：后续成功使其失效，后续失败则仍可恢复', async () => {
@@ -2266,22 +2290,20 @@ test('自动沉底撤销在真正出队时判代：后续成功使其失效，�
       throw new Error('synthetic later failure');
     }
   });
-  const before = queue.snapshot();
   const after = await queue.submit(base => ({ elements: [...base.elements, rect('zone', 0, 0, 500, 400)], files: base.files }));
   const later = queue.submit(base => ({ elements: translateDrawingElements(base.elements, ['host'], 5, 0), files: base.files }));
-  const staleUndo = queue.guardedRestore(after, before);
+  const staleUndo = submitAutoSinkUndo(queue, { after, sunkIds: ['zone'] }, setDrawingElementPlane);
   await later;
   assert.equal((await staleUndo).restored, false);
   assert.equal(queue.snapshot().elements.find(el => el.id === 'host').x, 5);
 
-  const beforeSecond = queue.snapshot();
   const afterSecond = await queue.submit(base => ({ elements: [...base.elements, rect('zone-2', 0, 0, 500, 400)], files: base.files }));
   failNext = true;
   const failedLater = queue.submit(base => ({ elements: deleteDrawingElement(base.elements, 'host'), files: base.files }));
-  const survivingUndo = queue.guardedRestore(afterSecond, beforeSecond);
+  const survivingUndo = submitAutoSinkUndo(queue, { after: afterSecond, sunkIds: ['zone-2'] }, setDrawingElementPlane);
   await assert.rejects(failedLater, /synthetic later failure/);
   assert.equal((await survivingUndo).restored, true);
-  assert.deepEqual(queue.snapshot().elements.map(el => el.id), ['host', 'zone']);
+  assert.equal(queue.snapshot().elements.find(el => el.id === 'zone-2').customData.below, false);
 });
 
 test('撤销持久化失败不推进 committed 队列成功代际', async () => {
@@ -2290,10 +2312,274 @@ test('撤销持久化失败不推进 committed 队列成功代际', async () => 
     writes++;
     if (writes === 2) throw new Error('synthetic undo failure');
   });
-  const before = queue.snapshot();
   const after = await queue.submit(base => ({ elements: [...base.elements, rect('zone', 0, 0, 500, 400)], files: base.files }));
-  await assert.rejects(queue.guardedRestore(after, before), /synthetic undo failure/);
+  await assert.rejects(
+    submitAutoSinkUndo(queue, { after, sunkIds: ['zone'] }, setDrawingElementPlane),
+    /synthetic undo failure/,
+  );
   assert.equal(queue.snapshot(), after);
+});
+
+test('closing paint retry advances only the exact auto-sink ticket generation', () => {
+  const transaction = { kind: 'new' };
+  const advanced = { kind: 'new', originalIds: ['zone'] };
+  const sunk = id => rect(id, 0, 0, 500, 400, { customData: { below: true } });
+  const first = { elements: [sunk('zone'), sunk('other')], files: {} };
+  const ticket = advanceAutoSinkUndoTicket(null, {
+    transaction, commitBase: {}, committed: first, advancedTransaction: advanced, sunkIds: ['zone'],
+  });
+  assert.deepEqual(ticket.sunkIds, ['zone']);
+  assert.equal(ticket.after, first);
+  assert.equal(ticket.transaction, advanced);
+
+  const retried = { elements: [sunk('zone'), { ...sunk('other'), customData: { below: false } }], files: {} };
+  const retryAdvanced = { kind: 'new', originalIds: ['zone'] };
+  const continued = advanceAutoSinkUndoTicket(ticket, {
+    transaction: advanced, commitBase: first, committed: retried, advancedTransaction: retryAdvanced,
+  });
+  assert.equal(continued.after, retried, '同一 closing retry 必须延续票据到新成功代');
+  assert.equal(continued.transaction, retryAdvanced);
+
+  const partialTicket = { ...ticket, sunkIds: ['zone', 'other', 'deleted'] };
+  const partial = advanceAutoSinkUndoTicket(partialTicket, {
+    transaction: advanced, commitBase: first, committed: retried, advancedTransaction: retryAdvanced,
+  });
+  assert.deepEqual(partial.sunkIds, ['zone'], '已手动浮起或删除的 sunkId 不得被重试票据重新接管');
+
+  const other = advanceAutoSinkUndoTicket(ticket, {
+    transaction: {}, commitBase: first, committed: retried, advancedTransaction: {},
+  });
+  assert.equal(other, ticket, '别代事务不得接管票据');
+});
+
+test('4518 只选择 allowlisted production fixture，并拒绝写请求、仓库路径与编码 traversal', () => {
+  assert.equal(selectAcceptanceFixture([]), 'carry');
+  assert.equal(selectAcceptanceFixture(['--fixture=canvas']), 'canvas');
+  assert.throws(() => selectAcceptanceFixture(['--fixture=repo']), /unsupported/);
+  assert.throws(() => selectAcceptanceFixture(['--fixture=carry', '--fixture=canvas']), /exactly once/);
+
+  for (const requestUrl of [
+    '/api/graph', '/data/canvas.json', '/@fs/private', '/.git/config',
+    '/assets/../data/canvas.json', '/assets/%2e%2e/data/canvas.json',
+    '/%2e%2e/%2e%2e/etc/passwd', '/%2Fetc/passwd', '/assets/%5c..%5cdata',
+  ]) {
+    assert.equal(classifyAcceptanceRequest('GET', requestUrl).status, 403, requestUrl);
+  }
+  assert.equal(classifyAcceptanceRequest('POST', '/').status, 405);
+  assert.equal(classifyAcceptanceRequest('HEAD', '/assets/main.js').status, 200);
+  assert.equal(classifyAcceptanceRequest('GET', '/main.jsx').status, 404);
+  assert.deepEqual(classifyAcceptanceRequest('GET', '/'), { status: 200, relative: 'index.html' });
+
+  const worker = 'assets/excal-subset-worker~subset-worker.chunk-lock.js';
+  const entries = new Set([worker]);
+  assert.doesNotMatch(acceptanceCspFor('index.html', entries), /'unsafe-eval'/);
+  assert.doesNotMatch(acceptanceCspFor('assets/unrelated.js', entries), /'unsafe-eval'/);
+  assert.match(acceptanceCspFor(worker, entries), /'unsafe-eval'/);
+  assert.match(acceptanceCspFor(worker, entries), /'wasm-unsafe-eval'/);
+});
+
+test('shared Excalidraw font plugin rewrites the one locked fallback and rejects every drift axis', () => {
+  const id = path.resolve('node_modules/@excalidraw/excalidraw/dist/prod/chunk-K2UTITRG.js');
+  const source = fs.readFileSync(id, 'utf8');
+  const hash = value => createHash('sha256').update(value).digest('hex');
+
+  const valid = excalidrawLocalFonts();
+  valid.buildStart();
+  const transformed = valid.transform(source, id);
+  valid.buildEnd();
+  assert.doesNotMatch(transformed.code, /https:\/\/esm\.sh\//);
+  assert.match(transformed.code, /ASSETS_FALLBACK_URL",window\.location\.origin\+"\/"/);
+  assert.match(transformed.code, /Active worker did not respond/);
+
+  const wrongVersion = excalidrawLocalFonts({ packageVersion: '0.18.2' });
+  assert.throws(() => wrongVersion.buildStart(), /version drift/);
+
+  const wrongId = excalidrawLocalFonts();
+  wrongId.buildStart();
+  assert.equal(wrongId.transform(source, id.replace('chunk-K2UTITRG.js', 'chunk-other.js')), null);
+  assert.throws(() => wrongId.buildEnd(), /transformed 0/);
+
+  const wrongHash = excalidrawLocalFonts({
+    lock: { ...EXCALIDRAW_FONT_LOCK, sha256: '0'.repeat(64) },
+  });
+  wrongHash.buildStart();
+  assert.throws(() => wrongHash.transform(source, id), /SHA drift/);
+
+  const zeroHitSource = source.replace(
+    EXCALIDRAW_FONT_LOCK.remoteSource,
+    '`https://example.invalid/excalidraw/`',
+  );
+  const zeroHit = excalidrawLocalFonts({
+    lock: { ...EXCALIDRAW_FONT_LOCK, sha256: hash(zeroHitSource) },
+  });
+  zeroHit.buildStart();
+  assert.throws(() => zeroHit.transform(zeroHitSource, id), /matches 0/);
+
+  const multiHitSource = `${source}\n/* ${EXCALIDRAW_FONT_LOCK.remoteSource} */`;
+  const multiHit = excalidrawLocalFonts({
+    lock: { ...EXCALIDRAW_FONT_LOCK, sha256: hash(multiHitSource) },
+  });
+  multiHit.buildStart();
+  assert.throws(() => multiHit.transform(multiHitSource, id), /matches 2/);
+
+  const repeatedModule = excalidrawLocalFonts();
+  repeatedModule.buildStart();
+  repeatedModule.transform(source, id);
+  assert.throws(() => repeatedModule.transform(source, `${id}?duplicate`), /matched 2 modules/);
+});
+
+test('recursive build closure catches a two-hop worker core leak while allowing a small shared bridge', () => {
+  const source = new Map([
+    ['worker.js', 'import "./bridge.js"; self.onmessage=()=>{}'],
+    ['bridge.js', 'import "./core.js";'],
+    ['core.js', 'WebAssembly.compile()'],
+    ['prod.js', 'import "./shared.js";'],
+    ['app.js', 'import "./prod.js";'],
+    ['shared.js', 'export const shared=1'],
+    ['leak.js', 'import "./core.js";'],
+    ['bad-app.js', 'import "./leak.js";'],
+  ]);
+  const workerClosure = collectStaticClosure('worker.js', source, 'worker');
+  const prodClosure = collectStaticClosure('prod.js', source, 'prod');
+  const appClosure = collectStaticClosure('app.js', source, 'app');
+  assert.doesNotThrow(() => assertWorkerCoreIsolation({
+    workerEntry: 'worker.js', prodEntry: 'prod.js', appEntry: 'app.js', workerCore: 'core.js',
+    workerClosure, prodClosure, appClosure,
+  }));
+  const badAppClosure = collectStaticClosure('bad-app.js', source, 'bad-app');
+  assert.throws(() => assertWorkerCoreIsolation({
+    workerEntry: 'worker.js', prodEntry: 'prod.js', appEntry: 'bad-app.js', workerCore: 'core.js',
+    workerClosure, prodClosure, appClosure: badAppClosure,
+  }), /app main closure eagerly imports worker-only core/);
+  assert.throws(() => collectStaticClosure('missing.js', source, 'missing'), /missing static/);
+  const sizes = new Map([['bridge.js', 20_000], ['shared.js', 30_000], ['large.js', 64_001]]);
+  assert.deepEqual(
+    assertSharedChunkBudget(['bridge.js', 'shared.js'], file => sizes.get(file), 'synthetic'),
+    [{ file: 'bridge.js', bytes: 20_000 }, { file: 'shared.js', bytes: 30_000 }],
+  );
+  assert.throws(
+    () => assertSharedChunkBudget(['large.js'], file => sizes.get(file), 'synthetic'),
+    /exceeds 64000B/,
+  );
+});
+
+test('action toast renders a live region, claims once, and hover/focus pause preserves remaining lifetime', async t => {
+  const [{ createServer }, React, { renderToStaticMarkup }] = await Promise.all([
+    import('vite'),
+    import('react'),
+    import('react-dom/server'),
+  ]);
+  const vite = await createServer({
+    appType: 'custom',
+    clearScreen: false,
+    configFile: false,
+    logLevel: 'silent',
+    root: path.resolve('web'),
+    server: { middlewareMode: true },
+  });
+  t.after(() => vite.close());
+  const {
+    ToastItem, UIHost, appendToastStack, claimToastAction, createToastAutoClose,
+  } = await vite.ssrLoadModule('/src/ui.jsx');
+  const markup = renderToStaticMarkup(React.createElement(UIHost));
+  assert.match(markup, /role="status"/);
+  assert.match(markup, /aria-live="polite"/);
+
+  const button = { disabled: false };
+  let actions = 0;
+  assert.equal(claimToastAction(button, () => { actions++; }), true);
+  assert.equal(claimToastAction(button, () => { actions++; }), false);
+  assert.equal(actions, 1);
+
+  let clock = 1000;
+  let scheduled = null;
+  let closes = 0;
+  const lifetime = createToastAutoClose({
+    durationMs: 30000,
+    onClose: () => { closes++; },
+    now: () => clock,
+    setTimer: (callback, delay) => {
+      scheduled = { callback, delay };
+      return scheduled;
+    },
+    clearTimer: handle => { if (scheduled === handle) scheduled = null; },
+  });
+  assert.equal(scheduled.delay, 30000);
+  clock += 4000;
+  lifetime.pause();
+  assert.equal(lifetime.remaining(), 26000);
+  assert.equal(scheduled, null, 'hover/focus pause 必须撤销当前自动关闭');
+  clock += 60000;
+  lifetime.resume();
+  assert.equal(scheduled.delay, 26000, '离开 hover/focus 后只恢复剩余时长');
+  scheduled.callback();
+  assert.equal(closes, 1);
+
+  const makeLifetime = () => {
+    let current = null;
+    const value = createToastAutoClose({
+      durationMs: 30000,
+      onClose: () => {},
+      now: () => clock,
+      setTimer: (callback, delay) => {
+        current = { callback, delay };
+        return current;
+      },
+      clearTimer: handle => { if (current === handle) current = null; },
+    });
+    return { value, scheduled: () => current };
+  };
+  const eventProps = lifetimeValue => ToastItem({
+    item: { id: 7, msg: '可撤销', type: 'info', action: null },
+    lifetime: lifetimeValue,
+    onDismiss: () => {},
+  }).props;
+
+  clock = 1000;
+  const hoverFirst = makeLifetime();
+  const hoverFirstEvents = eventProps(hoverFirst.value);
+  clock += 4000;
+  hoverFirstEvents.onMouseEnter();
+  assert.equal(hoverFirst.value.remaining(), 26000);
+  clock += 5000;
+  hoverFirstEvents.onFocusCapture();
+  hoverFirstEvents.onMouseLeave();
+  assert.equal(hoverFirst.scheduled(), null, 'hover 释放时 focus reason 仍在，不得恢复 timer');
+  assert.equal(hoverFirst.value.remaining(), 26000, '组合 pause reason 只扣首次进入暂停前的时长');
+  hoverFirstEvents.onBlurCapture({ currentTarget: { contains: () => false }, relatedTarget: null });
+  assert.equal(hoverFirst.scheduled().delay, 26000, '最后 focus reason 释放才恢复剩余时长');
+  hoverFirst.value.cancel();
+
+  clock = 1000;
+  const focusFirst = makeLifetime();
+  const focusFirstEvents = eventProps(focusFirst.value);
+  clock += 3000;
+  focusFirstEvents.onFocusCapture();
+  assert.equal(focusFirst.value.remaining(), 27000);
+  clock += 7000;
+  focusFirstEvents.onMouseEnter();
+  const inside = {};
+  focusFirstEvents.onBlurCapture({ currentTarget: { contains: target => target === inside }, relatedTarget: inside });
+  assert.equal(focusFirst.scheduled(), null, '焦点仍在 toast 内部时不得释放 focus reason');
+  focusFirstEvents.onBlurCapture({ currentTarget: { contains: () => false }, relatedTarget: null });
+  assert.equal(focusFirst.scheduled(), null, 'focus 释放时 hover reason 仍在，不得恢复 timer');
+  assert.equal(focusFirst.value.remaining(), 27000, 'focus→hover 也只扣一次 remaining');
+  focusFirstEvents.onMouseLeave();
+  assert.equal(focusFirst.scheduled().delay, 27000, '最后 hover reason 释放才恢复 timer');
+  focusFirst.value.cancel();
+
+  const cancelled = [];
+  const lifetimes = new Map([1, 2, 3, 4].map(id => [id, {
+    cancel: () => cancelled.push(id),
+  }]));
+  const nextItems = appendToastStack(
+    [1, 2, 3].map(id => ({ id })),
+    { id: 4 },
+    lifetimes,
+  );
+  assert.deepEqual(nextItems.map(item => item.id), [2, 3, 4]);
+  assert.deepEqual(cancelled, [1], '可见栈淘汰必须同步撤销旧计时器');
+  assert.deepEqual([...lifetimes.keys()], [2, 3, 4], '可见栈淘汰不得在 lifetime Map 留残项');
 });
 
 test('whenIdle 创建后追加的成功提交也必须纳入稳定排空，并让 restored 代际失效', async () => {

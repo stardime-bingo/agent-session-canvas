@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 react
- * [OUTPUT]: 对外提供 Icon 单色图标集（含绘图选择/画笔/终端/滚轮模式三态）、支持撤销动作的 toast()、confirmPop()、<UIHost/>、<InlineEdit/> 就地改名
+ * [OUTPUT]: 对外提供 Icon 单色图标集（含绘图选择/画笔/终端/滚轮模式三态）、可读屏且 hover/focus reason 组合暂停关闭的 toast()、confirmPop()、<UIHost/>、<InlineEdit/> 就地改名
  * [POS]: web 的 UI 原子库——自绘轻提示/确认弹层/行内编辑，全面取代原生 alert/confirm/prompt 与 emoji 图标
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -61,20 +61,128 @@ export const toast = (msg, type = 'info', action = null) => pushToast(msg, type,
     坐标缺省时落屏幕中上——键盘触发的删除也有处安身 */
 export const confirmPop = opts => openConfirm(opts);
 
+export function claimToastAction(button, action) {
+  if (button.disabled) return false;
+  button.disabled = true;
+  action();
+  return true;
+}
+
+export function createToastAutoClose({
+  durationMs,
+  onClose,
+  setTimer = setTimeout,
+  clearTimer = clearTimeout,
+  now = Date.now,
+}) {
+  let remainingMs = durationMs;
+  let startedAt = null;
+  let handle = null;
+  let closed = false;
+  const pauseReasons = new Set();
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    handle = null;
+    onClose();
+  };
+  const schedule = () => {
+    if (closed || handle !== null || pauseReasons.size) return;
+    startedAt = now();
+    handle = setTimer(close, remainingMs);
+  };
+  const pause = (reason = 'manual') => {
+    if (closed || pauseReasons.has(reason)) return;
+    pauseReasons.add(reason);
+    if (handle === null) return;
+    clearTimer(handle);
+    handle = null;
+    remainingMs = Math.max(0, remainingMs - (now() - startedAt));
+  };
+  const resume = (reason = 'manual') => {
+    if (closed || !pauseReasons.delete(reason)) return;
+    schedule();
+  };
+  const cancel = () => {
+    if (handle !== null) clearTimer(handle);
+    handle = null;
+    closed = true;
+    pauseReasons.clear();
+  };
+  schedule();
+  return Object.freeze({ pause, resume, cancel, remaining: () => remainingMs });
+}
+
+export function appendToastStack(items, next, lifetimes, limit = 3) {
+  const keepCount = Math.max(0, limit - 1);
+  const retained = keepCount ? items.slice(-keepCount) : [];
+  const retainedIds = new Set(retained.map(item => item.id));
+  for (const item of items) {
+    if (retainedIds.has(item.id)) continue;
+    lifetimes.get(item.id)?.cancel();
+    lifetimes.delete(item.id);
+  }
+  return [...retained, next];
+}
+
+export function ToastItem({ item, lifetime, onDismiss }) {
+  return (
+    <div
+      className={`toast ${item.type}`}
+      onMouseEnter={() => lifetime?.pause('hover')}
+      onMouseLeave={() => lifetime?.resume('hover')}
+      onFocusCapture={() => lifetime?.pause('focus')}
+      onBlurCapture={event => {
+        if (!event.currentTarget.contains(event.relatedTarget)) lifetime?.resume('focus');
+      }}
+    >
+      <span>{item.msg}</span>
+      {item.action && (
+        <button className="toast-action" onClick={event => {
+          claimToastAction(event.currentTarget, () => {
+            onDismiss();
+            item.action.onClick();
+          });
+        }}>{item.action.label}</button>
+      )}
+    </div>
+  );
+}
+
 export function UIHost() {
   const [toasts, setToasts] = useState([]);
   const [cf, setCf] = useState(null);
+  const toastLifetimes = useRef(new Map());
+
+  const dismissToast = id => {
+    toastLifetimes.current.get(id)?.cancel();
+    toastLifetimes.current.delete(id);
+    setToasts(items => items.filter(item => item.id !== id));
+  };
 
   useEffect(() => {
     pushToast = (msg, type, action) => {
       const id = Date.now() + Math.random();
-      setToasts(t => [...t.slice(-2), { id, msg, type, action }]);
-      setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 3400);
+      const next = { id, msg, type, action };
+      const lifetime = createToastAutoClose({
+        durationMs: action ? 30000 : 3400,
+        onClose: () => {
+          toastLifetimes.current.delete(id);
+          setToasts(items => items.filter(item => item.id !== id));
+        },
+      });
+      toastLifetimes.current.set(id, lifetime);
+      setToasts(items => appendToastStack(items, next, toastLifetimes.current));
     };
     openConfirm = opts => new Promise(resolve => {
       setCf({ yesLabel: '确认', ...opts, resolve });
     });
-    return () => { pushToast = () => {}; openConfirm = () => Promise.resolve(false); };
+    return () => {
+      pushToast = () => {};
+      openConfirm = () => Promise.resolve(false);
+      for (const lifetime of toastLifetimes.current.values()) lifetime.cancel();
+      toastLifetimes.current.clear();
+    };
   }, []);
 
   const settle = ok => { cf.resolve(ok); setCf(null); };
@@ -115,21 +223,16 @@ export function UIHost() {
         </>
       )}
       {/* ===== 轻提示栈 ===== */}
-      {toasts.length > 0 && (
-        <div className="toast-stack">
+      <div className="toast-stack" role="status" aria-live="polite" aria-atomic="false">
           {toasts.map(t => (
-            <div key={t.id} className={`toast ${t.type}`}>
-              <span>{t.msg}</span>
-              {t.action && (
-                <button className="toast-action" onClick={() => {
-                  setToasts(xs => xs.filter(x => x.id !== t.id));
-                  t.action.onClick();
-                }}>{t.action.label}</button>
-              )}
-            </div>
+            <ToastItem
+              key={t.id}
+              item={t}
+              lifetime={toastLifetimes.current.get(t.id)}
+              onDismiss={() => dismissToast(t.id)}
+            />
           ))}
-        </div>
-      )}
+      </div>
     </>
   );
 }
