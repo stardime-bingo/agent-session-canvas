@@ -10,7 +10,13 @@ async function call(path, opts) {
   let data;
   try { data = await res.json(); }
   catch { throw new Error(`${res.status} ${res.statusText}`); }   // HTML 错误页不许变成 JSON 天书
-  if (!res.ok) throw new Error(data.error || res.statusText);
+  if (!res.ok) {
+    const error = new Error(data.error || res.statusText);
+    error.status = res.status;
+    error.code = data.code;
+    error.sceneToken = data.sceneToken;
+    throw error;
+  }
   return data;
 }
 
@@ -43,6 +49,8 @@ export const api = {
   setDrawing: (elements, files) => post('/api/drawing-set', {
     elements, ...(files === undefined ? {} : { files }),
   }),
+  containerCarry: command => post('/api/container-carry', command),
+  containerCarryStatus: opId => call(`/api/container-carry-status?opId=${encodeURIComponent(opId)}`),
   createFromEdge: payload => post('/api/node-from-edge', payload),
   del: (key, force) => post('/api/delete', { key, force }),
   backfill: () => post('/api/backfill', {}),

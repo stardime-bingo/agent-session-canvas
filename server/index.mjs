@@ -13,11 +13,14 @@ import { scanAll } from './scanner.mjs';
 import { launch } from './launcher.mjs';
 import { summarize, makeHandoff, extractDigest, extractEndingDigest, extractContextPage, nameSession } from './ai.mjs';
 import { runBackfill, backfillStatus, findCandidates } from './backfill.mjs';
-import { WEB_DIST, loadEnrich, updateEnrich, appendJsonlVerified, DATA_DIR, readJson, writeJson } from './store.mjs';
+import { WEB_DIST, loadEnrich, updateEnrich, appendJsonlVerified, DATA_DIR } from './store.mjs';
 import { loadDrawingFiles, saveDrawingFiles } from './drawing-files.mjs';
 import { createNodeFromEdge } from './canvas-actions.mjs';
+import { createCanvasRepository } from './canvas-repository.mjs';
 
 const PORT = +process.env.AGENT_CANVAS_PORT || 4517;   // 环境变量仅供并行实例测试，生产恒为 4517
+const canvasRepository = createCanvasRepository(DATA_DIR);
+canvasRepository.recover();   // 启动先闭合遗留事务，备份与任何路由才可观察 scene
 
 // ============================================================
 //  图数据缓存 + SSE 广播：文件变化 → 防抖重扫 → 推送前端
@@ -108,10 +111,13 @@ for (const dir of [
 // ============================================================
 const findSession = key => graph.sessions.find(s => s.key === key);
 
-const LAYOUT_FILE = path.join(DATA_DIR, 'layout.json');
-const CANVAS_FILE = path.join(DATA_DIR, 'canvas.json');   // 用户手绘层：连线与便签，永不被扫描覆盖
-
-const loadCanvas = () => ({ edges: [], notes: [], boards: [], drawing: [], ...readJson(CANVAS_FILE, {}) });
+const districtOf = cwd => {
+  const parts = String(cwd).split('/').filter(Boolean);
+  if (parts[0] === 'Users') return parts.slice(2, 4).join(' / ') || '~';
+  return '/' + (parts[0] || '');
+};
+const districtIds = () => new Set(Object.keys(graph.workspaces || {}).map(cwd => `district:${districtOf(cwd)}`));
+const withToken = ({ result, sceneToken }) => ({ ...result, sceneToken });
 
 // 布局条目字段合并：x/y/d/w/h 只更新送来的，w/h 支撑街区手动调尺寸
 function pickLayout(src, prev) {
@@ -122,115 +128,117 @@ function pickLayout(src, prev) {
 
 const routes = {
   // 画布手工布局与手绘层随图下发
-  'GET /api/graph': async () => ({
-    ...graph,
-    layout: readJson(LAYOUT_FILE, {}),
-    canvas: { ...loadCanvas(), drawingFiles: loadDrawingFiles(DATA_DIR) },
-  }),
+  'GET /api/graph': async () => {
+    const scene = canvasRepository.read();
+    return {
+      ...graph, layout: scene.layout, sceneToken: scene.sceneToken,
+      canvas: { ...scene.canvas, drawingFiles: loadDrawingFiles(DATA_DIR) },
+    };
+  },
 
   // ---- 手动连线：紫色人笔，同对去重 ----
   'POST /api/edge-add': async body => {
-    const canvas = loadCanvas();
-    const dup = canvas.edges.find(e =>
-      (e.from === body.from && e.to === body.to) || (e.from === body.to && e.to === body.from));
-    if (dup) return dup;
-    const edge = { id: `manual:${Date.now()}`, from: body.from, to: body.to };
-    canvas.edges.push(edge);
-    writeJson(CANVAS_FILE, canvas);
-    return edge;
+    return withToken(canvasRepository.mutate(scene => {
+      const dup = scene.canvas.edges.find(e =>
+        (e.from === body.from && e.to === body.to) || (e.from === body.to && e.to === body.from));
+      if (dup) return dup;
+      const edge = { id: `manual:${Date.now()}`, from: body.from, to: body.to };
+      scene.canvas.edges.push(edge);
+      return edge;
+    }));
   },
 
   'POST /api/edge-del': async body => {
-    const canvas = loadCanvas();
-    canvas.edges = canvas.edges.filter(e => e.id !== body.id);
-    writeJson(CANVAS_FILE, canvas);
-    return { ok: true };
+    return withToken(canvasRepository.mutate(scene => {
+      scene.canvas.edges = scene.canvas.edges.filter(e => e.id !== body.id);
+      return { ok: true };
+    }));
   },
 
   // ---- 便签：补丁式合并（只更新送来的字段），拖动/打字/换色并发不互相覆盖 ----
   'POST /api/note-set': async body => {
-    const canvas = loadCanvas();
-    const patch = {};
-    for (const k of ['x', 'y', 'text', 'color', 'w', 'h']) if (body[k] !== undefined) patch[k] = body[k];
-    const i = canvas.notes.findIndex(n => n.id === body.id);
-    let note;
-    if (i >= 0) {
-      note = canvas.notes[i] = { ...canvas.notes[i], ...patch };
-    } else {
-      note = { id: body.id || `note:${Date.now()}`, x: 0, y: 0, text: '', color: 'yellow', ...patch };
-      canvas.notes.push(note);
-    }
-    writeJson(CANVAS_FILE, canvas);
-    return note;
+    return withToken(canvasRepository.mutate(scene => {
+      const patch = {};
+      for (const k of ['x', 'y', 'text', 'color', 'w', 'h']) if (body[k] !== undefined) patch[k] = body[k];
+      const i = scene.canvas.notes.findIndex(n => n.id === body.id);
+      if (i >= 0) return scene.canvas.notes[i] = { ...scene.canvas.notes[i], ...patch };
+      const note = { id: body.id || `note:${Date.now()}`, x: 0, y: 0, text: '', color: 'yellow', ...patch };
+      scene.canvas.notes.push(note);
+      return note;
+    }));
   },
 
   'POST /api/note-del': async body => {
-    const canvas = loadCanvas();
-    canvas.notes = canvas.notes.filter(n => n.id !== body.id);
-    writeJson(CANVAS_FILE, canvas);
-    return { ok: true };
+    return withToken(canvasRepository.mutate(scene => {
+      scene.canvas.notes = scene.canvas.notes.filter(n => n.id !== body.id);
+      return { ok: true };
+    }));
   },
 
   // ---- Excalidraw 绘图层：整层元素快照落盘（前端已防抖） ----
   'POST /api/drawing-set': async body => {
-    const canvas = loadCanvas();
-    canvas.drawing = Array.isArray(body.elements) ? body.elements : [];
-    writeJson(CANVAS_FILE, canvas);
+    const saved = canvasRepository.mutate(scene => {
+      scene.canvas.drawing = Array.isArray(body.elements) ? body.elements : [];
+      return { ok: true, count: scene.canvas.drawing.length };
+    });
     const hasFiles = Object.prototype.hasOwnProperty.call(body, 'files');
     const files = hasFiles ? saveDrawingFiles(DATA_DIR, body.files) : loadDrawingFiles(DATA_DIR);
     if (hasFiles) backupPrecious();   // 第一张图当天立刻入备份，不等下一轮 12h 定时器
-    return { ok: true, count: canvas.drawing.length, files: Object.keys(files).length };
+    return { ...saved.result, files: Object.keys(files).length, sceneToken: saved.sceneToken };
   },
 
   // ---- 拉线落空：便签/画板与手动边同一次写盘，同成同败 ----
   'POST /api/node-from-edge': async body => {
-    const result = createNodeFromEdge(loadCanvas(), body);
-    writeJson(CANVAS_FILE, result.canvas);
-    const { canvas: _, ...response } = result;
-    return response;
+    return withToken(canvasRepository.mutate(scene => {
+      const result = createNodeFromEdge(scene.canvas, body);
+      scene.canvas = result.canvas;
+      const { canvas: _, ...response } = result;
+      return response;
+    }));
   },
 
   // ---- 自定义画板：用户自建的一等容器，补丁式合并同便签 ----
   'POST /api/board-set': async body => {
-    const canvas = loadCanvas();
-    const patch = {};
-    for (const k of ['x', 'y', 'w', 'h', 'name', 'color']) if (body[k] !== undefined) patch[k] = body[k];
-    const i = canvas.boards.findIndex(b => b.id === body.id);
-    let board;
-    if (i >= 0) {
-      board = canvas.boards[i] = { ...canvas.boards[i], ...patch };
-    } else {
-      board = { id: body.id || `${Date.now()}`, x: 0, y: 0, w: 520, h: 360, name: '新画板', color: 'blue', ...patch };
-      canvas.boards.push(board);
-    }
-    writeJson(CANVAS_FILE, canvas);
-    return board;
+    return withToken(canvasRepository.mutate(scene => {
+      const patch = {};
+      for (const k of ['x', 'y', 'w', 'h', 'name', 'color']) if (body[k] !== undefined) patch[k] = body[k];
+      const i = scene.canvas.boards.findIndex(b => b.id === body.id);
+      if (i >= 0) return scene.canvas.boards[i] = { ...scene.canvas.boards[i], ...patch };
+      const board = { id: body.id || `${Date.now()}`, x: 0, y: 0, w: 520, h: 360, name: '新画板', color: 'blue', ...patch };
+      scene.canvas.boards.push(board);
+      return board;
+    }));
   },
 
   'POST /api/board-del': async body => {
-    const canvas = loadCanvas();
-    canvas.boards = canvas.boards.filter(b => b.id !== body.id);
-    writeJson(CANVAS_FILE, canvas);
-    // 成员的 layout.d 悬空后自动回落路径街区，无需清理
-    return { ok: true };
+    return withToken(canvasRepository.mutate(scene => {
+      scene.canvas.boards = scene.canvas.boards.filter(b => b.id !== body.id);
+      return { ok: true };   // 成员 layout.d 悬空后自动回落路径街区
+    }));
   },
 
   'POST /api/layout': async body => {
-    const layout = readJson(LAYOUT_FILE, {});
-    layout[body.path] = pickLayout(body, layout[body.path]);
-    writeJson(LAYOUT_FILE, layout);
-    return { ok: true };
+    return withToken(canvasRepository.mutate(scene => {
+      scene.layout[body.path] = pickLayout(body, scene.layout[body.path]);
+      return { ok: true };
+    }));
   },
 
   // 拖动一个 = 合并快照；自动整理/撤销 = 原子替换整份布局，绝不经历“先清空再补回”的危险窗口
   'POST /api/layout-batch': async body => {
-    const layout = body.replace === true ? {} : readJson(LAYOUT_FILE, {});
-    for (const e of body.entries || []) {
-      layout[e.path] = pickLayout(e, layout[e.path]);
-    }
-    writeJson(LAYOUT_FILE, layout);
-    return { ok: true, saved: (body.entries || []).length };
+    return withToken(canvasRepository.mutate(scene => {
+      const layout = body.replace === true ? {} : scene.layout;
+      for (const e of body.entries || []) layout[e.path] = pickLayout(e, layout[e.path]);
+      scene.layout = layout;
+      return { ok: true, saved: (body.entries || []).length };
+    }));
   },
+
+  'POST /api/container-carry': async body =>
+    canvasRepository.carry(body, { districtIds: districtIds() }),
+
+  'GET /api/container-carry-status': async (_, query) =>
+    canvasRepository.status(query.opId),
 
   // 删除 = 移入 macOS 废纸篓（看板干净，但可反悔），增强数据一并清除
   // 防线一：10 分钟内还在写的会话可能被工具进程持有句柄，默认拒删（force 可破）
@@ -451,8 +459,11 @@ http.createServer(async (req, res) => {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify(result));
     } catch (e) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: e.message }));
+      res.writeHead(e.status || 500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        error: e.message, ...(e.code ? { code: e.code } : {}),
+        ...(e.sceneToken ? { sceneToken: e.sceneToken } : {}),
+      }));
     }
     return;
   }

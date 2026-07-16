@@ -10,6 +10,7 @@ import {
   drawingFontSignature, drawingFontWorkRoute, drawingFrameRetryDecision, drawingPlaneGroupPlan, drawingPlaneGroups, drawingPlaneSettledInFlight,
   drawingTransactionVisibleElements, splitDrawingPlanes,
 } from './drawing.js';
+import { installExportMarkers, markerExportElements } from './container-carry.js';
 
 const EXPORT_PADDING = 8;
 const EMPTY_ELEMENTS = Object.freeze([]);
@@ -42,9 +43,9 @@ function SvgGroup({ name, index, snapshot }) {
   );
 }
 
-export default function InkWorldLayer({ elements, files, excludedIds = EMPTY_ELEMENTS, revision = 0, onSnapshotReady, onSnapshotError, exporterProbe }) {
+export default function InkWorldLayer({ elements, files, excludedIds = EMPTY_ELEMENTS, revision = 0, generationId = null, onSnapshotReady, onSnapshotError, exporterProbe, retryToken = 0 }) {
   const [snapshot, setSnapshot] = useState({ below: [], above: [], fonts: '', revision: -1, metrics: null, world: null });
-  const [retryRequest, setRetryRequest] = useState({ revision: -1, attempt: 1 });
+  const [retryRequest, setRetryRequest] = useState({ revision: -1, attempt: 1, token: 0 });
   const readyRef = useRef({ below: [], above: [] });
   const inFlightRef = useRef({ below: [], above: [] });
   const fontReadyRef = useRef({ signature: null, css: '' });
@@ -60,7 +61,7 @@ export default function InkWorldLayer({ elements, files, excludedIds = EMPTY_ELE
   useEffect(() => {
     let current = true;
     let retryTimer = null;
-    const attempt = retryRequest.revision === revision ? retryRequest.attempt : 1;
+    const attempt = retryRequest.revision === revision && retryRequest.token === retryToken ? retryRequest.attempt : 1;
     const started = performance.now();
     const visible = drawingTransactionVisibleElements(committedElements, excludedIds);
     const planes = splitDrawingPlanes(committedElements);
@@ -100,7 +101,7 @@ export default function InkWorldLayer({ elements, files, excludedIds = EMPTY_ELE
 
     const exportSvg = (exportElements, mod, skipInliningFonts, kind) => {
       const options = {
-        elements: exportElements,
+        elements: kind === 'group' ? markerExportElements(exportElements) : exportElements,
         files: committedFiles,
         exportPadding: EXPORT_PADDING,
         skipInliningFonts,
@@ -118,7 +119,7 @@ export default function InkWorldLayer({ elements, files, excludedIds = EMPTY_ELE
 
     const renderGroup = async (group, mod) => {
       const [minX, minY] = mod.getCommonBounds(group.elements);
-      const svg = await exportSvg(group.elements, mod, true, 'group');
+      const svg = installExportMarkers(await exportSvg(group.elements, mod, true, 'group'));
       svg.setAttribute('focusable', 'false');
       svg.style.display = 'block';
       svg.style.pointerEvents = 'none';
@@ -186,7 +187,7 @@ export default function InkWorldLayer({ elements, files, excludedIds = EMPTY_ELE
         above: rendered.above,
         fonts: fontCss,
         revision,
-        world: { elements: visible, files: committedFiles, revision },
+        world: { elements: visible, files: committedFiles, excludedIds, revision, generationId },
         metrics: {
           exported, joined, reused, cleared, groupCounts,
           font: {
@@ -212,10 +213,12 @@ export default function InkWorldLayer({ elements, files, excludedIds = EMPTY_ELE
           attempt,
           willRetry: decision.retry,
           final: !decision.retry,
+          excludedIds,
+          generationId,
         });   // 保留上一帧，不用半份新图覆盖
         if (decision.retry) {
           retryTimer = setTimeout(() => {
-            if (current) setRetryRequest({ revision, attempt: decision.nextAttempt });
+            if (current) setRetryRequest({ revision, attempt: decision.nextAttempt, token: retryToken });
           }, decision.delayMs);
         }
       });
@@ -224,7 +227,7 @@ export default function InkWorldLayer({ elements, files, excludedIds = EMPTY_ELE
       current = false;
       clearTimeout(retryTimer);
     };
-  }, [committedElements, committedFiles, excludedIds, revision, retryRequest, onSnapshotError, exporterProbe]);
+  }, [committedElements, committedFiles, excludedIds, revision, generationId, retryRequest, retryToken, onSnapshotError, exporterProbe]);
 
   return (
     <ViewportPortal>
