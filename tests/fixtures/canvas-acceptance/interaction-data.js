@@ -10,6 +10,7 @@ import { createRoot } from 'react-dom/client';
 import '@xyflow/react/dist/style.css';
 import '../../../web/src/theme.css';
 import FlowCanvas from '../../../web/src/canvas/FlowCanvas.jsx';
+import { drawingPlaneSignature, drawingPlaneSignaturesEqual } from '../../../web/src/canvas/drawing.js';
 import { UIHost } from '../../../web/src/ui.jsx';
 
 const h = React.createElement;
@@ -112,6 +113,7 @@ function createExporterController() {
         callIndex: calls.length,
         scenario, runToken, mode, revision, attempt, kind,
         elementIds: elements.map(item => item.id),
+        signature: kind === 'group' ? drawingPlaneSignature(elements, {}) : null,
         at: performance.now(),
       };
       calls.push(call);
@@ -218,6 +220,7 @@ function InteractionCanvas() {
   const [suiteResult, setSuiteResult] = useState(null);
   const [cameraTailStatus, setCameraTailStatus] = useState('idle');
   const shellRef = useRef(null);
+  const canvasRef = useRef(canvas);
   const frameTestProbeRef = useRef(null);
   const exporterControllerRef = useRef(null);
   const preflightRef = useRef(null);
@@ -239,6 +242,7 @@ function InteractionCanvas() {
   const focusRef = useRef(() => {});
   const actionsRef = useRef({});
   const geometryPendingRef = useRef(false);
+  canvasRef.current = canvas;
   if (!exporterControllerRef.current) exporterControllerRef.current = createExporterController();
   const sessionsByKey = useMemo(() => ({ [SESSION_KEY]: SESSION }), []);
   const inkExporterProbe = useMemo(() => ({
@@ -312,6 +316,11 @@ function InteractionCanvas() {
       try {
         const controller = exporterControllerRef.current;
         const before = frameTestProbeRef.current?.snapshot();
+        const beforeDrawingSignature = drawingPlaneSignature(
+          canvasRef.current.drawing,
+          canvasRef.current.drawingFiles,
+        );
+        const beforeCommitCount = commitLogRef.current.length;
         const authorityStayedOnA = before?.requestedRevision === before?.renderedRevision
           && before?.hitRevision === before?.renderedRevision
           && before?.requestedElementIds.includes('fixture-landmark')
@@ -352,14 +361,52 @@ function InteractionCanvas() {
         }, 'closing DOM-ready handoff');
         const closingEvent = closed.callbackEvents.find(event => event.type === 'ready'
           && event.source === 'ink-world' && event.revision === closed.renderedRevision);
-        const closingExport = controller.calls().find(call => call.scenario === 'closing'
+        const closingCalls = controller.calls().filter(call => call.scenario === 'closing');
+        const closingExport = closingCalls.find(call => call.kind === 'group'
           && call.revision === closed.renderedRevision);
+        const closingSeedExport = closingCalls.findLast(call => call.kind === 'group'
+          && call.revision > opened.renderedRevision && call.revision < closed.renderedRevision);
+        const expectedOriginalIds = EDIT_ELEMENTS.map(element => element.id);
+        const exactOriginalsRestored = [
+          closed.requestedElementIds,
+          closed.renderedElementIds,
+          closed.hitElementIds,
+        ].every(ids => ids.length === expectedOriginalIds.length
+          && ids.every((id, index) => id === expectedOriginalIds[index]));
+        const finalDrawingSignature = drawingPlaneSignature(
+          canvasRef.current.drawing,
+          canvasRef.current.drawingFiles,
+        );
+        const persistedSignatureChanged = !drawingPlaneSignaturesEqual(
+          beforeDrawingSignature,
+          finalDrawingSignature,
+        );
+        const exactSeedReuse = !closingExport
+          && closingSeedExport?.scenario === 'closing'
+          && closingSeedExport.kind === 'group'
+          && closingSeedExport.revision > opened.renderedRevision
+          && closingSeedExport.revision < closed.renderedRevision
+          && drawingPlaneSignaturesEqual(closingSeedExport.signature, finalDrawingSignature);
+        const drawingCommitDelta = commitLogRef.current.length - beforeCommitCount;
+        const exactClosingReady = closed.requestedRevision === closed.renderedRevision
+          && closed.hitRevision === closed.renderedRevision
+          && closed.renderedRevision > opened.renderedRevision
+          && closingEvent?.revision === closed.renderedRevision;
         const closing = {
-          passed: closedOk === true && !!closingEvent && !!closingExport,
+          passed: closedOk === true && exactClosingReady && exactOriginalsRestored
+            && persistedSignatureChanged && drawingCommitDelta === 1
+            && (!!closingExport || exactSeedReuse),
           fromRevision: opened.renderedRevision,
           revision: closed.renderedRevision,
           event: closingEvent,
-          export: closingExport,
+          export: closingExport || null,
+          seedExport: closingSeedExport || null,
+          finalDrawingSignature,
+          exactOriginalsRestored,
+          persistedSignatureChanged,
+          exactSeedReuse,
+          drawingCommitDelta,
+          reusedWithoutExport: exactSeedReuse,
         };
 
         controller.configure('pass', 'committed-c');

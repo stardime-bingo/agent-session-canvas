@@ -4,6 +4,7 @@
  * that temporary dist only, and rejects every write/API/repository path.
  */
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -18,7 +19,9 @@ const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const FIXTURES = Object.freeze({
   carry: path.join(repo, 'tests/fixtures/carry-acceptance'),
   canvas: path.join(repo, 'tests/fixtures/canvas-acceptance'),
+  prod: path.join(repo, 'web'),
 });
+const PROD_BOOTSTRAP = "window.EXCALIDRAW_ASSET_PATH = '/';";
 const FORBIDDEN_SEGMENTS = new Set(['api', 'data', '@fs', '.git']);
 const DOCUMENT_CSP = [
   "default-src 'none'",
@@ -42,6 +45,28 @@ const SUBSET_WORKER_CSP = [
   "base-uri 'none'",
 ].join('; ');
 
+export function productionDocumentCsp(index) {
+  const inlineScripts = [...index.matchAll(/<script\b(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi)]
+    .map(match => match[1]);
+  if (inlineScripts.length !== 1 || inlineScripts[0] !== PROD_BOOTSTRAP) {
+    throw new Error(`production index inline bootstrap drift: expected exactly ${JSON.stringify(PROD_BOOTSTRAP)}`);
+  }
+  const hash = crypto.createHash('sha256').update(inlineScripts[0], 'utf8').digest('base64');
+  return [
+    "default-src 'none'",
+    `script-src 'self' 'sha256-${hash}' 'wasm-unsafe-eval'`,
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "font-src 'self' data:",
+    "worker-src 'self' blob:",
+    "connect-src 'none'",
+    "frame-ancestors 'none'",
+    "form-action 'none'",
+    "object-src 'none'",
+    "base-uri 'none'",
+  ].join('; ');
+}
+
 export function acceptanceCspFor(relative, subsetWorkerEntries = new Set()) {
   return subsetWorkerEntries.has(relative) ? SUBSET_WORKER_CSP : DOCUMENT_CSP;
 }
@@ -53,6 +78,23 @@ export function findSubsetWorkerEntries(dist) {
     .filter(file => file.endsWith('.js') && file.includes('subset-worker'))
     .filter(file => /self\.onmessage/.test(fs.readFileSync(path.join(assets, file), 'utf8')))
     .map(file => `assets/${file}`));
+}
+
+export function mergeStaticAssets(source, target) {
+  fs.mkdirSync(target, { recursive: true });
+  for (const entry of fs.readdirSync(source, { withFileTypes: true })) {
+    const from = path.join(source, entry.name);
+    const to = path.join(target, entry.name);
+    if (entry.isDirectory()) {
+      mergeStaticAssets(from, to);
+    } else if (fs.existsSync(to)) {
+      if (!fs.readFileSync(from).equals(fs.readFileSync(to))) {
+        throw new Error(`static asset hash collision: ${entry.name}`);
+      }
+    } else {
+      fs.copyFileSync(from, to);
+    }
+  }
 }
 
 export function selectAcceptanceFixture(argv = []) {
@@ -94,18 +136,20 @@ async function main() {
   const fixture = FIXTURES[fixtureName];
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), `agent-${fixtureName}-4518-`));
   const dist = path.join(temporary, 'dist');
+  const interactionDist = path.join(temporary, 'interaction-dist');
   let server;
+  let buildWorkerEntries = null;
 
   try {
-    await build({
-      root: fixture,
+    const buildStatic = (root, outDir) => build({
+      root,
       configFile: false,
       publicDir: false,
       plugins: [excalidrawLocalFonts(), react()],
       clearScreen: false,
       logLevel: 'warn',
       build: {
-        outDir: dist,
+        outDir,
         emptyOutDir: true,
         rolldownOptions: {
           output: {
@@ -114,6 +158,17 @@ async function main() {
         },
       },
     });
+    await buildStatic(fixture, dist);
+    if (fixtureName === 'prod') {
+      await buildStatic(FIXTURES.canvas, interactionDist);
+      const prod = findSubsetWorkerEntries(dist);
+      const interaction = findSubsetWorkerEntries(interactionDist);
+      if (prod.size !== 1 || interaction.size !== 1) {
+        throw new Error(`expected one real subset worker per prod build, found prod=${prod.size} interaction=${interaction.size}`);
+      }
+      buildWorkerEntries = { prod: [...prod], interaction: [...interaction] };
+      mergeStaticAssets(path.join(interactionDist, 'assets'), path.join(dist, 'assets'));
+    }
     const fonts = path.join(repo, 'web/public/fonts');
     if (!fs.existsSync(fonts)) {
       throw new Error('missing prepared Excalidraw fonts; run npm run build first');
@@ -121,9 +176,19 @@ async function main() {
     fs.cpSync(fonts, path.join(dist, 'fonts'), { recursive: true });
 
     const index = fs.readFileSync(path.join(dist, 'index.html'), 'utf8');
-    if (/<script(?![^>]*\bsrc=)|<style\b|react-refresh|\/@fs|@vite\/client/i.test(index)) {
+    const interactionIndex = fixtureName === 'prod'
+      ? fs.readFileSync(path.join(interactionDist, 'index.html'), 'utf8')
+      : null;
+    if (fixtureName !== 'prod'
+      && /<script(?![^>]*\bsrc=)|<style\b|react-refresh|\/@fs|@vite\/client/i.test(index)) {
       throw new Error(`${fixtureName} acceptance build is not static/CSP-safe`);
     }
+    if (fixtureName === 'prod'
+      && (/<style\b|react-refresh|\/@fs|@vite\/client/i.test(index)
+        || /<script(?![^>]*\bsrc=)|<style\b|react-refresh|\/@fs|@vite\/client/i.test(interactionIndex))) {
+      throw new Error('prod acceptance build is not static/CSP-safe');
+    }
+    const prodCsp = fixtureName === 'prod' ? productionDocumentCsp(index) : null;
     const subsetWorkerEntries = findSubsetWorkerEntries(dist);
     if (fixtureName === 'canvas' && subsetWorkerEntries.size !== 1) {
       throw new Error(`expected one real canvas subset worker entry, found ${subsetWorkerEntries.size}`);
@@ -138,9 +203,17 @@ async function main() {
     const realDist = fs.realpathSync(dist);
     server = http.createServer((request, response) => {
       const route = classifyAcceptanceRequest(request.method, request.url);
+      const requestUrl = new URL(request.url, 'http://127.0.0.1:4518');
+      const interactionDocument = fixtureName === 'prod'
+        && route.relative === 'index.html'
+        && requestUrl.searchParams.get('mode') === 'interaction';
       response.setHeader(
         'Content-Security-Policy',
-        acceptanceCspFor(route.relative, subsetWorkerEntries),
+        interactionDocument
+          ? DOCUMENT_CSP
+          : (fixtureName === 'prod' && route.relative === 'index.html'
+            ? prodCsp
+            : acceptanceCspFor(route.relative, subsetWorkerEntries)),
       );
       response.setHeader('Cache-Control', 'no-store');
       response.setHeader('X-Content-Type-Options', 'nosniff');
@@ -164,6 +237,7 @@ async function main() {
       }
       response.writeHead(200, { 'Content-Type': mime[path.extname(file)] || 'application/octet-stream' });
       if (request.method === 'HEAD') response.end();
+      else if (interactionDocument) response.end(interactionIndex);
       else fs.createReadStream(file).pipe(response);
     });
 
@@ -176,6 +250,7 @@ async function main() {
       fixture: fixtureName,
       url: 'http://127.0.0.1:4518',
       dist,
+      ...(buildWorkerEntries ? { workers: buildWorkerEntries } : {}),
     }));
 
     let closing = false;
