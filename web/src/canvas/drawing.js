@@ -1,7 +1,7 @@
 /**
  * [INPUT]: Excalidraw 的元素数组与 BinaryFiles 字典
  * [OUTPUT]: 提供已提交绘图的过滤/删除/沉浮/平移纯变换、整理的单步墨迹撤销票据、包含 Excalidraw `.Island` 的唯一功能件命中排除表、首次新建大底板共享判定/落笔退场状态机/自动沉层、目标关系闭包/局部编辑事务/全量合并、
- *           可返回本笔 receipt、稳定排空且按成功代际守卫撤销的串行提交队列、屏幕override/外部props/队列三真相同步门、opening request 身份门/已对齐 resuming 相机事务与分期退出策略/可渲染输入盾呈现策略/IME 周期状态机/隐藏 opening 取消/退出回执/closing 收口步、编辑器就绪与几何互斥纯门、资产 delta/快照/命中/已 paint 帧真相与有界重试、双平面固定 z-order 槽内 hole 分组签名与 ready/in-flight 工作路由/包围盒与承载判定
+ *           可返回本笔 receipt、稳定排空且按成功代际守卫撤销的串行提交队列、屏幕override/外部props/队列三真相同步门、opening request 身份门/已对齐 resuming 相机事务与分期退出策略/可渲染输入盾呈现策略/IME 周期状态机/隐藏 opening 取消/退出回执/closing 收口步、编辑器就绪与几何互斥纯门、资产 delta/快照/普通贴墨迹与显式待选封闭形状全域双模命中/已 paint 帧真相与有界重试、双平面固定 z-order 槽内 hole 分组签名与 ready/in-flight 工作路由/包围盒与承载判定
  * [POS]: 绘图的纯数据内核；静态世界层、临时编辑器与普通态动作共用，全部可由 node:test 证伪
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -822,7 +822,7 @@ const segDist = (px, py, ax, ay, bx, by) => {
   return Math.hypot(px - (ax + vx * t), py - (ay + vy * t));
 };
 
-function hitOne(el, fx, fy, t) {
+function hitOne(el, fx, fy, t, includeHollowInterior) {
   // 进元素坐标系：旋转绕包围盒中心逆转回来（Excalidraw 语义），再平移到元素原点
   let px = fx, py = fy;
   if (el.angle) {
@@ -854,21 +854,21 @@ function hitOne(el, fx, fy, t) {
     const nx = (px - (x0 + x1) / 2) / rx, ny = (py - (y0 + y1) / 2) / ry;
     const r = el.type === 'ellipse' ? Math.hypot(nx, ny) : Math.abs(nx) + Math.abs(ny);
     const band = t / Math.min(rx, ry);
-    return filled ? r <= 1 + band : Math.abs(r - 1) <= band;
+    return filled || includeHollowInterior ? r <= 1 + band : Math.abs(r - 1) <= band;
   }
 
   // 空心矩形只认描边带；实心矩形、文字、图片与其余类型=全域
-  if (el.type === 'rectangle' && !filled) {
+  if (el.type === 'rectangle' && !filled && !includeHollowInterior) {
     return !(px > x0 + t && px < x1 - t && py > y0 + t && py < y1 - t);
   }
   return true;
 }
 
-export function hitDrawingElement(elements = [], fx, fy, tolerance = 8) {
+export function hitDrawingElement(elements = [], fx, fy, tolerance = 8, { includeHollowInterior = false } = {}) {
   for (let i = elements.length - 1; i >= 0; i--) {
     const el = elements[i];
     if (!el || el.isDeleted || el.locked) continue;
-    if (hitOne(el, fx, fy, tolerance)) return el;
+    if (hitOne(el, fx, fy, tolerance, includeHollowInterior)) return el;
   }
   return null;
 }

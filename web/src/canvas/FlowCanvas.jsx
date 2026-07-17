@@ -3,9 +3,9 @@
  * [OUTPUT]: 对外提供 FlowCanvas 组件：统一容器模型、弹性生长、拖放改归属、三系统边+手动边、
  *           增量成员防重叠、Figma 式框选/平移/触控板手势、滚轮双模（触控板平移/鼠标缩放+模式切换钮）、
  *           容器缩放定桩、全画布落空连线选择（含就地打开会话上下文）、缩放感知连接点、原生绘图选择/画笔、
- *           committed ink 与节点共用 ViewportPortal 唯一相机、commit-bound requested generation 与已 paint rendered world 统一像素/命中/MiniMap、cold/stale 可见回执、编辑态 wheel/key/Safari gesture/pointer 全入口 RF 相机事务（Shift+1/2/3 统一全景 fit）、唯一 Excal 对齐入口与成功/acquire/cleanup 只读计数及 live 隐藏期同层输入盾/可见缩放岛、
+ *           committed ink 以 1x 世界尺寸与节点共用 ViewportPortal 唯一相机、commit-bound requested generation 与已 paint rendered world 统一像素/命中/MiniMap、cold/stale 可见回执、编辑态 wheel/key/Safari gesture/pointer 全入口 RF 相机事务（Shift+1/2/3 统一全景 fit）、唯一 Excal 对齐入口与成功/acquire/cleanup 只读计数及 live 隐藏期同层输入盾/可见缩放岛、
  *           目标关系闭包局部事务、IndexedDB 单 active 草稿精确恢复/条件清理/冲突只读检查+本地导出+精确放弃/closing 失败按 committed token 续写、新建大底板落笔即退场/自动沉层与仅抬 sunkIds 的稳定排空撤销、屏幕/队列/持久化三真相收口、opening request 身份门与纯取消、无双影帧交接与真实阶段回执、
- *           普通模式绘图命中（pane/容器面同河、nodrag/连接点等功能件优先）与 Backspace 删除治理；4518 seam 只驱动真实 open/exit 动作并替换 Ink exporter
+ *           普通模式绘图命中（pane/容器面同河、nodrag/连接点等功能件优先、空心内部穿透）+显式选绘图待选态封闭形状全域热区与 Backspace 删除治理；4518 seam 只驱动真实 open/exit 动作并替换 Ink exporter
  *           direct 容器承载只在 RF node.position 已进 DOM 的 layout effect 同步桥与最终 DROP；同步 buildGraph batch 整理规划共用 rendered world 所有权，batch 多 delta bridge 只由精确目标 generation DOM-ready 清除且向 4518 probe 只读公开其代际/桥状态；事务受 App 场景变更队列硬闸门约束，Escape/pointercancel 只取消当前指针的 DRAGGING 并阻断迟到 DROP
  * [POS]: canvas 的画布引擎。归属律：layout.d 手动指定 > 路径推断；容器永远生长包住成员；
  *        每一次点击必有可感知的回应：选中态/菜单/提示三选一
@@ -1479,9 +1479,10 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       : presentedWorld(inkFrame?.renderedWorld, carryControllerRef.current?.state());
     const els = penActiveRef.current ? (drawRef.current?.getElements?.() || []) : (painted?.elements || []);
     const tol = 8 / (instRef.current?.getZoom() || 1);
-    const above = hitDrawingElement(els.filter(el => !el.customData?.below), fx, fy, tol);
+    const hitOptions = { includeHollowInterior: selectArmedRef.current };
+    const above = hitDrawingElement(els.filter(el => !el.customData?.below), fx, fy, tol, hitOptions);
     if (above || planes === 'above') return above;
-    return hitDrawingElement(els.filter(el => el.customData?.below), fx, fy, tol);
+    return hitDrawingElement(els.filter(el => el.customData?.below), fx, fy, tol, hitOptions);
   };
 
   const drawingHitFromEvent = (e, planes) => {

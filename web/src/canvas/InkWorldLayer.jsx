@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 已提交的 Excalidraw elements/BinaryFiles、事务 originalIds 与帧 revision，依赖 ViewportPortal/SVG 导出器；4518 可仅替换 exporter 做故障注入
- * [OUTPUT]: 对外提供 InkWorldLayer；沉/浮固定 z-order 槽内 hole SVG groups + frame font capsule 共用 RF 相机并按签名复用，在新帧已进 DOM 后回报 visible rendered world/metrics
+ * [OUTPUT]: 对外提供 InkWorldLayer；沉/浮固定 z-order 槽内 hole SVG groups 以 1x 世界尺寸 + frame font capsule 共用 RF 相机并按签名复用，在新帧已进 DOM 后回报 visible rendered world/metrics
  * [POS]: committed ink compositor；编辑时只 hole-punch 事务原件，空槽 clear 不导出，所有 dirty/join groups 与字体胶囊就绪前保留旧完整帧，失败有界重试
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -108,6 +108,7 @@ export default function InkWorldLayer({ elements, files, excludedIds = EMPTY_ELE
         appState: {
           exportBackground: false,
           exportEmbedScene: false,
+          exportScale: 1,
           viewBackgroundColor: 'transparent',
         },
       };
