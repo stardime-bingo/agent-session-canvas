@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖浏览器 IndexedDB，或 node:test 注入的同形 adapter
- * [OUTPUT]: 提供单 active drawing draft 的串行防抖 journal、FlowCanvas 水合/closing 协调器、scene/baseline/closure 精确恢复判定与 request/epoch/seq 条件清理
+ * [OUTPUT]: 提供单 active drawing draft 的串行防抖 journal、只读元数据检查/深拷贝导出/精确身份放弃、FlowCanvas 水合/closing 协调器、scene/baseline/closure 精确恢复判定与 request/epoch/seq 条件清理
  * [POS]: 临时编辑草稿仓；只恢复局部 editSeed，不参与 committed 世界合并或网络提交
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -178,6 +178,52 @@ export function createDrawingDraftStore({
     };
   };
   return Object.freeze({
+    async inspect({ sceneToken, closureFingerprint, baselineSnapshot } = {}) {
+      return enqueue(async () => {
+        const record = await adapter.get();
+        if (record == null) return { status: 'empty' };
+        const valid = validRecord(record);
+        const canMatch = valid
+          && typeof sceneToken === 'string'
+          && typeof closureFingerprint === 'string'
+          && baselineSnapshot !== undefined;
+        const currentFingerprint = canMatch ? await fingerprint(baselineSnapshot) : null;
+        return {
+          status: valid ? 'present' : 'invalid',
+          requestId: typeof record.requestId === 'string' ? record.requestId : null,
+          epoch: Number.isInteger(record.epoch) ? record.epoch : null,
+          seq: Number.isInteger(record.seq) ? record.seq : null,
+          sceneToken: typeof record.sceneToken === 'string' ? record.sceneToken : null,
+          closureFingerprint: typeof record.closureFingerprint === 'string'
+            ? record.closureFingerprint
+            : null,
+          elementCount: Array.isArray(record.draft?.elements) ? record.draft.elements.length : 0,
+          approximateBytes: new TextEncoder().encode(JSON.stringify(record)).byteLength,
+          matchesCurrentScene: canMatch
+            ? record.sceneToken === sceneToken
+              && record.closureFingerprint === closureFingerprint
+              && record.baselineFingerprint === currentFingerprint
+            : false,
+        };
+      });
+    },
+    exportActiveDraft() {
+      return enqueue(async () => {
+        const record = await adapter.get();
+        return record == null ? null : structuredClone(record);
+      });
+    },
+    discard(identity) {
+      return enqueue(async () => {
+        const removed = await adapter.deleteIfIdentity(identity);
+        if (removed && sameIdentity(active, identity)) {
+          cancelTimer();
+          pendingRecord = null;
+          active = null;
+        }
+        return removed;
+      });
+    },
     async recover({ sceneToken, closureFingerprint, baselineSnapshot }) {
       const record = await enqueue(() => adapter.get());
       if (record == null) return { status: 'empty' };
@@ -270,6 +316,16 @@ export function createDrawingDraftCoordinator(
     skipHydrationChange = false;
   };
   return Object.freeze({
+    inspect: input => store.inspect(input),
+    exportActiveDraft: () => store.exportActiveDraft(),
+    async discard(identity) {
+      const removed = await store.discard(identity);
+      if (removed && sameIdentity(activeIdentity, identity)) {
+        activeIdentity = null;
+        resetHydration();
+      }
+      return removed;
+    },
     recover: input => store.recover(input),
     begin(input) {
       activeIdentity = store.begin(input);

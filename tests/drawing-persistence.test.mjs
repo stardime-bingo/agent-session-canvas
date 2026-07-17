@@ -272,6 +272,102 @@ test('draft crash recovery debounces to latest seq and requires exact sceneToken
   })).status, 'conflict');
 });
 
+test('draft conflict inspect/export preserves the record and export is a deep copy', async () => {
+  const adapter = memoryDraftAdapter();
+  const store = createDrawingDraftStore({ adapter, debounceMs: 0 });
+  const baselineSnapshot = { elements: [rect('base')], files: {} };
+  store.begin({
+    requestId: 'inspect-me', sceneToken: 'scene-a', closureFingerprint: 'closure-a',
+    baselineSnapshot, mergeDraft: draft => draft,
+  });
+  await store.flush({ elements: [rect('draft-a'), rect('draft-b')], files: {} });
+  const original = adapter.value();
+  const conflictInput = {
+    sceneToken: 'scene-b', closureFingerprint: 'closure-a', baselineSnapshot,
+  };
+  assert.equal((await store.recover(conflictInput)).status, 'conflict');
+
+  const inspected = await store.inspect(conflictInput);
+  assert.deepEqual({
+    status: inspected.status,
+    requestId: inspected.requestId,
+    epoch: inspected.epoch,
+    seq: inspected.seq,
+    sceneToken: inspected.sceneToken,
+    closureFingerprint: inspected.closureFingerprint,
+    elementCount: inspected.elementCount,
+    matchesCurrentScene: inspected.matchesCurrentScene,
+  }, {
+    status: 'present', requestId: original.requestId, epoch: original.epoch, seq: original.seq,
+    sceneToken: original.sceneToken, closureFingerprint: original.closureFingerprint,
+    elementCount: 2, matchesCurrentScene: false,
+  });
+  assert.ok(inspected.approximateBytes > 0);
+  assert.equal('draft' in inspected, false, 'inspect 不得返回草稿正文');
+  assert.equal((await store.inspect({
+    sceneToken: 'scene-a', closureFingerprint: 'closure-a', baselineSnapshot,
+  })).matchesCurrentScene, true);
+
+  const exported = await store.exportActiveDraft();
+  assert.deepEqual(exported, original);
+  assert.deepEqual(adapter.value(), original, 'inspect/export 都不得改动 journal');
+  exported.draft.elements[0].x = 999;
+  exported.draft.elements.push(rect('mutated-export'));
+  assert.deepEqual(adapter.value(), original, '导出深拷贝的修改不得污染仓内记录');
+});
+
+test('draft discard uses exact identity and a stale identity cannot remove a newer active record', async () => {
+  const adapter = memoryDraftAdapter();
+  const store = createDrawingDraftStore({ adapter, debounceMs: 0 });
+  const baselineSnapshot = { elements: [], files: {} };
+  const A = store.begin({
+    requestId: 'discard-a', sceneToken: 'scene-a', closureFingerprint: 'closure-a',
+    baselineSnapshot, mergeDraft: draft => draft,
+  });
+  await store.flush({ elements: [rect('A')], files: {} });
+  assert.equal(await store.discard({ requestId: A.requestId, epoch: A.epoch + 1 }), false);
+  assert.equal(adapter.value().requestId, 'discard-a');
+
+  const B = store.begin({
+    requestId: 'discard-b', sceneToken: 'scene-b', closureFingerprint: 'closure-b',
+    baselineSnapshot, mergeDraft: draft => draft,
+  });
+  await store.flush({ elements: [rect('B')], files: {} });
+  assert.equal(await store.discard(A), false, '旧身份不得删除新 active');
+  assert.equal(adapter.value().requestId, 'discard-b');
+  assert.equal(await store.discard(B), true);
+  assert.equal(adapter.value(), null);
+});
+
+test('draft discard leaves recovery empty and a new drawing request can begin', async () => {
+  const adapter = memoryDraftAdapter();
+  const beforeCrash = createDrawingDraftStore({ adapter, debounceMs: 0 });
+  const baselineSnapshot = { elements: [], files: {} };
+  const oldIdentity = beforeCrash.begin({
+    requestId: 'blocked', sceneToken: 'old-scene', closureFingerprint: 'old-closure',
+    baselineSnapshot, mergeDraft: draft => draft,
+  });
+  await beforeCrash.flush({ elements: [rect('blocked')], files: {} });
+
+  const afterCrash = createDrawingDraftCoordinator(
+    createDrawingDraftStore({ adapter, debounceMs: 0 }),
+  );
+  assert.equal(await afterCrash.discard(oldIdentity), true);
+  assert.deepEqual(await afterCrash.recover({
+    sceneToken: 'new-scene', closureFingerprint: 'new-closure', baselineSnapshot,
+  }), { status: 'empty' });
+
+  const nextIdentity = afterCrash.begin({
+    requestId: 'unblocked', sceneToken: 'new-scene', closureFingerprint: 'new-closure',
+    baselineSnapshot, mergeDraft: draft => draft,
+  });
+  await afterCrash.flush({ elements: [rect('unblocked')], files: {} });
+  assert.equal(adapter.value().requestId, nextIdentity.requestId);
+  assert.equal((await afterCrash.recover({
+    sceneToken: 'new-scene', closureFingerprint: 'new-closure', baselineSnapshot,
+  })).status, 'restored');
+});
+
 test('draft request guard prevents late A clear/write from deleting or replacing active B', async () => {
   const adapter = memoryDraftAdapter();
   const store = createDrawingDraftStore({ adapter, debounceMs: 0 });
@@ -343,7 +439,7 @@ test('draft IndexedDB/quota failure is non-fatal and reports only once', async (
     adapter: {
       get: async () => null,
       put: async () => { throw new Error('quota'); },
-      deleteIfRequest: async () => { throw new Error('unavailable'); },
+      deleteIfIdentity: async () => { throw new Error('unavailable'); },
     },
     onError: () => { warnings++; },
   });

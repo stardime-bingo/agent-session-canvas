@@ -5,6 +5,7 @@ APP_HOME="${AGENT_CANVAS_HOME:-$HOME/.agent-session-canvas}"
 REPO_URL="${AGENT_CANVAS_REPO_URL:-https://github.com/stardime-bingo/agent-session-canvas.git}"
 LABEL="com.bingo.agent-canvas"
 DOMAIN="gui/$(id -u)"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 COMMAND="${1:-open}"
 
 require_checkout() {
@@ -13,6 +14,25 @@ require_checkout() {
     echo "请先运行: $0 install" >&2
     exit 1
   fi
+}
+
+wait_for_api() {
+  for _ in {1..20}; do
+    curl -fsS http://localhost:4517/api/graph >/dev/null 2>&1 && return 0
+    sleep 0.25
+  done
+  echo "服务已重启但 localhost:4517 仍无响应。" >&2
+  return 1
+}
+
+json_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/\\r}"
+  value="${value//$'\t'/\\t}"
+  printf '%s' "$value"
 }
 
 case "$COMMAND" in
@@ -31,19 +51,66 @@ case "$COMMAND" in
     require_checkout
     exec "$APP_HOME/scripts/doctor.sh"
     ;;
-  start|restart)
+  start)
+    require_checkout
+    if ! launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+      if [[ ! -f "$PLIST" ]]; then
+        echo "launchd 服务尚未安装；请先运行: $0 install" >&2
+        exit 1
+      fi
+      if ! launchctl bootstrap "$DOMAIN" "$PLIST"; then
+        launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1 || exit 1
+      fi
+    fi
+    launchctl kickstart -k "$DOMAIN/$LABEL"
+    wait_for_api
+    ;;
+  restart)
     require_checkout
     if ! launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
       echo "launchd 服务尚未安装；请先运行: $0 install" >&2
       exit 1
     fi
     launchctl kickstart -k "$DOMAIN/$LABEL"
-    for _ in {1..20}; do
-      curl -fsS http://localhost:4517/api/graph >/dev/null 2>&1 && exit 0
-      sleep 0.25
-    done
-    echo "服务已重启但 localhost:4517 仍无响应。" >&2
+    wait_for_api
+    ;;
+  stop)
+    if ! launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+      echo "服务已经停止；plist 与本地数据均已保留。"
+      exit 0
+    fi
+    if launchctl bootout "$DOMAIN/$LABEL"; then
+      echo "服务已停止；plist 与本地数据均已保留。"
+      exit 0
+    fi
+    if ! launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1; then
+      echo "服务已经停止；plist 与本地数据均已保留。"
+      exit 0
+    fi
+    echo "停止服务失败；launchd 仍保持注册。" >&2
     exit 1
+    ;;
+  status)
+    REGISTERED=false
+    RUNNING=false
+    API_HEALTHY=false
+    PID_JSON=null
+    if SERVICE_INFO="$(launchctl print "$DOMAIN/$LABEL" 2>/dev/null)"; then
+      REGISTERED=true
+      STATE_VALUE="$(printf '%s\n' "$SERVICE_INFO" | awk '/state =/ { print $3; exit }')"
+      PID_VALUE="$(printf '%s\n' "$SERVICE_INFO" | awk '/pid =/ { print $3; exit }')"
+      if [[ "$STATE_VALUE" == "running" && "$PID_VALUE" =~ '^[0-9]+$' ]]; then
+        RUNNING=true
+        PID_JSON="$PID_VALUE"
+      fi
+    fi
+    if curl -fsS --max-time 2 http://127.0.0.1:4517/api/graph >/dev/null 2>&1; then
+      API_HEALTHY=true
+    fi
+    APP_HOME_JSON="$(json_escape "$APP_HOME")"
+    printf '{"registered":%s,"running":%s,"pid":%s,"apiHealthy":%s,"port":4517,"appHome":"%s"}\n' \
+      "$REGISTERED" "$RUNNING" "$PID_JSON" "$API_HEALTHY" "$APP_HOME_JSON"
+    [[ "$REGISTERED" == true && "$RUNNING" == true && "$API_HEALTHY" == true ]]
     ;;
   open)
     require_checkout
@@ -53,7 +120,7 @@ case "$COMMAND" in
     open http://localhost:4517
     ;;
   *)
-    echo "用法: $0 {install|doctor|start|restart|open}" >&2
+    echo "用法: $0 {install|doctor|start|restart|stop|status|open}" >&2
     exit 2
     ;;
 esac

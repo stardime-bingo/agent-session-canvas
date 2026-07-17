@@ -39,6 +39,23 @@ open http://localhost:4517
 
 安装脚本会执行 `npm ci`、构建前端，并根据当前 checkout 与 Node 路径生成 `~/Library/LaunchAgents/com.bingo.agent-canvas.plist`。服务登录自启，固定监听本机 `4517` 端口。
 
+## 快捷启停
+
+仓库内提供 Finder 可双击的薄入口；它们只调用同一份 launchd 控制脚本，不复制服务逻辑：
+
+- `scripts/启动会话指挥塔.command`
+- `scripts/停止会话指挥塔.command`
+
+命令行也可直接控制。`stop` 可重复执行，只停止服务，不删除 plist 或 `data/`；`start` 会在 plist 仍在但服务未注册时直接恢复注册，无需重新安装：
+
+```bash
+AGENT_CANVAS_HOME="$PWD" plugins/agent-session-canvas/scripts/agent-canvas status
+AGENT_CANVAS_HOME="$PWD" plugins/agent-session-canvas/scripts/agent-canvas stop
+AGENT_CANVAS_HOME="$PWD" plugins/agent-session-canvas/scripts/agent-canvas start
+```
+
+`status` 始终只输出一行 JSON；仅当 launchd 已注册、进程运行且 `4517` API 健康时 exit 0，其余状态 exit 1。
+
 只读诊断：
 
 ```bash
@@ -57,6 +74,7 @@ claude plugin install agent-session-canvas@agent-session-canvas
 - “安装并打开 AGENT 会话指挥塔”
 - “诊断会话指挥塔为什么打不开”
 - “启动并打开我的会话画布”
+- “停止会话指挥塔”或“查看会话指挥塔状态”
 
 ## 通过 Codex 插件安装
 
@@ -104,8 +122,8 @@ launchctl kickstart -k gui/$(id -u)/com.bingo.agent-canvas
 - `server/`：零依赖 Node daemon、双适配器扫描、AI 路由与本地 HTTP/SSE
 - `web/`：React 18 + React Flow + Excalidraw 的唯一产品界面
 - `hooks/`：可选 Claude Code SessionEnd 接力钩子
-- `scripts/`：安装与只读诊断
-- `plugins/`：Claude Code / Codex 共用薄插件
+- `scripts/`：安装、只读诊断与 Finder 双击启停入口
+- `plugins/`：Claude Code / Codex 共用薄插件与统一 launchd 控制脚本
 - `tests/`：Node 原生回归测试
 
 ## License

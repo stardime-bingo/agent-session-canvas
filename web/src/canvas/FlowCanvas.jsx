@@ -4,7 +4,7 @@
  *           增量成员防重叠、Figma 式框选/平移/触控板手势、滚轮双模（触控板平移/鼠标缩放+模式切换钮）、
  *           容器缩放定桩、全画布落空连线选择（含就地打开会话上下文）、缩放感知连接点、原生绘图选择/画笔、
  *           committed ink 与节点共用 ViewportPortal 唯一相机、commit-bound requested generation 与已 paint rendered world 统一像素/命中/MiniMap、cold/stale 可见回执、编辑态 wheel/key/Safari gesture/pointer 全入口 RF 相机事务（Shift+1/2/3 统一全景 fit）、唯一 Excal 对齐入口与成功/acquire/cleanup 只读计数及 live 隐藏期同层输入盾/可见缩放岛、
- *           目标关系闭包局部事务、IndexedDB 单 active 草稿精确恢复/条件清理/closing 失败按 committed token 续写、新建大底板落笔即退场/自动沉层与仅抬 sunkIds 的稳定排空撤销、屏幕/队列/持久化三真相收口、opening request 身份门与纯取消、无双影帧交接与真实阶段回执、
+ *           目标关系闭包局部事务、IndexedDB 单 active 草稿精确恢复/条件清理/冲突只读检查+本地导出+精确放弃/closing 失败按 committed token 续写、新建大底板落笔即退场/自动沉层与仅抬 sunkIds 的稳定排空撤销、屏幕/队列/持久化三真相收口、opening request 身份门与纯取消、无双影帧交接与真实阶段回执、
  *           普通模式绘图命中（pane/容器面同河、nodrag/连接点等功能件优先）与 Backspace 删除治理；4518 seam 只驱动真实 open/exit 动作并替换 Ink exporter
  *           direct 容器承载只在 RF node.position 已进 DOM 的 layout effect 同步桥与最终 DROP；同步 buildGraph batch 整理规划共用 rendered world 所有权，batch 多 delta bridge 只由精确目标 generation DOM-ready 清除且向 4518 probe 只读公开其代际/桥状态；事务受 App 场景变更队列硬闸门约束，Escape/pointercancel 只取消当前指针的 DRAGGING 并阻断迟到 DROP
  * [POS]: canvas 的画布引擎。归属律：layout.d 手动指定 > 路径推断；容器永远生长包住成员；
@@ -51,6 +51,25 @@ const NO_DRAWING_IDS = Object.freeze([]);
 const CAMERA_EXTERNAL_EXCLUDE = '.nowheel, .react-flow__minimap, .react-flow__controls, .ctx-menu, .island';
 const CAMERA_EXCAL_UI = '.Island, button, input, textarea, select, [contenteditable="true"], [role="menu"], [role="dialog"]';
 const CAMERA_TAIL_MS = 180;
+
+const shortDraftValue = value => value ? `${value.slice(0, 8)}…${value.slice(-4)}` : '未知';
+const draftByteLabel = bytes => bytes < 1024
+  ? `${bytes} B`
+  : bytes < 1024 * 1024
+    ? `${(bytes / 1024).toFixed(1)} KB`
+    : `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+const downloadDrawingDraft = record => {
+  const body = `${JSON.stringify(record, null, 2)}\n`;
+  const url = URL.createObjectURL(new Blob([body], { type: 'application/json' }));
+  const link = document.createElement('a');
+  const requestId = String(record.requestId || 'unknown').replace(/[^a-zA-Z0-9_-]/g, '-');
+  link.href = url;
+  link.download = `agent-canvas-drawing-draft-${requestId}.json`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+};
 
 const containerKey = id => id.startsWith('district:') ? id.slice(9) : id;
 
@@ -880,6 +899,66 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     return true;
   }, [exitDrawing, geometryPendingRef]);
 
+  const showDraftConflictActions = useCallback(metadata => {
+    const identity = metadata?.requestId && metadata?.epoch
+      ? { requestId: metadata.requestId, epoch: metadata.epoch }
+      : null;
+    toast('检测到冲突草稿：已保留，并阻止自动覆盖', 'error', {
+      label: '查看冲突详情',
+      onClick: () => {
+        if (!metadata || metadata.status === 'empty') {
+          toast('冲突草稿已不存在', 'info');
+          return;
+        }
+        toast(
+          `草稿 ${shortDraftValue(metadata.requestId)} · 保存序号 ${metadata.seq ?? '未知'} · ${metadata.elementCount} 个元素 · 约 ${draftByteLabel(metadata.approximateBytes || 0)} · 画布 ${shortDraftValue(metadata.sceneToken)} · 目标 ${shortDraftValue(metadata.closureFingerprint)} · 与当前画布${metadata.matchesCurrentScene ? '匹配' : '不匹配'}`,
+          'info',
+        );
+      },
+    });
+    toast('建议先导出一份本地 JSON，再决定是否放弃', 'info', {
+      label: '导出草稿',
+      onClick: () => {
+        void draftJournal.exportActiveDraft()
+          .then(record => {
+            if (!record) {
+              toast('没有可导出的冲突草稿', 'info');
+              return;
+            }
+            downloadDrawingDraft(record);
+            toast('草稿已下载到本机；未发送到网络', 'ok');
+          })
+          .catch(error => toast(`导出草稿失败：${error.message}`, 'error'));
+      },
+    });
+    toast('只有确认不再需要时，才显式放弃这份草稿', 'info', {
+      label: '放弃草稿',
+      onClick: () => {
+        void (async () => {
+          if (!identity) {
+            toast('草稿身份不完整，未执行删除；请先导出后再处理', 'error');
+            return;
+          }
+          const confirmed = await confirmPop({
+            text: '放弃这份本地绘图草稿？',
+            detail: '放弃后无法从本机恢复。建议先点“导出草稿”保存 JSON 备份。',
+            yesLabel: '确认放弃',
+            danger: true,
+          });
+          if (!confirmed) {
+            toast('已保留冲突草稿', 'info');
+            return;
+          }
+          const removed = await draftJournal.discard(identity);
+          toast(
+            removed ? '冲突草稿已放弃；现在可以重新打开绘图' : '草稿已变化或不存在，未删除任何内容',
+            removed ? 'ok' : 'info',
+          );
+        })().catch(error => toast(`放弃草稿失败：${error.message}`, 'error'));
+      },
+    });
+  }, [draftJournal]);
+
   const openDrawing = useCallback((tool, selectId) => {
     if (carryBlocksDrawing()) {
       toast('容器批注正在交接，请稍后再打开绘图');
@@ -936,14 +1015,19 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       const transaction = createDrawingTransaction(seed, selectId || null);
       if (!transaction) throw new Error('目标绘图刚刚发生变化，请重新选择');
       const closureFingerprint = drawingDraftClosureFingerprint(transaction);
-      const recovery = await draftJournal.recover({
+      const recoveryInput = {
         sceneToken: sceneTokenRef.current,
         closureFingerprint,
         baselineSnapshot: seed,
-      });
+      };
+      const recovery = await draftJournal.recover(recoveryInput);
       if (!drawingOpeningRequestCurrent(openingRequestRef.current, openingRequest)) return false;
       if (recovery.status === 'conflict') {
-        throw new Error('本地绘图草稿与当前画布冲突；草稿已保留，已阻止自动覆盖');
+        const metadata = await draftJournal.inspect(recoveryInput);
+        const error = new Error('本地绘图草稿与当前画布冲突');
+        error.code = 'DRAWING_DRAFT_CONFLICT';
+        error.draftMetadata = metadata;
+        throw error;
       }
       const recovered = recovery.status === 'restored' ? recovery.record : null;
       const requestId = recovered?.requestId
@@ -980,12 +1064,13 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       draftRequestRef.current = null;
       penActiveRef.current = false;
       setPenActive(false);
-      toast(`打开绘图失败：${err.message}`, 'error');
+      if (err.code === 'DRAWING_DRAFT_CONFLICT') showDraftConflictActions(err.draftMetadata);
+      else toast(`打开绘图失败：${err.message}`, 'error');
       return false;
     });
     openingPromiseRef.current = openingPromise;
     return openingPromise;
-  }, [carryBlocksDrawing, draftJournal, drawingCommitQueue, exitDrawing, geometryPendingRef, resetDrawingCamera, updateDrawVisible]);
+  }, [carryBlocksDrawing, draftJournal, drawingCommitQueue, exitDrawing, geometryPendingRef, resetDrawingCamera, showDraftConflictActions, updateDrawVisible]);
 
   const togglePen = useCallback(() => {
     if (penActiveRef.current && !openingRef.current) exitDrawing();

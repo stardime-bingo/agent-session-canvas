@@ -12,9 +12,9 @@ hooks/ - Claude Code SessionEnd 接力钩子 (自动生成接力提示词)
 data/ - 运行时产物: scan-cache.json(可丢弃) enrich/canvas/layout/drawing-files.json(珍贵) launch/(临时脚本)
 tests/ - 零依赖 node:test 回归：持久层并发、尾部停止点、增量布局/容器缩放、图片资产、落空连线原子创建、滚轮设备判定与缩放数学、
   绘图命中(线段/旋转/描边带)、上下文倒序分页(无重叠无丢行)；fixtures/canvas-acceptance 是 4518 无数据性能/交互验收夹具
-scripts/ - 开源安装、只读诊断与发布资产准备；安装脚本按当前 checkout 生成 launchd plist，不写死个人路径；
+scripts/ - 开源安装、只读诊断、Finder 双击启停薄入口与发布资产准备；安装脚本按当前 checkout 生成 launchd plist，不写死个人路径；
   prepare-assets 从 lock 精确固定的 Excalidraw 包同步离线字体，verify-subset-worker-build 递归守住 worker/prod/main 三闭包；serve-canvas-acceptance 只绑 4518、只暴露 allowlist fixture 的 production dist，拒绝 /api、/data、/@fs、/.git
-plugins/ - Claude Code / Codex 共用的薄插件，只安装、诊断、启动、打开本地实机
+plugins/ - Claude Code / Codex 共用的薄插件；统一控制脚本负责安装、诊断、启停、单行 JSON 状态与打开本地实机，stop 保留 plist/data，start 可从保留 plist 恢复注册
 docs/ + PRIVACY.md + TERMS.md - Codex 市场提交文案、隐私披露与公开使用条款
 </directory>
 
@@ -33,6 +33,7 @@ vite.config.mjs - 前端构建: root=web, 产物 web/dist, dev 代理 :4517
 launchctl kickstart -k gui/$(id -u)/com.bingo.agent-canvas
 # 改完 web/ 代码: npm run build 即可（静态文件即时生效，无需重启）
 # 卸载守护: launchctl bootout gui/$(id -u)/com.bingo.agent-canvas
+# 快捷启停/状态统一走 plugins/agent-session-canvas/scripts/agent-canvas {start|stop|status}
 npm run scan         # 仅扫描，输出统计
 ```
 
@@ -57,6 +58,7 @@ npm run scan         # 仅扫描，输出统计
 - **滚轮双模 (gestures.js)**: 逐事件判定设备——wheelDelta 120 倍数/行模式=鼠标→光标锚定缩放；二维/亚像素增量=触控板→平移；
   150ms 手势连续性防惯性误判；Ctrl/Meta/Shift 与捏合全交还 RF 原生；缩放条第四钮 自动/触控板/鼠标 三态兜底(localStorage 记忆)
 - **原生绘图可编辑**: “选绘图/画笔”是显式双入口，选择态保留 Excalidraw 原生描边/背景/透明度/图层属性岛并按导航宽度让位；激活时全局动作不退场。BinaryFiles 只上传相对上一成功快照的 delta，同 ID 内容不可变；服务端在既有 scene lock 内以 baseToken CAS + opId/commandHash + 无 base64 journal/receipt 执行“资产先落盘、引用后提交”，prepared 回滚、committed 前滚，graph 同锁返回 scene/files。临时 draft 只在本机 IndexedDB 保留单 active requestId/epoch/seq、sceneToken/闭包指纹与 baseline/merged 指纹；FlowCanvas 使用协调器拦住水合首个 change，迟到旧 request 写入后按身份补偿删除，仅 scene/baseline/closure 精确匹配时作为局部 editSeed 恢复；pagehide/隐藏只 flush 本地，不发网络请求；完整 SVG 交接成功才按 request/epoch 条件清理，交接失败则以 committed sceneToken 和 advanced transaction 原子覆盖续写 journal
+- **草稿冲突出路**: sceneToken+closure+baseline 三重精确匹配门与单 active/schemaVersion 1 不放宽；冲突仍拒绝覆盖并保留正文，只向用户提供无正文元数据查看、本机 JSON 导出与 requestId+epoch 精确放弃，放弃必须经 confirmPop 二次确认
 - **绘图双平面（committed 世界 + 目标事务）**: 已提交绘图按 customData.below 分成沉/浮两张静态 SVG，通过 React Flow ViewportPortal
   与卡片共用唯一 viewport transform；平移/缩放不再驱动 Excalidraw 或重导出。沉/浮面先按完整 committed z-order 每 48 元素固定槽位，再只在槽内 hole-punch；整组隐藏保留空槽并 clear，绝不导出空组，后续槽不漂移。各槽以顺序+元素版本/几何/层级+本组图片标量签名复用 ready SVG，同槽同签名在途组 join 同一 Promise，只导出真正 dirty 组。所有几何组跳过字体内联；整帧可见文字按字体族+去重字符集生成顺序无关签名，单独经公开 exportToSvg 抽出唯一 font capsule，字体 ready/in-flight 与 groups 全部就绪后一次 React commit 原子交接；同内容 revision 前进零导出但照常 ready。普通 props 只在真正激活为世界时分配单调 revision，override 期的 pending input 不预分配；requested generation 的三类帧主权只在 layout effect 随 React commit 一起发布，abandoned speculative render 不得拒收当前帧 ready/error；整帧 SVG 已进 DOM 的 layout effect 才安装 rendered world，像素、命中与小地图共用该快照，cold 立即显示不可互动占位，失败最多三次退避重试并保留可见 stale 旧帧。4518 只替换真实 Ink exporter 注入 cold/warm/late 故障，并通过只读 action seam 调用 production openDrawing/exitDrawing；后置 Suspense sibling 丢弃 B，具名证明七条链与 root/MiniMap/ink/hit 同代，禁止手工写 callbacks/handoff refs。选绘图先进入普通平面待选态，命中后只把目标的容器/绑定/分组/画框递归关系闭包交给临时编辑器；新绘图从空事务开始，绝不把全场抬到卡片上。
   committed 世界编辑时持续在场，只 hole-punch 事务 originalIds；局部 draft 水合后仍先隐藏，hole SVG 进入 DOM 的 layout effect 才同步显现。尚未显现、不可交互的 opening draft 没有用户改动主权，任何退出都在 flush/落盘/closing 前直接取消并恢复 committed 世界；每次 opening 另有唯一 request 身份，上一代迟到的 drain/失败/帧回调不得触碰下一代。已显现事务的退出由 FlowCanvas 把 draft 合并回全量基线并经串行队列落盘：无显式重排时存活 originals 各自替换原槽，显式重排只填 owned slots，新 IDs 按 draft 顺序跟随最近前置存活 original、否则落在首个后置 original 前或事务 anchor，任何无关 cover 都不挪槽；成功即把本轮 draft IDs 并入事务所有权并 rebase merged 基线，完整 merged SVG 进入 DOM 后同一帧卸载 draft，并只在 request 身份仍匹配时收口残留 opening Promise；失败保留洞、编辑现场与最后成功基线，回执严格区分“未落盘”与“已保存但画面交接失败”，DrawLayer 永不直存局部副本。

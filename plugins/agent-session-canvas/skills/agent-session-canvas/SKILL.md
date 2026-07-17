@@ -1,6 +1,6 @@
 ---
 name: agent-session-canvas
-description: Install, diagnose, start, and open the local AGENT Session Canvas that visualizes Claude Code and Codex sessions. Use when the user asks to install or open the session command tower, check localhost:4517, repair its launchd service, or understand how the plugin relates to the real local app.
+description: Install, diagnose, start, stop, inspect, and open the local AGENT Session Canvas that visualizes Claude Code and Codex sessions. Use when the user asks to install or open the session command tower, check localhost:4517, control its launchd service, or understand how the plugin relates to the real local app.
 ---
 
 # AGENT Session Canvas
@@ -11,7 +11,10 @@ Control the existing local product at `http://localhost:4517`. This skill is a t
 
 - User explicitly asks to install → run `<plugin-root>/scripts/agent-canvas install`.
 - User asks to open → run `<plugin-root>/scripts/agent-canvas open`.
-- User asks to start or restart → run `<plugin-root>/scripts/agent-canvas start`.
+- User asks to start → run `<plugin-root>/scripts/agent-canvas start`; if the preserved plist exists but launchd is unregistered, this bootstraps it without reinstalling.
+- User asks to restart → run `<plugin-root>/scripts/agent-canvas restart`.
+- User asks to stop → run `<plugin-root>/scripts/agent-canvas stop`; this preserves the plist and all local data, and is safe to repeat.
+- User asks for machine-readable service state → run `<plugin-root>/scripts/agent-canvas status`; report its one-line JSON and exit status without substituting a write operation.
 - User asks why it is unavailable or wants a health check → run `<plugin-root>/scripts/agent-canvas doctor` first.
 
 Resolve `<plugin-root>` as the directory two levels above the directory containing this `SKILL.md`. Do not reimplement the shell operations by hand when the bundled script is available.
