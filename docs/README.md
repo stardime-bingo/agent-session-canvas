@@ -5,6 +5,7 @@
 ## 当前文档
 
 - [顶级状态计划](./顶级状态计划.md)：v18 SceneStore + v19 自研墨迹底座之上的"世界级手感"任务书——北极星判据、差距清单、质量铁律；执行者持有实现自由。
+- [夜间冲刺日志](./夜间冲刺日志.md)：2026-07-18 夜间施工的变更、证据、取舍、未竟与给产品主人的总汇报。
 - [Codex Marketplace Submission Copy](./codex-marketplace-submission.md)：官方目录提交所需的公开文案、测试用例与发布说明；不代表已经获批或提交成功。
 - [Privacy Policy](../PRIVACY.md)：本地读取、保存、AI 调用与可选钩子的隐私边界。
 - [Terms of Use](../TERMS.md)：公开使用条款。
