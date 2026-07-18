@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 独立纯函数，无外部依赖
- * [OUTPUT]: 对外提供 relTime、shortPath、fmtSize、classifyDigestLine、TOOL_META、STATUS_META
+ * [OUTPUT]: 对外提供 relTime、shortPath、fmtSize、classifyDigestLine、handoffSkillPrompt(交接三件套提示词)、TOOL_META、STATUS_META
  * [POS]: web 的展示层工具箱与文案常量，组件共享
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -49,4 +49,30 @@ export function classifyDigestLine(line) {
   if (t.startsWith('▸')) return ['tool', t];
   if (t.startsWith('✗')) return ['error', t];
   return ['assistant', line];
+}
+
+// ============================================================
+//  交接三件套提示词：把画布的"会话地址簿"优势交给 bingo-agent-handoff skill——
+//  桥接救援模式恰恰需要"先定位源会话地址"，画布一键把精确地址递到嘴边。
+//  提示词必须自包含（skill 铁律）：不依赖任何隐藏上下文，可直接复制进新会话。
+// ============================================================
+export function handoffSkillPrompt(s) {
+  const resumeCmd = s.tool === 'claude' ? `claude --resume ${s.id}` : `codex resume ${s.id}`;
+  return [
+    '/bingo-agent-handoff 桥接救援（Bridge rescue）——只读，不要唤醒、修改或续写源会话。',
+    '',
+    '目标会话（AGENT 会话指挥塔已精确定位，无需再搜索）：',
+    `- 工具：${s.tool === 'claude' ? 'Claude Code' : 'Codex'}`,
+    `- 会话 ID：${s.id}`,
+    `- 标题：${s.title || '（未命名）'}`,
+    `- 源转录文件：${s.filePath}`,
+    `- 项目根：${s.cwd}`,
+    `- 恢复命令：${resumeCmd}`,
+    '',
+    '要求：',
+    '1. 从源转录提取恢复胶囊；一切转录来源的断言标 REPORTED，不得未经验证升格 CONFIRMED。',
+    '2. 运行 collect-project-state.sh 与任务相关检查，取得 CONFIRMED 现场证据。',
+    '3. 产出完整交接包三件套：总汇报 / 施工接手提示词 / 独立只读审计提示词。',
+    '4. 三件套自包含、可直接复制进新会话；范围红线与停止条件逐字保留。',
+  ].join('\n');
 }

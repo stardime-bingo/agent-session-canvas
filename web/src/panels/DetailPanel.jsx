@@ -7,7 +7,7 @@
  */
 import React, { useEffect, useMemo, useState } from 'react';
 import { api } from '../api.js';
-import { TOOL_META, STATUS_META, relTime, fmtSize, classifyDigestLine } from '../util.js';
+import { TOOL_META, STATUS_META, relTime, fmtSize, classifyDigestLine, handoffSkillPrompt } from '../util.js';
 import { Icon, toast, InlineEdit } from '../ui.jsx';
 import { deleteSessionFlow } from '../canvas/menus.jsx';
 
@@ -238,6 +238,14 @@ export default function DetailPanel({ width = 400, sessionKey, onClose, onCollap
               <button className="btn" disabled={busy}
                 onClick={() => run('handoff', () => api.handoff(s.key), '接力提示词已生成')}>
                 {busy === 'handoff' ? '⇥ 蒸馏中…' : <><Icon name="handoff" /> {s.handoff ? '重新生成' : '生成接力提示词'}</>}
+              </button>
+              {/* 深档出口：拉起终端跑 bingo-agent-handoff 桥接救援——画布递精确地址，skill 出三件套 */}
+              <button className="btn" disabled={busy} title="拉起 Claude 终端执行 bingo-agent-handoff 桥接救援：只读提取本会话，产出总汇报/施工接手/独立审计三件套"
+                onClick={() => run('handoff-skill', () => api.launch({
+                  tool: 'claude', cwd: s.cwd, mode: 'prompt',
+                  prompt: handoffSkillPrompt(s), sourceKey: s.key,
+                }), '已拉起终端：桥接救援生成交接三件套（血缘已记）')}>
+                <Icon name="terminal" /> 交接三件套
               </button>
               {s.handoff && (
                 <>

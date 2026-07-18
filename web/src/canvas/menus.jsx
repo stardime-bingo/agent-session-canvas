@@ -7,6 +7,7 @@
  */
 import React from 'react';
 import { api } from '../api.js';
+import { handoffSkillPrompt } from '../util.js';
 import { Icon, toast, confirmPop } from '../ui.jsx';
 
 const L = (icon, text) => <><Icon name={icon} /> {text}</>;
@@ -72,6 +73,11 @@ export const sessionMenu = (s, ctx) => [
   { label: L('play', '续开此会话'), fn: () => launchGo({ tool: s.tool, cwd: s.cwd, mode: 'resume', sessionId: s.id }, '已拉起终端：续开会话') },
   { label: L('plus', '同工作区新会话'), fn: () => launchGo({ tool: s.tool, cwd: s.cwd, mode: 'new' }, '已拉起终端：新会话') },
   { label: L('terminal', '打开会话上下文'), fn: pos => ctx.openContext?.(s.key, pos) },
+  // 交接三件套：拉起 Claude 终端跑 bingo-agent-handoff 桥接救援——画布递地址，skill 出真相包，血缘自动连绿边
+  { label: L('handoff', '交接三件套（终端）'), fn: () => launchGo(
+    { tool: 'claude', cwd: s.cwd, mode: 'prompt', prompt: handoffSkillPrompt(s), sourceKey: s.key },
+    '已拉起终端：桥接救援生成交接三件套（血缘已记）',
+  ) },
   { label: L('panel', '打开详情面板'), fn: () => ctx.onSelect(s.key) },
   { label: L('edit', '重命名（同步本体）'), fn: () => ctx.rename(s.key) },
   { sep: true },
