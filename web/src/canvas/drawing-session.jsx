@@ -16,6 +16,16 @@ const MERGE_DEBOUNCE_MS = 140;    // 画笔流合并节流：肉眼无感，undo
 const REVEAL_TIMEOUT_MS = 600;    // 洞帧/收尾帧超时兜底：帧没来也不许把用户困在过渡态
 const NO_IDS = Object.freeze([]);
 
+// Excalidraw 水合会重写 version/versionNonce/updated/index/seed 等内务字段，
+// 并把 boundElements 的 null 规范化成 []（空值同义词）——
+// 只看语义键：空手进出编辑器不许弄脏文档、不许制造幽灵 undo 步
+const VOLATILE_KEYS = new Set(['version', 'versionNonce', 'updated', 'index', 'seed']);
+const stableDrawingKey = elements => JSON.stringify(elements, (key, value) => {
+  if (VOLATILE_KEYS.has(key)) return undefined;
+  if (key === 'boundElements') return value || [];
+  return value;
+});
+
 export function useDrawingSession({ store, drawRef, getRenderedWorld, onBeforeExit, onExitToCanvas }) {
   const [penActive, setPenActive] = useState(false);
   const [drawVisible, setDrawVisible] = useState(false);
@@ -59,6 +69,14 @@ export function useDrawingSession({ store, drawRef, getRenderedWorld, onBeforeEx
     // 首笔大实心底板自动沉层：只在 new 事务的第一次合并可能发生，沉了要告知并可撤销
     const prepared = autoSinkLargeNewDrawingDraft(base, transaction, draft);
     const merged = mergeDrawingTransaction(base, transaction, draft);
+    // 无语义变化的合并（水合首声、selection 只看不改、空手退出）不进历史、不推帧代
+    const unchanged = merged.elements.length === doc.drawing.length
+      && stableDrawingKey(merged.elements) === stableDrawingKey(doc.drawing)
+      && JSON.stringify(merged.files || {}) === JSON.stringify(doc.drawingFiles || {});
+    if (unchanged) {
+      transactionRef.current = advanceDrawingTransaction(transaction, prepared.snapshot);
+      return;
+    }
     store.mutate(d => ({ ...d, drawing: merged.elements, drawingFiles: merged.files }),
       { coalesce: 'draw' });
     transactionRef.current = advanceDrawingTransaction(transaction, prepared.snapshot);

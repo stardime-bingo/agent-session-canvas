@@ -6,12 +6,13 @@ Node.js 24 (零依赖后端) + React 18 + @xyflow/react 12 + Vite 8
 > 地图从地形自动生长，点击地图反向驱动地形。
 
 <directory>
-server/ - 零依赖 Node 后端 daemon (10文件 + adapters/: 扫描/拉起/模型路由/AI/回填/HTTP/画布事务与图片仓)
+server/ - 零依赖 Node 后端 daemon (9文件 + adapters/: 扫描/拉起/模型路由/AI/回填/HTTP/场景快照仓与图片仓)
 web/ - React Flow 画布前端 (src/: 总装 + ui 原子库(toast/确认/就地改名/图标) + canvas/ 画布引擎/手势内核/菜单 + panels/ 四面板含终端框)
 hooks/ - Claude Code SessionEnd 接力钩子 (自动生成接力提示词)
 data/ - 运行时产物: scan-cache.json(可丢弃) enrich/canvas/layout/drawing-files.json(珍贵) launch/(临时脚本)
-tests/ - 零依赖 node:test 回归：持久层并发、尾部停止点、增量布局/容器缩放、图片资产、落空连线原子创建、滚轮设备判定与缩放数学、
-  绘图命中(线段/旋转/描边带)、上下文倒序分页(无重叠无丢行)；fixtures/canvas-acceptance 是 4518 无数据性能/交互验收夹具
+tests/ - 零依赖 node:test 回归：场景仓 LWW/资产先行、scene-store(合并 undo/防抖冲刷/退避/LWW 采纳)、增量布局/容器缩放、
+  滚轮设备判定与缩放数学、绘图命中(线段/旋转/描边带)、上下文倒序分页(无重叠无丢行)；fixtures/canvas-acceptance 是
+  4518 无数据性能/交互验收夹具(新合同八链)；archive/ 存放 v17 事务机器的陪葬测试与旧夹具（归档不删除）
 scripts/ - 开源安装、只读诊断、Finder 双击启停薄入口与发布资产准备；安装脚本按当前 checkout 生成 launchd plist，不写死个人路径；
   prepare-assets 从 lock 精确固定的 Excalidraw 包同步离线字体，verify-subset-worker-build 递归守住 worker/prod/main 三闭包；serve-canvas-acceptance 只绑 4518、只暴露 allowlist fixture 的 production dist，拒绝 /api、/data、/@fs、/.git
 plugins/ - Claude Code / Codex 共用的薄插件；统一控制脚本负责安装、诊断、启停、单行 JSON 状态与打开本地实机，stop 保留 plist/data，start 可从保留 plist 恢复注册
@@ -41,8 +42,33 @@ npm run scan         # 仅扫描，输出统计
 
 ## 架构决策
 
-> **v17 绘图融合根治已完成（2026-07-17）**：LE-008～LE-014 已按 `docs/绘图融合根治计划-v2.md` 全部独立验收并合入，Loop 最终全局门通过；2026-07-18 总验收遗留的草稿冲突出路、快捷启停与 Retina 命中同尺也已在本分支收口。后续 SceneStore 必须另立 RFC，不得继续扩张本轮合同。
+> **v18 SceneStore 重构完成（2026-07-18）**：v17 的五处真相 + CAS/journal/receipt/全局串行队列/四道门
+> 已全部处决，换成单一场景文档 + 乐观优先 + 快照持久化（tldraw/Figma 共识）。净删约 2000 行协调代码。
+> 详见 docs 与本节各律；旧合同的测试与夹具在 tests/archive/ 归档留念。
 
+- **交互零等待宪法**: 从按下鼠标到画面响应，中间不允许出现任何一次网络、磁盘、导出、握手。
+  一切写动作同步进 SceneStore；渲染（InkWorld 帧）永远只是订阅者，不是闸门；磁盘是河边取水人，永远不许筑坝
+- **SceneStore 单一真相源 (web/src/scene-store.js)**: 场景文档 { layout, edges, notes, boards, drawing, drawingFiles, seq }
+  唯一写入口 mutate（同步、可 coalesce 进全画布 undo/redo，容量 100）；后台防抖 300ms 全量快照冲刷，
+  失败无限退避（1s→15s 封顶）永不阻塞输入，角落只亮"未同步"点；SSE 回声按 writerId 去重，本地干净才采纳（LWW）
+- **场景快照律 (server/scene.mjs ~110 行)**: POST /api/scene 全量快照 + tmp/rename 原子写 + 内存 rev + SSE 广播；
+  图片资产内容寻址、同 ID 不可变、资产先行引用后到、孤儿随场景写顺手裁剪；轻校验挡结构性垃圾，
+  不做逐字节公证——磁盘格式与 v17 完全兼容（canvas/layout/drawing-files.json），备份与回滚零迁移
+- **绘图连续合并 (drawing-session.jsx)**: Excalidraw onChange 防抖 140ms 直接 merge 进 store（与便签打字同一条河），
+  崩溃丢失 ≤ 一次防抖窗，IndexedDB 草稿仓与冲突三重门整体消失；"退出绘图"退化为卸载编辑器——
+  打开等洞帧、退出等全量帧（600ms 超时兜底），同一 commit 显形/卸载，无握手无身份代际；
+  语义键比较（剔 version/versionNonce/updated/index/seed，boundElements null≡[]）保证空手进出零污染；
+  首笔大实心底板自动沉层 + toast 撤销；相机冻结预览机制（drawing-camera.jsx）原样保留
+- **容器承载律 (FigJam/Miro 共识)**: 墨迹中心落在街区/画板内就跟容器走——拖动乐观进行（DOM 桥 CSS 变量跟随），
+  松手一次 mutate（容器新位 + 锚定墨迹平移），含平移的世界帧进 DOM 才撤桥，肉眼无缝；
+  整理 applyArrange 同理：before/after 同步规划 + 一次 mutate + 桥补帧差；撤销走全局 Cmd/Ctrl+Z
+- **绘图双平面（沉/浮静态 SVG）**: 已提交绘图按 customData.below 分成沉/浮两张静态 SVG（exportScale=1 防 Retina 错位），
+  经 ViewportPortal 与卡片共用唯一 viewport transform；48 元素固定槽位 + 签名复用 + 字体胶囊原子交接照旧；
+  导出失败无限退避自愈（40ms→2s 封顶）+ 页面可见即重试，旧帧全程可见——帧永远不是写权限的前提
+- **绘图删除不藏在模式里**: 普通模式点击描边带=选中（Delete 删，Esc 返回），右键=选中/沉浮/删除（过确认，
+  可 undo）；空心形状中空区穿透给卡片，选绘图武装后封闭形状内部为热区；命中检测纯函数可证伪
+- **交接三件套融合**: 会话卡右键与详情面板一键拉起 Claude 终端，注入自包含 bridge-rescue 提示词
+  （bingo-agent-handoff skill），画布递精确会话地址（工具/ID/源转录/项目根/恢复命令），血缘自动连绿边
 - **Adapter 模式**: 每个 Agent 工具一个适配器输出统一 Session 模型，新增工具=新增一个文件
 - **首尾局部读取**: 只读 JSONL 首 64KB + 尾 8KB，3700 文件冷扫 1.5s，mtime 缓存命中 53ms
 - **三层噪音过滤**: 子智能体(claude isSidechain / codex thread_source=subagent)、空壳、headless 自噪
@@ -50,38 +76,21 @@ npm run scan         # 仅扫描，输出统计
 - **模型路由 (llm.mjs)**: Codex(gpt-5.6-sol) 优先 → Claude(sonnet-5) 兜底 → DeepSeek(v4-flash) 可选，
   额度耗尽自动降级；单次精工 xhigh、批量回填 high（Max 微降一档，data/config.json 可改）
 - **人话铁律**: 标题动词开头 8-16 字说人话；批量回填(backfill.mjs)只管近 30 天，历史不管
-- **双仓分离**: 扫描缓存可丢弃可重建；AI 增强数据(标题/摘要/接力)与手工布局独立存放永不清扫
-- **持久层并发律**: 扫描缓存进程内常驻；珍贵 enrich 更新必须锁住“读最新值→改→原子写”；Codex 索引追加后读尾校验
-- **SSE 举旗不抢方向盘**: 文件变化只点亮"有新活动"按钮，用户主动刷新才重排画布
-- **拖动即记忆**: 容器拖过的位置写入 layout.json，永远优先于瀑布流算法
+- **双仓分离**: 扫描缓存可丢弃可重建；AI 增强数据(enrich)与场景文档独立存放永不清扫
+- **SSE 举旗不抢方向盘**: 地形变化只点亮"有新活动"按钮，用户主动刷新才重排画布；场景回声静默采纳
+- **拖动即记忆**: 容器拖过的位置写入场景文档 layout，永远优先于瀑布流算法
 - **成熟画布手势**: 空白左拖框选；空格+左拖/中键平移；触控板双指平移、捏合缩放；街区/画板仅标题栏搬家
 - **滚轮双模 (gestures.js)**: 逐事件判定设备——wheelDelta 120 倍数/行模式=鼠标→光标锚定缩放；二维/亚像素增量=触控板→平移；
   150ms 手势连续性防惯性误判；Ctrl/Meta/Shift 与捏合全交还 RF 原生；缩放条第四钮 自动/触控板/鼠标 三态兜底(localStorage 记忆)
-- **原生绘图可编辑**: “选绘图/画笔”是显式双入口，选择态保留 Excalidraw 原生描边/背景/透明度/图层属性岛并按导航宽度让位；激活时全局动作不退场。BinaryFiles 只上传相对上一成功快照的 delta，同 ID 内容不可变；服务端在既有 scene lock 内以 baseToken CAS + opId/commandHash + 无 base64 journal/receipt 执行“资产先落盘、引用后提交”，prepared 回滚、committed 前滚，graph 同锁返回 scene/files。临时 draft 只在本机 IndexedDB 保留单 active requestId/epoch/seq、sceneToken/闭包指纹与 baseline/merged 指纹；FlowCanvas 使用协调器拦住水合首个 change，迟到旧 request 写入后按身份补偿删除，仅 scene/baseline/closure 精确匹配时作为局部 editSeed 恢复；pagehide/隐藏只 flush 本地，不发网络请求；完整 SVG 交接成功才按 request/epoch 条件清理，交接失败则以 committed sceneToken 和 advanced transaction 原子覆盖续写 journal
-- **草稿冲突出路**: sceneToken+closure+baseline 三重精确匹配门与单 active/schemaVersion 1 不放宽；冲突仍拒绝覆盖并保留正文，只向用户提供无正文元数据查看、本机 JSON 导出与 requestId+epoch 精确放弃，放弃必须经 confirmPop 二次确认
-- **绘图双平面（committed 世界 + 目标事务）**: 已提交绘图按 customData.below 分成沉/浮两张静态 SVG，导出固定 exportScale=1 防止 Retina devicePixelRatio 把 DOM 视觉尺寸放大后与命中几何错位，并通过 React Flow ViewportPortal
-  与卡片共用唯一 viewport transform；平移/缩放不再驱动 Excalidraw 或重导出。沉/浮面先按完整 committed z-order 每 48 元素固定槽位，再只在槽内 hole-punch；整组隐藏保留空槽并 clear，绝不导出空组，后续槽不漂移。各槽以顺序+元素版本/几何/层级+本组图片标量签名复用 ready SVG，同槽同签名在途组 join 同一 Promise，只导出真正 dirty 组。所有几何组跳过字体内联；整帧可见文字按字体族+去重字符集生成顺序无关签名，单独经公开 exportToSvg 抽出唯一 font capsule，字体 ready/in-flight 与 groups 全部就绪后一次 React commit 原子交接；同内容 revision 前进零导出但照常 ready。普通 props 只在真正激活为世界时分配单调 revision，override 期的 pending input 不预分配；requested generation 的三类帧主权只在 layout effect 随 React commit 一起发布，abandoned speculative render 不得拒收当前帧 ready/error；整帧 SVG 已进 DOM 的 layout effect 才安装 rendered world，像素、命中与小地图共用该快照，cold 立即显示不可互动占位，失败最多三次退避重试并保留可见 stale 旧帧。4518 只替换真实 Ink exporter 注入 cold/warm/late 故障，并通过只读 action seam 调用 production openDrawing/exitDrawing；后置 Suspense sibling 丢弃 B，具名证明七条链与 root/MiniMap/ink/hit 同代，禁止手工写 callbacks/handoff refs。选绘图先进入普通平面待选态，命中后只把目标的容器/绑定/分组/画框递归关系闭包交给临时编辑器；新绘图从空事务开始，绝不把全场抬到卡片上。
-  committed 世界编辑时持续在场，只 hole-punch 事务 originalIds；局部 draft 水合后仍先隐藏，hole SVG 进入 DOM 的 layout effect 才同步显现。尚未显现、不可交互的 opening draft 没有用户改动主权，任何退出都在 flush/落盘/closing 前直接取消并恢复 committed 世界；每次 opening 另有唯一 request 身份，上一代迟到的 drain/失败/帧回调不得触碰下一代。已显现事务的退出由 FlowCanvas 把 draft 合并回全量基线并经串行队列落盘：无显式重排时存活 originals 各自替换原槽，显式重排只填 owned slots，新 IDs 按 draft 顺序跟随最近前置存活 original、否则落在首个后置 original 前或事务 anchor，任何无关 cover 都不挪槽；成功即把本轮 draft IDs 并入事务所有权并 rebase merged 基线，完整 merged SVG 进入 DOM 后同一帧卸载 draft，并只在 request 身份仍匹配时收口残留 opening Promise；失败保留洞、编辑现场与最后成功基线，回执严格区分“未落盘”与“已保存但画面交接失败”，DrawLayer 永不直存局部副本。
-  编辑态导航是独立相机事务：第一个 wheel/空格拖/中键/手工具意图先阻断 Excalidraw，freeze draft 并用第二个 InkWorldLayer 静态预览接管；预览 DOM ready 后才逐事件改唯一 RF viewport，180ms 尾部经唯一入口成功 align Excalidraw 一次后才进入 resuming 等双 rAF，握手后同一 commit 恢复 live/撤预览。opening、尾部与 suspended 退出共用该入口并只计真实成功调用。wheel 对外部功能件放行，对 Excal textarea/Island 只断传播保留默认滚动，绘图面才进 RF 相机；缩放快捷键与 Safari gesture 也在 root capture 阻断 Excal 全局监听并只产出 RF viewport，文字普通字符与 Excal UI 默认行为保留。window pointer 监听是幂等资源，真实 attach/cleanup 分别只读计数，finish/reset/exit/unmount 均无条件回收。新手势可抢占过期 resume；freezing 退出丢弃未 ready preview，只有 suspended/resuming 预览可填 closing 洞，resuming 退出不重复 align；IME 同周期只 freeze/提示一次，compositionend 解锁。
-  LE-010 将此设计收口为可渲染事实：live 隐藏且 preview 在场时同 commit 挂 z:6 透明输入盾，恢复 live 时同 commit 撤盾；FlowCanvas 单一持有 Meta/Ctrl +/-/0，Shift+1/2/3 在单 RF 相机中有意统一折叠为全景 fit，二者都只改 RF；z:7 减/加/100%/全景岛与顶部全景也全部走该相机事务，不先退绘图、不直调 fitView。编辑器 `.Island` 功能岛的 pointer 不建立空点退场候选，真 canvas 空白仍保留空点退场。
-  4518 人工尾窗证伪由始终可见按钮在真实 selection 事务 live 后武装只读 rAF+timer 双时钟观察，只由 Computer Use 真实手工具拖动触发；fixture 不写相机/viewport、不派发输入，timer 只补捕 resuming 且绝不充当 shield 帧样本，捕获后只调 production exitDrawing 并延迟 dirty closing export 取样。每次武装在旧 cleanup 完成后分配唯一 run token/scenario 和 call 起点，且只接受精确匹配 production closing revision 的导出；旧观察器/timeout/fail 不得覆盖新轮 UI。LE-010 原始证据必须恰好三轮 fresh hard refresh，每轮保留严格九步 action、baseline→selectionLive→highFrequencyLive→tailPass→final 五阶段 production snapshot，以及 Shift+1/2/3 的 before/after/target 有限数样本。
-  LE-010 证据来源另设硬门：URL 逐字固定为 4518 interaction，每轮 address/selection/tail 三张 Computer Use PNG 共九张，action 以 artifact ID 一一引用；raw 与截图只能位于当前 candidate evidence 目录且不得是软链或越界路径，gate 当场复算 byteLength/SHA256、解析 PNG IHDR/IEND 与尺寸，并把完整 artifact 元数据写进受 manifest 哈希的 behavior log。Judge 仍须打开九图确认地址栏、live 编辑器与 PASS 阶段；任何 4517、伪 source/proof、旧 candidate 或复用截图都失败。
-  首次 new 事务里，本次 primary/左键手势新增且达到宽≥400、高≥300、面积≥120000 的实心 rectangle/ellipse/diamond，在 pointerup 后等 Excal change 稳定两帧即只 signal 一次既有 exitDrawing；selection、透明/小形状、旧元素编辑、IME 与已 rebase 事务不自动退场。唯一提交链再写入 below=true，绑定文字随宿主沉层，完整静态帧交接成功后 toast 以成功代际守卫，只在队首把票据 sunkIds 与绑定文字浮起，绝不回灌整份 before；同一 closing 画面重试可延续票据，别代成功使其失效、别代失败不失效。动作 toast 是可键盘操作的 polite status，hover/focus 暂停关闭并保留充足操作时间。屏幕 worldOverride、提交队列与持久化 props 三真相只在 idle 且 props 同引用追上 override 或当前队列快照时收口；撤销上屏前稳定排空等待期间追加的 tail，并在函数式换屏瞬间复核无 pending、代际与编辑门，后续成功不覆盖、后续失败仍恢复。普通态绘图动作串行提交，每笔到队首才基于上一成功快照变换，失败不推进基线也不毒死后续。沉层点击让位卡片，浮层命中仍跟着视觉顺序
-- **容器承载律 (FigJam/Miro 共识)**: 墨迹中心落在街区/画板内就跟容器走——direct 拖动走单容器 carry，bridge 只在 RF node.position 已进 DOM 的 layout effect 同步并从同一点 DROP，禁止 pointer-derived CSS 抢跑；
-  自动整理与撤销以 production buildGraph 同步规划 before/after，冻结 rendered world 的全局互斥 anchors，再用一次 batch carry 在同一 scene lock/CAS/journal/receipt 内原子替换 layout 与平移 drawing；多 delta DOM bridge 只在精确目标 generation 进 DOM 后清除。
-  commit 与 status 同时失败即以 AUTHORITY_UNKNOWN 毒化 scene mutation queue：已排队但未 request 与新写一律阻断，只有成功读取带 sceneToken 的权威 graph 才解除。
-  面积小者优先认领、绑定标签随宿主；小地图画一切：MiniMapInk 镜像 minimap 的 svg viewBox 把区域底板与批注投进缩略图（Miro 式地标定向）
-- **绘图删除不藏在模式里**: 普通模式点击绘图描边带=一键进选绘图并选中（Delete 即删，Esc 返回），右键绘图=“选中编辑/删除此绘图”（删除过确认、即时落盘）；pane 与一切节点同河——含会话卡/工作区（视觉最上层者赢，按钮/输入/nodrag 功能件/连接点/拖动把手除外）；普通模式空心形状中空区继续穿透给底下卡片，显式点“选绘图”武装后矩形/椭圆/菱形内部扩大为选择热区，线/箭头/手绘仍只认真实墨迹，命中检测是纯函数可证伪
-- **整理只动几何**: 自动整理原子重置 x/y/w/h 但保留 layout.d 人工归属；每次成功整理覆盖旧票据，toast 与 Cmd/Ctrl+Z 只撤最近一步
-- **锚点不等于重叠许可**: 手工位置优先，但新增会话/工作区令成员或容器长大时，纯布局层必须确定性顺延避让且不暗写 layout.json
+- **整理只动几何**: 自动整理原子重置 x/y/w/h 但保留 layout.d 人工归属；撤销走全局 undo，一次撤一步
+- **锚点不等于重叠许可**: 手工位置优先，但新增会话/工作区令成员或容器长大时，纯布局层必须确定性顺延避让且不暗写 layout
 - **缩放只改画框**: 从左/上放大街区或画板时，持久化 React Flow 已补偿的子项相对坐标，重建后成员绝对位置不跳
-- **落空连线有去处**: 只认明确拖线（关闭点击续连暗状态）；松在 pane、容器空白面或边等画布落点都弹选择——
-  会话卡拉出的线首选“打开会话上下文”终端窗（倒序分页 GET /api/context-page：打开停最新、上滑翻至会话开头、
-  content-visibility 原生虚拟化，5.7GB 会话与 100KB 同速打开；右键菜单同河），其余“便签/画板”与手动边一次原子写入；
-  连接点命中区按缩放保持 12–28px，视觉圆点独立且悬停不位移
-- **看板归属不碰地形**: 工作区拖入另一街区/画板只改 layout.d 与画布坐标，不移动、不改写真实会话目录与文件
+- **落空连线有去处**: 只认明确拖线；松在画布落点弹选择——会话卡拉出的线首选"打开会话上下文"终端窗
+  （倒序分页 GET /api/context-page：打开停最新、上滑翻至会话开头、content-visibility 原生虚拟化，
+  5.7GB 会话与 100KB 同速打开）；连接点命中区按缩放保持 12–28px
+- **看板归属不碰地形**: 工作区拖入另一街区/画板只改场景 layout.d 与画布坐标，不移动真实会话目录与文件
 - **纯展示层不抢交互**: 图例等无动作覆盖层必须点击穿透，不能遮挡画布节点与入口
-- **数据流单向**: 地形(~/.claude,~/.codex) → scanner → graph → 画布；画布动作 → launcher/ai → 地形
+- **数据流单向**: 地形(~/.claude,~/.codex) → scanner → graph → 画布；画布动作 → store → 冲刷 → 磁盘；launcher/ai → 地形
 
 ## 会话数据源
 
