@@ -13,7 +13,8 @@ import { fileURLToPath } from 'node:url';
 //  路径常量：所有运行时产物收敛在 data/ 一处
 // ============================================================
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-export const DATA_DIR = path.join(ROOT, 'data');
+// 环境变量仅供并行测试实例（与 AGENT_CANVAS_PORT 同族），生产恒为仓内 data/
+export const DATA_DIR = process.env.AGENT_CANVAS_DATA_DIR || path.join(ROOT, 'data');
 export const WEB_DIST = path.join(ROOT, 'web', 'dist');
 
 const CACHE_FILE = path.join(DATA_DIR, 'scan-cache.json');   // 扫描缓存：mtime 命中即免重读

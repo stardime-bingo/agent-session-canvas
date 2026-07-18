@@ -1,6 +1,6 @@
 /**
- * [INPUT]: 依赖 scanner 的图数据、launcher 的终端拉起、ai 的摘要/接力、store 的增强仓与静态目录
- * [OUTPUT]: 对外提供 HTTP 服务（:4517）：graph/session/context(深档上下文)/scan/launch/AI/rename/events + 画布布局/direct+batch carry/drawing CAS 与图片资产/原子建点连线 API + 前端静态托管
+ * [INPUT]: 依赖 scanner 的图数据、launcher 的终端拉起、ai 的摘要/接力、store 的增强仓与静态目录、scene 的 LWW 快照仓
+ * [OUTPUT]: 对外提供 HTTP 服务（:4517）：graph/session/context(深档上下文)/scan/launch/AI/rename/events + 画布场景快照(PUT scene)与图片资产 API + 前端静态托管
  * [POS]: server 的总入口与路由层，前端画布与本地地形之间唯一的桥
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -14,12 +14,10 @@ import { launch } from './launcher.mjs';
 import { summarize, makeHandoff, extractDigest, extractEndingDigest, extractContextPage, nameSession } from './ai.mjs';
 import { runBackfill, backfillStatus, findCandidates } from './backfill.mjs';
 import { WEB_DIST, loadEnrich, updateEnrich, appendJsonlVerified, DATA_DIR } from './store.mjs';
-import { createNodeFromEdge } from './canvas-actions.mjs';
-import { createCanvasRepository } from './canvas-repository.mjs';
+import { createScene } from './scene.mjs';
 
 const PORT = +process.env.AGENT_CANVAS_PORT || 4517;   // 环境变量仅供并行实例测试，生产恒为 4517
-const canvasRepository = createCanvasRepository(DATA_DIR);
-canvasRepository.recover();   // 启动先闭合遗留事务，备份与任何路由才可观察 scene
+const scene = createScene(DATA_DIR);
 
 // ============================================================
 //  图数据缓存 + SSE 广播：文件变化 → 防抖重扫 → 推送前端
@@ -75,6 +73,13 @@ function graphSig(g) {
 }
 let lastSig = graphSig(graph);
 
+function broadcast(payload) {
+  const msg = `data: ${JSON.stringify(payload)}\n\n`;
+  for (const res of sseClients) {
+    try { res.write(msg); } catch { sseClients.delete(res); }
+  }
+}
+
 function refresh() {
   // 扫描永不许炸掉进程：文件系统瞬息万变，失败保留上一份图
   try {
@@ -86,10 +91,7 @@ function refresh() {
   const sig = graphSig(graph);
   if (sig === lastSig) return;   // 图没实质变化：静默更新，不打扰前端
   lastSig = sig;
-  const msg = `data: ${JSON.stringify({ type: 'graph-updated', scannedAt: graph.scannedAt })}\n\n`;
-  for (const res of sseClients) {
-    try { res.write(msg); } catch { sseClients.delete(res); }
-  }
+  broadcast({ type: 'graph-updated', scannedAt: graph.scannedAt });
 }
 
 let timer = null;
@@ -110,135 +112,29 @@ for (const dir of [
 // ============================================================
 const findSession = key => graph.sessions.find(s => s.key === key);
 
-const districtOf = cwd => {
-  const parts = String(cwd).split('/').filter(Boolean);
-  if (parts[0] === 'Users') return parts.slice(2, 4).join(' / ') || '~';
-  return '/' + (parts[0] || '');
-};
-const districtIds = () => new Set(Object.keys(graph.workspaces || {}).map(cwd => `district:${districtOf(cwd)}`));
-const withToken = ({ result, sceneToken }) => ({ ...result, sceneToken });
-
-// 布局条目字段合并：x/y/d/w/h 只更新送来的，w/h 支撑街区手动调尺寸
-function pickLayout(src, prev) {
-  const out = { ...prev };
-  for (const k of ['x', 'y', 'd', 'w', 'h']) if (src[k] !== undefined) out[k] = src[k];
-  return out;
-}
-
 const routes = {
-  // 画布手工布局与手绘层随图下发
+  // 画布场景（布局+手绘层+图片）随图下发；rev 供 SSE 回声去重
   'GET /api/graph': async () => {
-    const scene = canvasRepository.readWithDrawingFiles();
+    const snapshot = scene.read();
     return {
-      ...graph, layout: scene.layout, sceneToken: scene.sceneToken,
-      canvas: { ...scene.canvas, drawingFiles: scene.drawingFiles },
+      ...graph, layout: snapshot.layout, rev: snapshot.rev,
+      canvas: { ...snapshot.canvas, drawingFiles: snapshot.drawingFiles },
     };
   },
 
-  // ---- 手动连线：紫色人笔，同对去重 ----
-  'POST /api/edge-add': async body => {
-    return withToken(canvasRepository.mutate(scene => {
-      const dup = scene.canvas.edges.find(e =>
-        (e.from === body.from && e.to === body.to) || (e.from === body.to && e.to === body.from));
-      if (dup) return dup;
-      const edge = { id: `manual:${Date.now()}`, from: body.from, to: body.to };
-      scene.canvas.edges.push(edge);
-      return edge;
-    }));
-  },
-
-  'POST /api/edge-del': async body => {
-    return withToken(canvasRepository.mutate(scene => {
-      scene.canvas.edges = scene.canvas.edges.filter(e => e.id !== body.id);
-      return { ok: true };
-    }));
-  },
-
-  // ---- 便签：补丁式合并（只更新送来的字段），拖动/打字/换色并发不互相覆盖 ----
-  'POST /api/note-set': async body => {
-    return withToken(canvasRepository.mutate(scene => {
-      const patch = {};
-      for (const k of ['x', 'y', 'text', 'color', 'w', 'h']) if (body[k] !== undefined) patch[k] = body[k];
-      const i = scene.canvas.notes.findIndex(n => n.id === body.id);
-      if (i >= 0) return scene.canvas.notes[i] = { ...scene.canvas.notes[i], ...patch };
-      const note = { id: body.id || `note:${Date.now()}`, x: 0, y: 0, text: '', color: 'yellow', ...patch };
-      scene.canvas.notes.push(note);
-      return note;
-    }));
-  },
-
-  'POST /api/note-del': async body => {
-    return withToken(canvasRepository.mutate(scene => {
-      scene.canvas.notes = scene.canvas.notes.filter(n => n.id !== body.id);
-      return { ok: true };
-    }));
-  },
-
-  // ---- Excalidraw 绘图层：资产先 durable，再以 CAS 提交引用；receipt 先于成功响应 ----
-  'POST /api/drawing-set': async body => {
-    const result = canvasRepository.commitDrawing(body);
-    if (Object.keys(body.files || {}).length) backupPrecious();
+  // ---- 场景快照：LWW 全量落盘，唯一写入口。writerId 随 SSE 回播供发起端忽略自己的回声 ----
+  'POST /api/scene': async body => {
+    const result = scene.write({ layout: body.layout, canvas: body.canvas });
+    broadcast({ type: 'scene-updated', rev: result.rev, writerId: body.writerId || null });
     return result;
   },
 
-  'GET /api/drawing-commit-status': async (_, query) =>
-    canvasRepository.drawingStatus(query.opId),
-
-  // ---- 拉线落空：便签/画板与手动边同一次写盘，同成同败 ----
-  'POST /api/node-from-edge': async body => {
-    return withToken(canvasRepository.mutate(scene => {
-      const result = createNodeFromEdge(scene.canvas, body);
-      scene.canvas = result.canvas;
-      const { canvas: _, ...response } = result;
-      return response;
-    }));
+  // ---- 图片资产：内容寻址、同 ID 不可变、先上资产再提交引用；新图当天即入备份 ----
+  'POST /api/drawing-files': async body => {
+    const result = scene.addFiles(body.files);
+    if (result.added) backupPrecious();
+    return result;
   },
-
-  // ---- 自定义画板：用户自建的一等容器，补丁式合并同便签 ----
-  'POST /api/board-set': async body => {
-    return withToken(canvasRepository.mutate(scene => {
-      const patch = {};
-      for (const k of ['x', 'y', 'w', 'h', 'name', 'color']) if (body[k] !== undefined) patch[k] = body[k];
-      const i = scene.canvas.boards.findIndex(b => b.id === body.id);
-      if (i >= 0) return scene.canvas.boards[i] = { ...scene.canvas.boards[i], ...patch };
-      const board = { id: body.id || `${Date.now()}`, x: 0, y: 0, w: 520, h: 360, name: '新画板', color: 'blue', ...patch };
-      scene.canvas.boards.push(board);
-      return board;
-    }));
-  },
-
-  'POST /api/board-del': async body => {
-    return withToken(canvasRepository.mutate(scene => {
-      scene.canvas.boards = scene.canvas.boards.filter(b => b.id !== body.id);
-      return { ok: true };   // 成员 layout.d 悬空后自动回落路径街区
-    }));
-  },
-
-  'POST /api/layout': async body => {
-    return withToken(canvasRepository.mutate(scene => {
-      scene.layout[body.path] = pickLayout(body, scene.layout[body.path]);
-      return { ok: true };
-    }));
-  },
-
-  // 拖动一个 = 合并快照；自动整理/撤销 = 原子替换整份布局，绝不经历“先清空再补回”的危险窗口
-  'POST /api/layout-batch': async body => {
-    return withToken(canvasRepository.mutate(scene => {
-      const layout = body.replace === true ? {} : scene.layout;
-      for (const e of body.entries || []) layout[e.path] = pickLayout(e, layout[e.path]);
-      scene.layout = layout;
-      return { ok: true, saved: (body.entries || []).length };
-    }));
-  },
-
-  'POST /api/container-carry': async body =>
-    canvasRepository.carry(body, { districtIds: districtIds() }),
-
-  'POST /api/container-batch-carry': async body =>
-    canvasRepository.batchCarry(body, { districtIds: districtIds() }),
-
-  'GET /api/container-carry-status': async (_, query) =>
-    canvasRepository.status(query.opId),
 
   // 删除 = 移入 macOS 废纸篓（看板干净，但可反悔），增强数据一并清除
   // 防线一：10 分钟内还在写的会话可能被工具进程持有句柄，默认拒删（force 可破）
