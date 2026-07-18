@@ -42,9 +42,10 @@ npm run scan         # 仅扫描，输出统计
 
 ## 架构决策
 
-> **v18 SceneStore 重构完成（2026-07-18）**：v17 的五处真相 + CAS/journal/receipt/全局串行队列/四道门
-> 已全部处决，换成单一场景文档 + 乐观优先 + 快照持久化（tldraw/Figma 共识）。净删约 2000 行协调代码。
-> 详见 docs 与本节各律；旧合同的测试与夹具在 tests/archive/ 归档留念。
+> **v18 SceneStore（2026-07-18）**：五处真相 + CAS/journal/receipt/全局串行队列/四道门全部处决，
+> 换单一场景文档 + 乐观优先 + 快照持久化。**v19 自研墨迹（同日）**：Excalidraw 整体拆除——
+> 全部残余复杂度都来自"两个世界的缝"（双相机/双事件/双表征），缝没了机器就没了。
+> 旧合同测试与夹具在 tests/archive/ 归档留念。
 
 - **交互零等待宪法**: 从按下鼠标到画面响应，中间不允许出现任何一次网络、磁盘、导出、握手。
   一切写动作同步进 SceneStore；渲染（InkWorld 帧）永远只是订阅者，不是闸门；磁盘是河边取水人，永远不许筑坝
@@ -54,17 +55,17 @@ npm run scan         # 仅扫描，输出统计
 - **场景快照律 (server/scene.mjs ~110 行)**: POST /api/scene 全量快照 + tmp/rename 原子写 + 内存 rev + SSE 广播；
   图片资产内容寻址、同 ID 不可变、资产先行引用后到、孤儿随场景写顺手裁剪；轻校验挡结构性垃圾，
   不做逐字节公证——磁盘格式与 v17 完全兼容（canvas/layout/drawing-files.json），备份与回滚零迁移
-- **绘图连续合并 (drawing-session.jsx)**: Excalidraw onChange 防抖 140ms 直接 merge 进 store（与便签打字同一条河），
-  崩溃丢失 ≤ 一次防抖窗，IndexedDB 草稿仓与冲突三重门整体消失；"退出绘图"退化为卸载编辑器——
-  打开等洞帧、退出等全量帧（600ms 超时兜底），同一 commit 显形/卸载，无握手无身份代际；
-  语义键比较（剔 version/versionNonce/updated/index/seed，boundElements null≡[]）保证空手进出零污染；
-  首笔大实心底板自动沉层 + toast 撤销；相机冻结预览机制（drawing-camera.jsx）原样保留
+- **自研墨迹层 (ink.js + InkLayer + InkTools)**: 笔迹/矩形/椭圆/箭头/文字全部自写——落笔即场景文档元素、
+  拖画即 coalesce mutate（一笔=一步 undo）、收笔即定稿（意外小形状判废），文字就地 textarea 击键直写；
+  渲染=React 直出 SVG（沉层负 z 垫底/浮层高 z 盖顶），与卡片共用唯一 RF 相机——
+  没有导出、没有帧、没有交接：文档变更到像素可见=一次 React commit；
+  armed 期间滚轮直接改 RF 相机（gestures 数学复用），空格让路 RF 原生平移——单相机，冻结/预览/对齐/握手这一类问题不存在；
+  大实心底板收笔自动沉层 + toast 撤销；元素结构沿用 Excalidraw 兼容子集，磁盘零迁移
 - **容器承载律 (FigJam/Miro 共识)**: 墨迹中心落在街区/画板内就跟容器走——拖动乐观进行（DOM 桥 CSS 变量跟随），
   松手一次 mutate（容器新位 + 锚定墨迹平移），含平移的世界帧进 DOM 才撤桥，肉眼无缝；
   整理 applyArrange 同理：before/after 同步规划 + 一次 mutate + 桥补帧差；撤销走全局 Cmd/Ctrl+Z
-- **绘图双平面（沉/浮静态 SVG）**: 已提交绘图按 customData.below 分成沉/浮两张静态 SVG（exportScale=1 防 Retina 错位），
-  经 ViewportPortal 与卡片共用唯一 viewport transform；48 元素固定槽位 + 签名复用 + 字体胶囊原子交接照旧；
-  导出失败无限退避自愈（40ms→2s 封顶）+ 页面可见即重试，旧帧全程可见——帧永远不是写权限的前提
+- **绘图双平面**: customData.below 分沉/浮两平面（沉层负 z 垫在卡片下当背景、浮层盖顶），
+  存储仍一份 canvas.drawing；沉浮切换=一次 mutate，选择环/命中/小地图全部读同一份文档
 - **绘图删除不藏在模式里**: 普通模式点击描边带=选中（Delete 删，Esc 返回），右键=选中/沉浮/删除（过确认，
   可 undo）；空心形状中空区穿透给卡片，选绘图武装后封闭形状内部为热区；命中检测纯函数可证伪
 - **交接三件套融合**: 会话卡右键与详情面板一键拉起 Claude 终端，注入自包含 bridge-rescue 提示词

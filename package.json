@@ -10,7 +10,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "node scripts/prepare-assets.mjs && vite build && node scripts/verify-subset-worker-build.mjs",
+    "build": "vite build",
     "acceptance:canvas": "node scripts/serve-canvas-acceptance.mjs --fixture=canvas",
     "acceptance:prod": "node scripts/serve-canvas-acceptance.mjs --fixture=prod",
     "test": "node --test --test-concurrency=1 tests/*.test.mjs",
@@ -20,7 +20,6 @@
     "start": "npm run build && npm run serve"
   },
   "dependencies": {
-    "@excalidraw/excalidraw": "0.18.1",
     "@xyflow/react": "^12.3.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
@@ -28,10 +27,5 @@
   "devDependencies": {
     "@vitejs/plugin-react": "^6.0.3",
     "vite": "^8.1.4"
-  },
-  "overrides": {
-    "nanoid@3.3.3": "3.3.8",
-    "nanoid@4.0.2": "5.1.6",
-    "lodash-es@<=4.17.23": "4.18.1"
   }
 }

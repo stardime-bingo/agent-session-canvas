@@ -11,9 +11,6 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import react from '@vitejs/plugin-react';
 import { build } from 'vite';
-import {
-  EXCALIDRAW_SUBSET_WORKER_GROUPS, excalidrawLocalFonts,
-} from './excalidraw-local-fonts.mjs';
 
 const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const FIXTURES = Object.freeze({
@@ -21,7 +18,6 @@ const FIXTURES = Object.freeze({
   canvas: path.join(repo, 'tests/fixtures/canvas-acceptance'),
   prod: path.join(repo, 'web'),
 });
-const PROD_BOOTSTRAP = "window.EXCALIDRAW_ASSET_PATH = '/';";
 const FORBIDDEN_SEGMENTS = new Set(['api', 'data', '@fs', '.git']);
 const DOCUMENT_CSP = [
   "default-src 'none'",
@@ -46,15 +42,12 @@ const SUBSET_WORKER_CSP = [
 ].join('; ');
 
 export function productionDocumentCsp(index) {
-  const inlineScripts = [...index.matchAll(/<script\b(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/gi)]
-    .map(match => match[1]);
-  if (inlineScripts.length !== 1 || inlineScripts[0] !== PROD_BOOTSTRAP) {
-    throw new Error(`production index inline bootstrap drift: expected exactly ${JSON.stringify(PROD_BOOTSTRAP)}`);
+  if (/<script\b(?![^>]*\bsrc=)/i.test(index)) {
+    throw new Error('production index must not carry inline scripts');
   }
-  const hash = crypto.createHash('sha256').update(inlineScripts[0], 'utf8').digest('base64');
   return [
     "default-src 'none'",
-    `script-src 'self' 'sha256-${hash}' 'wasm-unsafe-eval'`,
+    "script-src 'self'",
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data: blob:",
     "font-src 'self' data:",
@@ -145,35 +138,16 @@ async function main() {
       root,
       configFile: false,
       publicDir: false,
-      plugins: [excalidrawLocalFonts(), react()],
+      plugins: [react()],
       clearScreen: false,
       logLevel: 'warn',
-      build: {
-        outDir,
-        emptyOutDir: true,
-        rolldownOptions: {
-          output: {
-            codeSplitting: { groups: EXCALIDRAW_SUBSET_WORKER_GROUPS },
-          },
-        },
-      },
+      build: { outDir, emptyOutDir: true },
     });
     await buildStatic(fixture, dist);
     if (fixtureName === 'prod') {
       await buildStatic(FIXTURES.canvas, interactionDist);
-      const prod = findSubsetWorkerEntries(dist);
-      const interaction = findSubsetWorkerEntries(interactionDist);
-      if (prod.size !== 1 || interaction.size !== 1) {
-        throw new Error(`expected one real subset worker per prod build, found prod=${prod.size} interaction=${interaction.size}`);
-      }
-      buildWorkerEntries = { prod: [...prod], interaction: [...interaction] };
       mergeStaticAssets(path.join(interactionDist, 'assets'), path.join(dist, 'assets'));
     }
-    const fonts = path.join(repo, 'web/public/fonts');
-    if (!fs.existsSync(fonts)) {
-      throw new Error('missing prepared Excalidraw fonts; run npm run build first');
-    }
-    fs.cpSync(fonts, path.join(dist, 'fonts'), { recursive: true });
 
     const index = fs.readFileSync(path.join(dist, 'index.html'), 'utf8');
     const interactionIndex = fixtureName === 'prod'
@@ -190,9 +164,6 @@ async function main() {
     }
     const prodCsp = fixtureName === 'prod' ? productionDocumentCsp(index) : null;
     const subsetWorkerEntries = findSubsetWorkerEntries(dist);
-    if (fixtureName === 'canvas' && subsetWorkerEntries.size !== 1) {
-      throw new Error(`expected one real canvas subset worker entry, found ${subsetWorkerEntries.size}`);
-    }
     const mime = {
       '.html': 'text/html; charset=utf-8',
       '.js': 'text/javascript; charset=utf-8',

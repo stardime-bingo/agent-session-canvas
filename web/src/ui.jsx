@@ -35,6 +35,7 @@ const PATHS = {
   up:      <path d="M6 15l6-6 6 6"/>,
   link:    <><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></>,
   terminal:<><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3"/><path d="M13 15h4"/></>,
+  circle:  <circle cx="12" cy="12" r="9"/>,
   mouse:   <><rect x="6" y="3" width="12" height="18" rx="6"/><path d="M12 7v3"/></>,
   trackpad:<><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 14h18"/><path d="M12 14v5"/></>,
   wheelAuto:<><circle cx="12" cy="12" r="8" strokeDasharray="4 3.2"/><circle cx="12" cy="12" r="2"/></>,

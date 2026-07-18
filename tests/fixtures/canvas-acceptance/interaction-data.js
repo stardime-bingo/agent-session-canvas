@@ -1,8 +1,8 @@
 /**
- * [INPUT]: 依赖真实 FlowCanvas/scene-store/UIHost 与 4518 synthetic 数据；真实 exportToSvg，无故障注入
- * [OUTPUT]: 无 fetch 全内存交互画布 + SceneStore 新合同七链自动验收：冷帧/连发不拒/选中洞/退出还原/
- *           新建编辑器挂载/全局撤销/后台冲刷；window.__CANVAS_ACCEPTANCE__ 输出报告
- * [POS]: 仅由 ?mode=interaction 动态加载；证伪"交互路径零等待、帧只是订阅者"的宪法
+ * [INPUT]: 依赖真实 FlowCanvas/scene-store/UIHost 与 4518 synthetic 数据；自研墨迹直渲，无故障注入
+ * [OUTPUT]: 无 fetch 全内存交互画布 + 原生墨迹七链自动验收：冷渲/连发即时/工具武装/选择环/
+ *           删除撤销/全局撤销/后台冲刷；window.__CANVAS_ACCEPTANCE__ 输出报告
+ * [POS]: 仅由 ?mode=interaction 动态加载；证伪"文档变更到像素可见=一次 React commit"的宪法
  * [PROTOCOL]: 变更时更新此头部，然后检查 main.jsx/README/web/CLAUDE.md
  */
 import React, { useCallback, useMemo, useRef, useState, useSyncExternalStore } from 'react';
@@ -112,65 +112,51 @@ function InteractionCanvas() {
     const checks = {};
     const details = {};
     const probe = () => frameTestProbeRef.current;
+    const dom = () => shellRef.current?.querySelectorAll('.ink-world [data-ink-element-id]').length ?? 0;   // 排除 MiniMapInk 缩略副本
+    const landmarkX = () => store.get().drawing.find(el => el.id === 'fixture-landmark')?.x;
     try {
-      // 1) 冷帧：世界帧追上文档 seq，墨迹平面进 DOM
-      await waitFor(() => {
-        const s = probe()?.snapshot();
-        return s && s.renderedRevision !== null && s.renderedRevision >= s.docSeq;
-      }, 'cold frame');
-      checks.coldFrame = !!shellRef.current?.querySelector('.ink-world-plane');
+      // 1) 冷渲：文档元素直渲进 DOM，数量一致
+      await waitFor(() => dom() === 2, 'cold render');
+      checks.coldRender = true;
 
-      // 2) 连发不拒：帧在飞时立刻发第二笔，两笔全部落文档，帧最终追平——没有任何门
+      // 2) 连发即时：两笔平移背靠背，文档同步推进、DOM 同 commit 跟上——没有任何门
       const before = store.get().seq;
       probe().mutateDrawing(els => translateDrawingElements(els, ['fixture-landmark'], 10, 0));
       probe().mutateDrawing(els => translateDrawingElements(els, ['fixture-landmark'], 10, 0));
-      const afterTwo = store.get().seq;
-      const applied = store.get().drawing.find(el => el.id === 'fixture-landmark').x === 1080;
-      await waitFor(() => probe().snapshot().renderedRevision >= afterTwo, 'frame catch-up');
-      checks.rapidMutations = afterTwo === before + 2 && applied;
-      details.rapidMutations = { before, afterTwo, applied };
+      checks.rapidMutations = store.get().seq === before + 2 && landmarkX() === 1080;
+      await waitFor(() => shellRef.current?.querySelector('.ink-world [data-ink-element-id="fixture-landmark"] rect')?.getAttribute('x') === '1080', 'dom sync');
+      checks.domSync = true;
 
-      // 3) 选中开编辑：目标闭包挖洞，世界帧不再含 landmark，编辑器显形
-      const opened = await probe().openDrawing('selection', 'fixture-landmark');
-      await waitFor(() => probe().snapshot().drawVisible, 'editor visible');
-      const holeState = probe().snapshot();
-      checks.openSelection = opened === true
-        && holeState.excludedIds.includes('fixture-landmark')
-        && !holeState.renderedElementIds.includes('fixture-landmark')
-        && holeState.renderedElementIds.includes('fixture-witness');
-      details.openSelection = holeState;
+      // 3) 工具武装：freedraw 上捕获层，收工具即撤
+      probe().setTool('freedraw');
+      await waitFor(() => shellRef.current?.querySelector('.ink-input-layer'), 'input layer');
+      checks.toolArm = true;
+      probe().setTool('none');
+      await waitFor(() => !shellRef.current?.querySelector('.ink-input-layer'), 'input layer gone');
 
-      // 4) 退出：洞补回，世界重含 landmark，会话归 idle
-      const closed = await probe().exitDrawing();
-      await waitFor(() => {
-        const s = probe().snapshot();
-        return !s.penActive && s.renderedElementIds.includes('fixture-landmark');
-      }, 'exit restore');
-      checks.exitRestores = closed === true && probe().snapshot().sessionPhase === 'idle';
+      // 4) 选择环：select + 选中即画环
+      probe().setTool('select');
+      probe().setSelectedId('fixture-landmark');
+      await waitFor(() => shellRef.current?.querySelector('.ink-world rect[stroke-dasharray]'), 'selection ring');
+      checks.selectRing = true;
+      probe().setTool('none');
 
-      // 5) 新建：空事务挂载真实 Excalidraw，快速进出走无洞快路径
-      await probe().openDrawing('freedraw');
-      await waitFor(() => shellRef.current?.querySelector('.excalidraw'), 'excalidraw mount');
-      checks.editorMounts = !!shellRef.current.querySelector('.excalidraw');
-      const exitStarted = performance.now();
-      await probe().exitDrawing();
-      checks.emptyExitFast = performance.now() - exitStarted < 500 && !probe().snapshot().penActive;
+      // 5) 删除+撤销：墓碑即刻消隐，undo 即刻复活
+      probe().mutateDrawing(els => els.map(el => el.id === 'fixture-witness' ? { ...el, isDeleted: true } : el));
+      await waitFor(() => dom() === 1, 'delete hides');
+      store.undo();
+      await waitFor(() => dom() === 2, 'undo revives');
+      checks.deleteUndo = true;
 
-      // 6) 全局撤销：两步平移一键回一步，帧照常追平
+      // 6) 全局撤销：平移一键回一步
       const seqBeforeUndo = store.get().seq;
-      const xBefore = store.get().drawing.find(el => el.id === 'fixture-landmark')?.x;
-      const canUndo = store.canUndo();
-      const didUndo = store.undo();
-      const xAfter = store.get().drawing.find(el => el.id === 'fixture-landmark')?.x;
-      details.undo = { seqBeforeUndo, canUndo, didUndo, xBefore, xAfter };
-      const undone = xAfter === 1070;
-      await waitFor(() => probe().snapshot().renderedRevision >= seqBeforeUndo + 1, 'undo frame');
-      checks.globalUndo = undone;
+      store.undo();
+      checks.globalUndo = landmarkX() === 1070;
+      details.undo = { seqBeforeUndo, xAfter: landmarkX() };
 
       // 7) 后台冲刷：防抖后 persist 收到最终文档，交互全程未等它
       await waitFor(() => flushedRef.current.length > 0, 'background flush', 5000);
-      const lastFlush = flushedRef.current.at(-1);
-      checks.backgroundFlush = lastFlush.canvas.drawing.some(el => el.id === 'fixture-landmark');
+      checks.backgroundFlush = flushedRef.current.at(-1).canvas.drawing.some(el => el.id === 'fixture-landmark');
       details.flushCount = flushedRef.current.length;
 
       const pass = Object.values(checks).every(Boolean);
@@ -226,7 +212,7 @@ function InteractionCanvas() {
         'data-run-suite': 'true',
         onClick: () => { setSuite({ status: 'running', checks: null, details: null }); void runSuite(); },
         style: { marginBottom: 6 },
-      }, '运行新合同验收'),
+      }, '运行原生墨迹验收'),
       h('div', { 'data-suite-status': suite.status }, `status: ${suite.status}`),
       suite.checks && h('pre', null, JSON.stringify(suite.checks, null, 2)),
     ),

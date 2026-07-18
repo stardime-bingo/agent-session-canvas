@@ -701,3 +701,31 @@ div.draw-layer .excalidraw {
 .canvas-root.arranging .ink-carry-anchor {
   transition: transform 420ms cubic-bezier(0.22, 1, 0.36, 1);
 }
+
+/* ===== 自研墨迹层：沉层负 z 垫在卡片之下、浮层高 z 盖顶——与旧平面同一层序合同 ===== */
+.ink-svg { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
+.ink-svg-below { z-index: -1; }
+.ink-svg-above { z-index: 1000; }
+.ink-input-layer {
+  position: absolute; inset: 0; z-index: 6;
+  cursor: crosshair; touch-action: none;
+}
+.ink-input-layer.ink-tool-select { cursor: default; }
+.ink-text-editor {
+  position: absolute; z-index: 7; min-width: 30px;
+  background: transparent; border: 1.5px dashed #155eef; border-radius: 4px;
+  outline: none; resize: none; overflow: hidden;
+  font-family: var(--sans); white-space: pre; padding: 0;
+}
+.ink-style-island { display: flex; gap: 10px; align-items: center; padding: 8px 12px; }
+.ink-style-island .swatch {
+  width: 16px; height: 16px; border-radius: 50%; cursor: pointer;
+  border: 2px solid transparent; box-sizing: border-box;
+}
+.ink-style-island .swatch.on { border-color: #155eef; box-shadow: 0 0 0 2px #dbeafe; }
+.ink-style-island .wbtn {
+  min-width: 26px; height: 22px; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--line); background: #fff; display: inline-flex;
+  align-items: center; justify-content: center;
+}
+.ink-style-island .wbtn.on { border-color: #155eef; background: #eff4ff; }
