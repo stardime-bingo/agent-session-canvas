@@ -29,6 +29,18 @@ test('mutate 同步可见、seq 单调、监听即时触发', () => {
   assert.ok(notified >= 1);
 });
 
+test('同步状态快照引用稳定，dirty 纯状态变化也会通知 React 订阅者', () => {
+  const { store } = makeStore();
+  const saved = store.status();
+  assert.equal(store.status(), saved);
+  const seen = [];
+  store.subscribe(() => seen.push(store.status().status));
+  store.mutate(doc => ({ ...doc, notes: [{ id: 'sync' }] }));
+  assert.equal(store.status().status, 'dirty');
+  assert.notEqual(store.status(), saved);
+  assert.ok(seen.includes('dirty'));
+});
+
 test('coalesce 同键连续 mutate 合并为一步 undo；endCoalescing 开新步', () => {
   const { store } = makeStore();
   store.mutate(doc => ({ ...doc, notes: [{ id: 'n1', text: 'a' }] }), { coalesce: 'type:n1' });

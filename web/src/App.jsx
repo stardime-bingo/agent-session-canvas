@@ -18,6 +18,7 @@ import ContextFrame from './panels/ContextFrame.jsx';
 import { UIHost, toast, Icon } from './ui.jsx';
 
 const RANGE_MS = { '7d': 7 * 864e5, '30d': 30 * 864e5, all: Infinity };
+const SAVED_SYNC = Object.freeze({ status: 'saved', error: null });
 const DEFAULT_FILTERS = () => ({
   q: '', range: '30d',                                // 铁律：历史不管，默认只看近 30 天
   tools: new Set(['claude', 'codex']),
@@ -235,7 +236,10 @@ export default function App() {
     useCallback(cb => store ? store.subscribe(cb) : () => {}, [store]),
     useCallback(() => store ? store.get() : null, [store]),
   );
-  const syncInfo = doc && store ? store.status() : { status: 'saved' };
+  const syncInfo = useSyncExternalStore(
+    useCallback(cb => store ? store.subscribe(cb) : () => {}, [store]),
+    useCallback(() => store ? store.status() : SAVED_SYNC, [store]),
+  );
 
   // ---- 回调身份稳定化：这些直接进 FlowCanvas 的 allNodes 依赖，身份抖一次=全画布节点重建一次 ----
   const onMoveNode = useCallback(entries => storeRef.current.mutate(doc => {

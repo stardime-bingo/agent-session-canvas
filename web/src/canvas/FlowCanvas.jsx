@@ -588,14 +588,26 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
 
   // ---- 整理：before/after 同步规划，一次 mutate；.arranging 窗口内节点滑入新位 ----
   const arrangeAnimTimer = useRef(null);
-  useEffect(() => () => clearTimeout(arrangeAnimTimer.current), []);
+  const arrangeFrame = useRef(0);
+  useEffect(() => () => {
+    clearTimeout(arrangeAnimTimer.current);
+    cancelAnimationFrame(arrangeFrame.current);
+    batchBridgeRef.current?.clear();
+  }, []);
   const applyArrange = useCallback(targetLayout => {
     const before = instRef.current?.getNodes() || built.nodes;
     const after = buildGraph(workspaces, sessionsByKey, targetLayout, canvas.boards, edges, expanded, searching);
     const moves = planBatchCarry(before, after.nodes, aliveDrawing());
     rootRef.current?.classList.add('arranging');
+    batchBridgeRef.current ||= createBatchCarryBridge(rootRef.current);
+    batchBridgeRef.current.present(moves);
+    cancelAnimationFrame(arrangeFrame.current);
     clearTimeout(arrangeAnimTimer.current);
-    arrangeAnimTimer.current = setTimeout(() => rootRef.current?.classList.remove('arranging'), 520);
+    arrangeFrame.current = requestAnimationFrame(() => batchBridgeRef.current?.release());
+    arrangeAnimTimer.current = setTimeout(() => {
+      batchBridgeRef.current?.clear();
+      rootRef.current?.classList.remove('arranging');
+    }, 520);
     store.mutate(doc => ({
       ...doc,
       layout: targetLayout,

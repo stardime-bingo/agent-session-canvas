@@ -33,7 +33,7 @@ src/App.jsx: 总装线——graph 地形状态 + SceneStore 创建/采纳（SSE 
   过滤管道(工具/状态/时间/搜索) + 对象动作分发（便签/画板/边/落空连线全部同步 mutate，便签打字 coalesce）+
   整理（tidy 规划交 FlowCanvas.applyArrange 一次 mutate，撤销走全局 undo）+ 全局快捷键（含 Cmd+Z/Shift+Cmd+Z）+
   画布终端框(ContextFrame)开合 + pagehide 冲刷兜底 + 空态指路牌
-src/scene-store.js: 场景真相源——createSceneStore：同步 mutate/订阅/undo/redo(coalesce, 容量100)、
+src/scene-store.js: 场景真相源——createSceneStore：同步 mutate/订阅/undo/redo(coalesce, 容量100)、稳定 sync status 快照、
   防抖 300ms 后台冲刷（files delta 先行、失败 1s→15s 无限退避、在飞期追加自动追赶）、adoptRemote LWW、flushNow
 src/api.js: 数据访问唯一通道——graph/session/contextPage/AI/launch + putScene 场景快照/putDrawingFiles 资产 + WRITER_ID + subscribeEvents
 src/util.js: 展示工具箱——relTime/shortPath/fmtSize/classifyDigestLine + handoffSkillPrompt(交接三件套自包含提示词) + TOOL_META/STATUS_META
@@ -54,7 +54,7 @@ src/canvas/InkTools.jsx: 墨迹交互层 useInkTools——拖画/文字击键 co
 src/canvas/drawing.js: 墨迹纯几何——命中检测双模(描边带/热区/旋转逆变换/折线段/后画者优先)/精确包围盒/平移删除沉浮不可变变换/大实心底板判定/功能件排除清单，node:test 证伪
 src/canvas/MiniMapInk.jsx: 小地图墨迹层——镜像 minimap svg viewBox，区域底板/批注投进缩略图，纯展示穿透
 src/canvas/container-carry.js: 承载纯规划与 DOM 桥——planBatchCarry(before/after 容器差+锚定)、
-  createInkDragBridge(根变量拖动桥)/createBatchCarryBridge(整理逐锚桥)、SVG 锚标 marker 安装
+  createInkDragBridge(根变量拖动桥)/createBatchCarryBridge(整理逆向 FLIP 桥)、SVG 锚标 marker 安装
 src/canvas/connections.js: 落空连线与连接点命中区纯内核，尺寸可由 node:test 证伪
 src/canvas/gestures.js: 导航手势纯内核——wheel/缩放键/Safari gesture 路由、设备判定(150ms 连续性)、
   锚定缩放/平移数学、幂等 pointer 监听资源、WHEEL_MODES 三态文案
@@ -69,7 +69,7 @@ src/canvas/SessionNode.jsx: 会话卡片(memo)，工具色脊柱 + 人话标题 
 src/panels/ContextFrame.jsx: 画布终端窗——拉线落空/右键就地弹出：白岛壳+深色终端体（Tokyo Night）、
   标题栏可拖、打开停最新、上滑倒序翻页(/api/context-page)至"── 会话开始 ──"、滚动无跳补偿、
   content-visibility 原生虚拟化(万行 60fps)、回到最新浮钮、一键续开/详情/复制
-src/panels/TopBar.jsx: 右上动作岛：有新活动举旗/整理/批量命名(进度轮询)/重扫/同步状态点
+src/panels/TopBar.jsx: 右上动作岛：saved/dirty/saving/error 静默同步点/有新活动举旗/整理/批量命名(进度轮询)/重扫
 src/panels/Sidebar.jsx: 左侧导航岛，宽度可拖、可收回，单击定位、双击改名
 src/panels/DetailPanel.jsx: 右侧详情岛——标题(就地改名)→一键续开→CONTEXT 摘要+digest→STOP 停止点→
   HANDOFF 接力(内置轻档生成 + 交接三件套 skill 终端出口)→RUNS 实例→DETAIL 元信息→删除收底

@@ -64,7 +64,7 @@ npm run scan         # 仅扫描，输出统计
   大实心底板收笔自动沉层 + toast 撤销；选择几何集中在 ink-selection.js 纯内核，元素结构沿用旧格式兼容子集，磁盘零迁移
 - **容器承载律 (FigJam/Miro 共识)**: 墨迹中心落在街区/画板内就跟容器走——拖动乐观进行（DOM 桥 CSS 变量跟随），
   松手一次 mutate（容器新位 + 锚定墨迹平移），含平移的世界帧进 DOM 才撤桥，肉眼无缝；
-  整理 applyArrange 同理：before/after 同步规划 + 一次 mutate + 桥补帧差；撤销走全局 Cmd/Ctrl+Z
+  整理 applyArrange 同理：before/after 同步规划 + 一次 mutate，逆向 FLIP 桥把新 DOM 钉回旧像素后与节点同曲线 release；撤销走全局 Cmd/Ctrl+Z
 - **绘图双平面**: customData.below 分沉/浮两平面（沉层负 z 垫在卡片下当背景、浮层盖顶），
   存储仍一份 canvas.drawing；沉浮切换=一次 mutate，选择环/命中/小地图全部读同一份文档
 - **绘图删除不藏在模式里**: 普通模式点击描边带=选中（Delete 删，Esc 返回），右键=选中/沉浮/删除（过确认，

@@ -1,7 +1,7 @@
 /**
  * [INPUT]: 依赖 shared/canvas-carry.mjs 的 computeAnchorIds 锚定纯函数
  * [OUTPUT]: 对外提供 planBatchCarry 整理承载规划、markerExportElements/installExportMarkers SVG 锚标、
- *           createInkDragBridge 拖动期墨迹跟随桥、createBatchCarryBridge 整理多 delta 桥
+ *           createInkDragBridge 拖动期墨迹跟随桥、createBatchCarryBridge 整理逆向 FLIP 桥
  * [POS]: canvas 的容器承载纯规划与唯一 DOM 桥。落盘由 scene-store 负责——这里只管"墨迹在帧追上前跟着容器走"
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -85,7 +85,8 @@ export function createInkDragBridge(root) {
 // 整理桥：每个 move 的锚点各自带 delta（per-node CSS 变量），一次 present、帧追上后 clear
 export function createBatchCarryBridge(root) {
   let marked = [];
-  const select = id => root?.querySelectorAll?.(`[data-ink-element-id="${CSS.escape(id)}"]`) || [];
+  const escape = value => globalThis.CSS?.escape?.(value) || String(value).replace(/["\\]/g, '\\$&');
+  const select = id => root?.querySelectorAll?.(`[data-ink-element-id="${escape(id)}"]`) || [];
   const clear = () => {
     for (const node of marked) {
       node.classList.remove('ink-carry-anchor');
@@ -105,14 +106,21 @@ export function createBatchCarryBridge(root) {
         for (const id of move.anchorIds) {
           for (const node of select(id)) {
             node.classList.add('ink-carry-anchor');
-            node.style.setProperty('--carry-x', `${dx}px`);
-            node.style.setProperty('--carry-y', `${dy}px`);
+            // store 先落终点；逆向 delta 把新 DOM 暂时钉回旧像素，下一帧 release 才呼吸到终点。
+            node.style.setProperty('--carry-x', `${-dx}px`);
+            node.style.setProperty('--carry-y', `${-dy}px`);
             marked.push(node);
           }
         }
       }
       root?.classList.toggle('ink-carry-active', !!marked.length);
       return marked.length;
+    },
+    release() {
+      for (const node of marked) {
+        node.style.removeProperty('--carry-x');
+        node.style.removeProperty('--carry-y');
+      }
     },
     clear,
     count: () => marked.length,

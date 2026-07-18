@@ -702,6 +702,16 @@ div.draw-layer .excalidraw {
   transition: transform 420ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
+.sync-state {
+  min-width: 18px; height: 28px; padding: 0 5px; display: inline-flex; align-items: center; gap: 5px;
+  color: var(--ink-faint); font: 600 10px/1 var(--sans); white-space: nowrap;
+}
+.sync-dot { width: 7px; height: 7px; border-radius: 50%; background: #12b76a; box-shadow: 0 0 0 3px #ecfdf3; }
+.sync-state.dirty .sync-dot { background: #f79009; box-shadow: 0 0 0 3px #fffaeb; }
+.sync-state.saving .sync-dot { background: #155eef; box-shadow: 0 0 0 3px #eff4ff; animation: pulse 1.4s infinite; }
+.sync-state.error { color: #b42318; }
+.sync-state.error .sync-dot { background: #d92d20; box-shadow: 0 0 0 3px #fef3f2; }
+
 /* ===== 自研墨迹层：沉层负 z 垫在卡片之下、浮层高 z 盖顶——与旧平面同一层序合同 ===== */
 .ink-svg { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
 .ink-svg-below { z-index: -1; }

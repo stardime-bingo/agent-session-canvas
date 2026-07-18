@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildGraph, CARD_GAP, COL_W, GAP_IN, GUTTER, HEADER_H, PAD, packWorkspaces, resizedContainerChildren, resolveContainerOverlaps, tidyLayoutEntries } from '../web/src/canvas/layout.js';
-import { planBatchCarry } from '../web/src/canvas/container-carry.js';
+import { createBatchCarryBridge, planBatchCarry } from '../web/src/canvas/container-carry.js';
 
 const ws = (path, count = 1) => ({ path, visibleKeys: Array.from({ length: count }, (_, i) => `${path}:${i}`) });
 const heightOf = item => HEADER_H + item.visibleKeys.length * (62 + CARD_GAP) + 8;
@@ -125,4 +125,32 @@ test('production buildGraph planning includes a board displaced only by collisio
     to: { ...boardAfter.position },
     anchorIds: ['board-ink'],
   });
+});
+
+test('整理桥先以逆向 delta 钉回旧像素，release 后只撤位移不提前撤动画类', () => {
+  const properties = new Map();
+  const classes = new Set();
+  const node = {
+    classList: { add: value => classes.add(value), remove: value => classes.delete(value) },
+    style: {
+      setProperty: (key, value) => properties.set(key, value),
+      removeProperty: key => properties.delete(key),
+    },
+  };
+  const rootClasses = new Set();
+  const root = {
+    querySelectorAll: selector => selector.includes('ink-a') ? [node] : [],
+    classList: { toggle: (value, on) => on ? rootClasses.add(value) : rootClasses.delete(value), remove: value => rootClasses.delete(value) },
+  };
+  const bridge = createBatchCarryBridge(root);
+  assert.equal(bridge.present([{ from: { x: 10, y: 20 }, to: { x: 70, y: 5 }, anchorIds: ['ink-a'] }]), 1);
+  assert.equal(properties.get('--carry-x'), '-60px');
+  assert.equal(properties.get('--carry-y'), '15px');
+  assert.ok(classes.has('ink-carry-anchor'));
+  bridge.release();
+  assert.equal(properties.size, 0);
+  assert.ok(classes.has('ink-carry-anchor'));
+  bridge.clear();
+  assert.equal(classes.size, 0);
+  assert.equal(rootClasses.size, 0);
 });

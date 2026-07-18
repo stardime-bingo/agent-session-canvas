@@ -24,6 +24,7 @@ export function createSceneStore(initial, { persistScene, persistFiles } = {}) {
   let lastFlushed = doc;          // 最近一次成功落盘的文档（files delta 基线）
   let syncStatus = 'saved';       // saved | dirty | saving | error
   let lastError = null;
+  let statusSnapshot = Object.freeze({ status: syncStatus, error: lastError });
   let serverRev = 0;              // 已知服务端代际：采纳只许单调前进，旧图回灌一律拒绝
   const listeners = new Set();
   const undoStack = [];
@@ -36,8 +37,9 @@ export function createSceneStore(initial, { persistScene, persistFiles } = {}) {
 
   const notify = () => listeners.forEach(listener => listener());
   const setStatus = status => {
-    if (syncStatus === status) return;
+    if (syncStatus === status && statusSnapshot.error === lastError) return;
     syncStatus = status;
+    statusSnapshot = Object.freeze({ status, error: lastError });
     notify();
   };
 
@@ -88,7 +90,7 @@ export function createSceneStore(initial, { persistScene, persistFiles } = {}) {
   return {
     get: () => doc,
     subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
-    status: () => ({ status: syncStatus, error: lastError }),
+    status: () => statusSnapshot,
 
     // 全系统唯一写入口：同步执行、同步可见。history:false 用于不值得单独撤销的纯回写。
     mutate(fn, { history = true, coalesce = null } = {}) {
