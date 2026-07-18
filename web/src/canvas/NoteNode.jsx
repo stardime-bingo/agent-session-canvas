@@ -19,21 +19,17 @@ const COLORS = {
 export default memo(function NoteNode({ data, selected }) {
   const { note, onSetNote, onDelNote } = data;
   const [text, setText] = useState(note.text);
-  const timer = useRef(null);
   const c = COLORS[note.color] || COLORS.yellow;
   // 新生便签（5 秒内诞生且还没写字）落地即入编辑态——贴上就能写，不用再点一下
   const isNewborn = useRef(!note.text && Date.now() - (+note.id.split(':')[1] || 0) < 5000).current;
 
   useEffect(() => setText(note.text), [note.id]);   // 换便签时同步，输入中不回灌
 
-  // 卸载即灭火：防止删除后残留的防抖计时器把便签从坟里刨回来
-  useEffect(() => () => clearTimeout(timer.current), []);
-
-  // ---- 输入防抖落盘：停笔 600ms 只补丁 text 字段 ----
+  // ---- 连续合并：每一击键同步进场景真相（store 按 coalesce 合为一步 undo、磁盘后台冲刷）——
+  //      与绘图同一条河。没有防抖窗，就没有"没落盘的字"这回事 ----
   const onInput = v => {
     setText(v);
-    clearTimeout(timer.current);
-    timer.current = setTimeout(() => onSetNote({ id: note.id, text: v }), 600);
+    onSetNote({ id: note.id, text: v });
   };
 
   return (

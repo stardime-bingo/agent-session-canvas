@@ -24,6 +24,7 @@ export function createSceneStore(initial, { persistScene, persistFiles } = {}) {
   let lastFlushed = doc;          // 最近一次成功落盘的文档（files delta 基线）
   let syncStatus = 'saved';       // saved | dirty | saving | error
   let lastError = null;
+  let serverRev = 0;              // 已知服务端代际：采纳只许单调前进，旧图回灌一律拒绝
   const listeners = new Set();
   const undoStack = [];
   const redoStack = [];
@@ -55,13 +56,14 @@ export function createSceneStore(initial, { persistScene, persistFiles } = {}) {
     try {
       const delta = sceneFilesDelta(lastFlushed.drawingFiles, snapshot.drawingFiles);
       if (Object.keys(delta).length) await persistFiles(delta);
-      await persistScene({
+      const receipt = await persistScene({
         layout: snapshot.layout,
         canvas: {
           edges: snapshot.edges, notes: snapshot.notes,
           boards: snapshot.boards, drawing: snapshot.drawing,
         },
       });
+      if (Number.isFinite(receipt?.rev)) serverRev = Math.max(serverRev, receipt.rev);
       lastFlushed = snapshot;
       retryAttempt = 0;
       lastError = null;
@@ -135,9 +137,14 @@ export function createSceneStore(initial, { persistScene, persistFiles } = {}) {
     // 结束一段连续手势（画笔一笔收尾/便签失焦）：下一次同键 mutate 开新的 undo 步
     endCoalescing() { coalesceKey = null; },
 
-    // 远端回声（别的标签页写了）：本地干净才采纳；本地有脏改动则本地胜（LWW，冲刷会覆盖）
-    adoptRemote(remote) {
+    // 远端回声（别的标签页写了）：本地干净才采纳；本地有脏改动则本地胜（LWW，冲刷会覆盖）；
+    // rev 单调门：与在飞冲刷赛跑的旧图读值不许倒灌覆盖新真相
+    adoptRemote(remote, incomingRev = null) {
       if (doc !== lastFlushed || flushing) return false;
+      if (Number.isFinite(incomingRev)) {
+        if (incomingRev < serverRev) return false;
+        serverRev = incomingRev;
+      }
       coalesceKey = null;
       doc = { ...emptySceneDoc(), ...remote, seq: doc.seq + 1 };
       lastFlushed = doc;

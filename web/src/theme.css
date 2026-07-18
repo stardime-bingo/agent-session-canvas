@@ -148,13 +148,6 @@ body {
   border: 2px dashed var(--accent-soft);
   animation: fade-in 0.18s var(--ease-panel);
 }
-/* 开编辑的 drain/水合窗口：同一个 ::after 临时升到 RF 与 DrawLayer 之上拦几何，仍低于 z:7 工具岛。 */
-.canvas-root.drawing-opening::after {
-  content: ''; position: absolute; inset: 0; z-index: 6; pointer-events: auto;
-  background: transparent; cursor: progress;
-  border: 2px solid var(--accent-soft);
-  animation: fade-in 80ms var(--ease-panel);
-}
 .canvas-root.over-drawing .react-flow__pane,
 .canvas-root.over-drawing .react-flow__node { cursor: pointer; }
 
@@ -700,4 +693,11 @@ div.draw-layer .excalidraw {
 /* 小地图墨迹层：与节点层同一 viewBox 投影，纯展示不抢交互 */
 .react-flow__minimap .mini-ink {
   position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none;
+}
+
+/* ===== 整理动效窗：整理落定的 520ms 内，节点与随行墨迹同曲线滑入新位（纯合成器）。
+   窗口关闭即撤过渡，拖动/绘图的逐帧 transform 不受任何影响 ===== */
+.canvas-root.arranging .react-flow__node,
+.canvas-root.arranging .ink-carry-anchor {
+  transition: transform 420ms cubic-bezier(0.22, 1, 0.36, 1);
 }

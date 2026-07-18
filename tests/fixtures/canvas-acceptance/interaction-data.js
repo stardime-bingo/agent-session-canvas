@@ -87,9 +87,20 @@ function InteractionCanvas() {
   const shellRef = useRef(null);
   const sessionsByKey = useMemo(() => ({ [SESSION_KEY]: SESSION }), []);
 
+  // 与 App.handleCanvas 同语义：便签补丁式合并（打字流 coalesce 一步 undo），不存在第二套写法
   const onCanvasAction = useCallback((kind, payload) => {
     if (kind === 'setNote') {
-      store.mutate(d => ({ ...d, notes: [...d.notes, { id: payload.id || `fixture-note-${d.notes.length + 1}`, x: 0, y: 0, text: '', color: 'yellow', ...payload }] }));
+      store.mutate(d => {
+        const i = d.notes.findIndex(n => n.id === payload.id);
+        if (i >= 0) {
+          const patch = {};
+          for (const k of ['x', 'y', 'text', 'color', 'w', 'h']) if (payload[k] !== undefined) patch[k] = payload[k];
+          const notes = [...d.notes];
+          notes[i] = { ...notes[i], ...patch };
+          return { ...d, notes };
+        }
+        return { ...d, notes: [...d.notes, { id: payload.id || `note:${Date.now()}`, x: 0, y: 0, text: '', color: 'yellow', ...payload }] };
+      }, payload.text !== undefined ? { coalesce: `note-text:${payload.id}` } : {});
     } else if (kind === 'delNote') {
       store.mutate(d => ({ ...d, notes: d.notes.filter(n => n.id !== payload) }));
     }

@@ -76,7 +76,7 @@ export default function App() {
         persistFiles: files => api.putDrawingFiles(files),
       });
     } else {
-      storeRef.current.adoptRemote(sceneDoc);   // 本地有脏改动时静默保留本地（LWW）
+      storeRef.current.adoptRemote(sceneDoc, g.rev);   // 本地脏改动本地胜；旧代际读值拒绝倒灌
     }
   }, []);
   const store = storeRef.current;
@@ -237,6 +237,22 @@ export default function App() {
   );
   const syncInfo = doc && store ? store.status() : { status: 'saved' };
 
+  // ---- 回调身份稳定化：这些直接进 FlowCanvas 的 allNodes 依赖，身份抖一次=全画布节点重建一次 ----
+  const onMoveNode = useCallback(entries => storeRef.current.mutate(doc => {
+    const layout = { ...doc.layout };
+    for (const e of entries) layout[e.path] = pickLayout(e, layout[e.path]);
+    return { ...doc, layout };
+  }), []);
+  const onRenameSession = useCallback((key, title) =>
+    api.rename(key, title).then(r => { toast(r.synced ? '已重命名并同步回工具本体' : '已重命名（本体热文件，稍后自动同步）'); reload(); })
+      .catch(e => toast(`改名失败：${e.message}`, 'error')), [reload]);
+  const onRenameWs = useCallback((path, name) =>
+    api.wsRename(path, name).then(reload).catch(e => toast(`改名失败：${e.message}`, 'error')), [reload]);
+  const onToggleExpand = useCallback(path => setExpandedWs(s => {
+    const n = new Set(s); n.has(path) ? n.delete(path) : n.add(path); return n;
+  }), []);
+  const onSelectKey = useCallback(k => { setSelectedKey(k); if (k) setRightOpen(true); }, []);
+
   // ============================================================
   //  过滤管道：会话级过滤（工具/状态/时间/搜索）→ 工作区聚合裁剪
   // ============================================================
@@ -296,24 +312,15 @@ export default function App() {
           canvas={doc}
           store={store}
           onCanvasAction={handleCanvas}
-          onRenameSession={(key, title) =>
-            api.rename(key, title).then(r => { toast(r.synced ? '已重命名并同步回工具本体' : '已重命名（本体热文件，稍后自动同步）'); reload(); })
-              .catch(e => toast(`改名失败：${e.message}`, 'error'))}
-          onRenameWs={(path, name) =>
-            api.wsRename(path, name).then(reload).catch(e => toast(`改名失败：${e.message}`, 'error'))}
+          onRenameSession={onRenameSession}
+          onRenameWs={onRenameWs}
           selectedKey={selectedKey}
           actionsRef={actionsRef}
           expanded={expandedWs}
           searching={!!deferredQ.trim()}
-          onToggleExpand={path => setExpandedWs(s => {
-            const n = new Set(s); n.has(path) ? n.delete(path) : n.add(path); return n;
-          })}
-          onMoveNode={entries => store.mutate(doc => {
-            const layout = { ...doc.layout };
-            for (const e of entries) layout[e.path] = pickLayout(e, layout[e.path]);
-            return { ...doc, layout };
-          })}
-          onSelect={k => { setSelectedKey(k); if (k) setRightOpen(true); }}
+          onToggleExpand={onToggleExpand}
+          onMoveNode={onMoveNode}
+          onSelect={onSelectKey}
           onChanged={reload}
           onArrange={arrange}
           focusRef={focusRef}
@@ -350,7 +357,7 @@ export default function App() {
             workspaces={view.workspaces}
             onFocus={p => focusRef.current(p)}
             onCollapse={() => setLeftOpen(false)}
-            onRenameWs={(p, name) => api.wsRename(p, name).then(reload).catch(e => toast(`改名失败：${e.message}`, 'error'))}
+            onRenameWs={onRenameWs}
           />
           <div className="resize-strip" onPointerDown={e => startResize('left', e)} title="拖动调宽"
             style={{ position: 'absolute', right: 0, top: 0, bottom: 0 }} />

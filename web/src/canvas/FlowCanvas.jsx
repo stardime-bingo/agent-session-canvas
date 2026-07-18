@@ -340,11 +340,19 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   ], [built, canvas.notes, onCanvasAction, onRenameSession, onRenameWs, onToggleExpand, renaming, onMoveNode]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(allNodes);
-  // 图数据重建必须在浏览器绘制前接管，且保留 RF 原生选中态——useEffect 会闪一帧旧图
+  // 渲染主权分层：图数据重建在绘制前接管，但拖动中的节点几何主权归 React Flow——
+  // 重建只带来新数据，绝不夺走进行中手势的位置（否则任何一次重渲染都会把拖动掐死弹回）
   useLayoutEffect(() => {
     setNodes(current => {
-      const selected = new Set(current.filter(n => n.selected).map(n => n.id));
-      return allNodes.map(n => selected.has(n.id) ? { ...n, selected: true } : n);
+      const live = new Map(current.map(n => [n.id, n]));
+      return allNodes.map(n => {
+        const cur = live.get(n.id);
+        if (!cur) return n;
+        const next = cur.selected ? { ...n, selected: true } : n;
+        return cur.dragging
+          ? { ...next, position: cur.position, dragging: true }
+          : next;
+      });
     });
   }, [allNodes, setNodes]);
 
@@ -656,7 +664,10 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     return () => window.removeEventListener('keydown', onKeyDown, true);
   }, [setNodes]);
 
-  // ---- 整理：before/after 同步规划，一次 mutate（layout+drawing），桥补帧差 ----
+  // ---- 整理：before/after 同步规划，一次 mutate（layout+drawing），桥补帧差；
+  //      顶级体验=看得见的整理：节点与随行墨迹同曲线滑入新位（.arranging 窗口开合成器过渡）----
+  const arrangeAnimTimer = useRef(null);
+  useEffect(() => () => clearTimeout(arrangeAnimTimer.current), []);
   const applyArrange = useCallback(targetLayout => {
     const before = instRef.current?.getNodes() || built.nodes;
     const after = buildGraph(workspaces, sessionsByKey, targetLayout, canvas.boards, edges, expanded, searching);
@@ -665,6 +676,9 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       batchBridgeRef.current ||= createBatchCarryBridge(rootRef.current);
       batchBridgeRef.current.present(moves);
     }
+    rootRef.current?.classList.add('arranging');
+    clearTimeout(arrangeAnimTimer.current);
+    arrangeAnimTimer.current = setTimeout(() => rootRef.current?.classList.remove('arranging'), 520);
     store.mutate(doc => ({
       ...doc,
       layout: targetLayout,
@@ -832,6 +846,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       connectOnClick={false}
       connectionMode={ConnectionMode.Loose}
       connectionRadius={44}
+      nodeDragThreshold={5}
       onBeforeDelete={onBeforeDelete}
       onNodesDelete={onNodesDelete}
       onEdgesDelete={onEdgesDelete}
