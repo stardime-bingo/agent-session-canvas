@@ -120,7 +120,7 @@ body {
 
 /* ============================================================
  *  岛屿律：画布即世界，一切 UI 都是漂浮岛
- *  同一张皮：白面、发丝线、14px 圆角、统一阴影——与 Excalidraw 岛同族
+ *  同一张皮：白面、发丝线、14px 圆角、统一阴影
  * ============================================================ */
 .island {
   background: var(--bg-panel);
@@ -138,11 +138,6 @@ body {
  *  普通模式悬停绘图描边带：可点的东西长得像可点的
  * ============================================================ */
 @keyframes fade-in { from { opacity: 0; } }
-.canvas-root.drawing-on::after {
-  content: ''; position: absolute; inset: 0; z-index: 5; pointer-events: none;
-  border: 2px solid var(--accent-soft);
-  animation: fade-in 0.25s var(--ease-panel);
-}
 .canvas-root.drawing-armed::after {
   content: ''; position: absolute; inset: 0; z-index: 5; pointer-events: none;
   border: 2px dashed var(--accent-soft);
@@ -168,8 +163,7 @@ body {
 .topbar-sep { width: 1px; height: 22px; background: var(--line); flex-shrink: 0; }
 
 /* ============================================================
- *  顶部画布工具岛：创建 | 绘图 | 导航 三组；绘图激活时滑移让位
- *  给 Excalidraw 工具栏——位移走 transform，模式切换有物理感不瞬移
+ *  顶部画布工具岛：创建 | 绘图 | 导航 三组
  * ============================================================ */
 .tool-island {
   position: absolute; top: 12px; left: 50%;
@@ -177,7 +171,6 @@ body {
   z-index: 7; display: flex; gap: 4px; align-items: center; padding: 5px;
   transition: transform 240ms var(--ease-panel);
 }
-.canvas-root.drawing-on .tool-island { transform: translate(-50%, 64px); }
 
 /* 图标先于按钮回应你：悬停轻胀、按下回缩——只动 transform */
 .tool-island .btn { position: relative; }
@@ -565,106 +558,12 @@ input.inline-edit {
 }
 .ws-more:hover { background: var(--accent-glow); }
 
-/* ============================================================
- *  Excalidraw 绘图层融合律：
- *  普通态是 React Flow viewport 内的 committed SVG，与节点共用唯一 transform；
- *  Excalidraw 只在编辑事务中挂载，不再常驻追随相机。
- * ============================================================ */
+/* 自研墨迹与节点同住 React Flow viewport，共用唯一 transform。 */
 .react-flow__viewport-portal { pointer-events: none; }
 .ink-world { position: absolute; inset: 0; pointer-events: none; }
-.ink-world-plane {
-  position: absolute; pointer-events: none; transform-origin: 0 0;
-  user-select: none;
-}
-.ink-world-below { z-index: -1; }
-.ink-world-above { z-index: 1000; }
 .ink-carry-anchor {
   transform: translate(var(--carry-x, 0px), var(--carry-y, 0px));
   transform-origin: 0 0;
-}
-.ink-carry-retry {
-  position: absolute; left: 50%; top: 102px; z-index: 7;
-  transform: translateX(-50%); border: 1px solid #f79009; border-radius: 999px;
-  padding: 6px 12px; background: var(--bg-panel); color: #b54708; cursor: pointer;
-}
-.ink-frame-status {
-  position: absolute; left: 50%; top: 72px; z-index: 6; pointer-events: none;
-  transform: translateX(-50%); padding: 7px 12px; border-radius: 999px;
-  border: 1px solid var(--line); background: color-mix(in srgb, var(--bg-panel) 94%, transparent);
-  color: var(--ink-dim); box-shadow: var(--shadow); font-size: 11px; line-height: 1;
-  animation: fade-in 120ms var(--ease-panel);
-}
-.ink-frame-status.retrying { color: #b54708; border-color: #fdb022; }
-.ink-frame-status.stale,
-.ink-frame-status.failed { color: #b42318; border-color: #fda29b; }
-
-/* opening 时先在幕后水合局部 draft；hole SVG 进入 DOM 的 layout effect 才同步显现，杜绝双影/白洞。 */
-.draw-pending { opacity: 0; pointer-events: none !important; }
-
-/* live editor 隐藏的相机尾窗：同层透明盾阻断 RF 节点，root capture 仍可接管 wheel/平移。 */
-.drawing-camera-shield {
-  position: absolute; inset: 0; z-index: 6; pointer-events: auto;
-  background: transparent; cursor: grab;
-}
-
-/* 编辑态导航必须是 RF/DrawLayer 的 z:7 sibling，所有按钮只进统一相机事务。 */
-.drawing-zoom-island {
-  position: absolute; left: 14px; bottom: 14px; z-index: 7;
-  display: flex; align-items: stretch; overflow: hidden; pointer-events: auto;
-}
-.drawing-zoom-island button {
-  min-width: 34px; height: 34px; padding: 0 9px; border: 0; border-right: 1px solid var(--line);
-  background: transparent; color: var(--ink-dim); font: 600 12px/1 var(--sans); cursor: pointer;
-  transition: background 120ms, color 120ms, transform 120ms var(--ease-panel);
-}
-.drawing-zoom-island button:last-child { border-right: 0; }
-.drawing-zoom-island button:hover { background: var(--bg-hover); color: var(--accent); }
-.drawing-zoom-island button:active { transform: scale(0.92); }
-.drawing-zoom-island svg { width: 15px; height: 15px; }
-
-/* 绘图编辑激活：保留原生选择与属性面板；汉堡菜单/帮助钮/杂项工具不进屋。 */
-.draw-active .excalidraw .main-menu-trigger,
-.draw-active .excalidraw .help-icon,
-.draw-active .excalidraw .App-toolbar__extra-tools-trigger,
-.draw-active .excalidraw .zoom-actions { display: none !important; }
-
-/* 原生属性岛默认贴左，会整块躲进导航岛下面；按导航实时宽度让位，收起导航即自动归位。 */
-.draw-active .excalidraw .App-menu__left {
-  transform: translateX(var(--draw-panel-shift, 0px));
-  transition: transform 160ms var(--ease-panel);
-}
-
-/* ===== Excalidraw 融合层：一家人的皮肤 =====
-   特异性 div.draw-layer .excalidraw (0,2,1) 必须压过它自己的
-   .excalidraw / .theme--light——懒加载让它的 CSS 后到，顺序不可依赖 */
-div.draw-layer .excalidraw {
-  --ui-font: var(--sans);
-  font-family: var(--sans);
-  --color-primary: var(--accent);
-  --color-primary-darker: #1149c4;
-  --color-primary-darkest: #0d3aa1;
-  --color-primary-hover: #3d75f0;
-  --color-primary-light: #e9f0fd;
-  --color-primary-light-darker: #d8e4fb;
-  --color-brand-hover: #1149c4;
-  --color-brand-active: #0d3aa1;
-  --color-selection: var(--accent);
-  --color-surface-primary-container: #e9f0fd;
-  --color-on-primary-container: #0d3aa1;
-  --focus-highlight-color: var(--accent-soft);
-  --color-surface-high: var(--bg-hover);
-  --color-surface-mid: var(--bg-deep);
-  --color-surface-low: #eef1f5;
-  --island-bg-color: var(--bg-panel);
-  --default-border-color: var(--line);
-  --dialog-border-color: var(--line);
-  --popup-bg-color: var(--bg-panel);
-  --scrollbar-thumb: #d0d5dd;
-  --border-radius-lg: 10px;
-  --border-radius-md: 8px;
-  --shadow-island: var(--shadow);
-  --default-button-size: 2.25rem;
-  --lg-button-size: 2.25rem;
 }
 
 /* 尺寸手柄：平时隐身，悬停容器/便签才现身——常驻的点是噪音 */
@@ -721,6 +620,7 @@ div.draw-layer .excalidraw {
   cursor: crosshair; touch-action: none;
 }
 .ink-input-layer.ink-tool-select { cursor: default; }
+.ink-input-layer.ink-tool-eraser { cursor: cell; }
 .canvas-root.ink-file-over::after {
   content: '松手加入图片'; position: absolute; inset: 12px; z-index: 7; pointer-events: none;
   display: grid; place-items: center; border: 2px dashed var(--accent); border-radius: 16px;

@@ -1,11 +1,12 @@
 /**
  * [INPUT]: 依赖 shared/canvas-carry.mjs 的 computeAnchorIds 锚定纯函数
- * [OUTPUT]: 对外提供 planBatchCarry 整理承载规划、markerExportElements/installExportMarkers SVG 锚标、
+ * [OUTPUT]: 对外提供 hitContainer 容器投放命中、planBatchCarry 整理承载规划、markerExportElements/installExportMarkers SVG 锚标、
  *           createInkDragBridge 拖动期墨迹跟随桥、createBatchCarryBridge 整理逆向 FLIP 桥
  * [POS]: canvas 的容器承载纯规划与唯一 DOM 桥。落盘由 scene-store 负责——这里只管"墨迹在帧追上前跟着容器走"
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
 import { computeAnchorIds } from '../../../shared/canvas-carry.mjs';
+import { COL_W } from './layout.js';
 
 const MARKER_PREFIX = 'ink-marker:';
 
@@ -16,6 +17,22 @@ const containerRect = node => ({
   w: node.width ?? node.data?._w,
   h: node.height ?? node.data?._h,
 });
+
+// 工作区中心落在哪个容器矩形里——拖动预览与松手落定共用同一双眼睛。
+export function hitContainer(node, all = []) {
+  const containers = all.filter(item => item.type === 'district' || item.type === 'board');
+  const oldParent = containers.find(item => item.id === node.parentId);
+  if (!oldParent) return { oldParent: null, hit: null, abs: null };
+  const abs = { x: oldParent.position.x + node.position.x, y: oldParent.position.y + node.position.y };
+  const center = { x: abs.x + COL_W / 2, y: abs.y + 30 };
+  const hit = containers.find(container => {
+    const w = container.width ?? container.data._w ?? container.data.width;
+    const h = container.height ?? container.data._h ?? container.data.height;
+    return center.x >= container.position.x && center.x <= container.position.x + w
+      && center.y >= container.position.y && center.y <= container.position.y + h;
+  });
+  return { oldParent, hit, abs };
+}
 
 // 整理承载规划：before/after 容器位置差 + 各自锚定的墨迹（面积小者优先认领在 computeAnchorIds 内）
 export function planBatchCarry(beforeNodes = [], afterNodes = [], drawingElements = []) {

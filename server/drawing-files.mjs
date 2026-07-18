@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 store 的 JSON 原子读写与 data 目录
- * [OUTPUT]: 提供 Excalidraw BinaryFiles 的规范化、引用收集、独立落盘与回读
+ * [OUTPUT]: 提供旧格式 BinaryFiles 兼容资产的规范化、引用收集、独立落盘与回读
  * [POS]: server 的绘图图片资产仓；事务性写入由 canvas repository 持有，此处保留兼容读写原语
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */

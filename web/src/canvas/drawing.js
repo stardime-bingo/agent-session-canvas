@@ -11,7 +11,7 @@ export const committedDrawingElements = (elements = []) => elements.filter(el =>
 
 export const DRAWING_HIT_BLOCK = '.container-drag-handle, .react-flow__resize-control, .react-flow__handle, .nodrag, .Island, button, input, textarea, [contenteditable]';
 
-// 普通看板态不挂 Excalidraw：所有主权动作都是已提交数组上的不可变变换。
+// 普通看板态所有主权动作都是已提交数组上的不可变变换。
 // 宿主形状与它的绑定文字同生共死、同层移动，不留幽灵标签。
 export function deleteDrawingElement(elements = [], id) {
   return committedDrawingElements(elements).filter(el => el.id !== id && el.containerId !== id);
@@ -86,7 +86,7 @@ const segDist = (px, py, ax, ay, bx, by) => {
 };
 
 function hitOne(el, fx, fy, t, includeHollowInterior) {
-  // 进元素坐标系：旋转绕包围盒中心逆转回来（Excalidraw 语义），再平移到元素原点
+  // 进元素坐标系：旋转绕包围盒中心逆转回来（兼容旧磁盘语义），再平移到元素原点
   let px = fx, py = fy;
   if (el.angle) {
     const cx = el.x + (el.width || 0) / 2, cy = el.y + (el.height || 0) / 2;
@@ -135,4 +135,3 @@ export function hitDrawingElement(elements = [], fx, fy, tolerance = 8, { includ
   }
   return null;
 }
-

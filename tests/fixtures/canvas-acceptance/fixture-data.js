@@ -1,11 +1,10 @@
 /**
- * [INPUT]: 元素数量 300/800、变更序号与 canvas fixture Excal 静态资产根
- * [OUTPUT]: 确定性双平面 Excalidraw 元素、单平面变更与验收红线
+ * [INPUT]: 元素数量 300/800 与确定性序号
+ * [OUTPUT]: 确定性双平面自研墨迹元素与验收数据
  * [POS]: 4518 无持久化验收数据真相；不读真实 canvas/layout
  * [PROTOCOL]: 变更时更新此头部，然后检查 README/web/CLAUDE.md
  */
 
-globalThis.EXCALIDRAW_ASSET_PATH = '/';
 
 const COLORS = ['#dbeafe', '#dcfce7', '#fef3c7', '#fce7f3'];
 

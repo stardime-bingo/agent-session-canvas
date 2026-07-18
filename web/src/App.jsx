@@ -204,8 +204,6 @@ export default function App() {
         if (e.key === 'Escape') t.blur();
         return;
       }
-      // 绘图编辑激活时快捷键交给 Excalidraw（含它自己的撤销栈）
-      if (document.querySelector('.draw-active')) return;
       if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'z') {
         e.preventDefault();
         const store = storeRef.current;

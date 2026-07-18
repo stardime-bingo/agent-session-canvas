@@ -1,7 +1,7 @@
 /**
  * [INPUT]: 依赖真实 FlowCanvas/scene-store/UIHost 与 4518 synthetic 数据；自研墨迹直渲，无故障注入
- * [OUTPUT]: 无 fetch 全内存交互画布 + 原生墨迹十四链自动验收：冷渲/连发即时/快捷键/框选多选/
- *           批量移动/缩放/旋转/复制粘贴/Alt 拖/图片粘贴/删除撤销/后台冲刷；window.__CANVAS_ACCEPTANCE__ 输出报告
+ * [OUTPUT]: 无 fetch 全内存交互画布 + 原生墨迹十五链自动验收：冷渲/连发即时/快捷键/框选多选/
+ *           批量移动/缩放/旋转/复制粘贴/Alt 拖/图片粘贴/橡皮撤销/删除撤销/后台冲刷；window.__CANVAS_ACCEPTANCE__ 输出报告
  * [POS]: 仅由 ?mode=interaction 动态加载；证伪"文档变更到像素可见=一次 React commit"的宪法
  * [PROTOCOL]: 变更时更新此头部，然后检查 main.jsx/README/web/CLAUDE.md
  */
@@ -216,7 +216,23 @@ function InteractionCanvas() {
         && Object.keys(store.get().drawingFiles).length === filesBefore + 1
         && imported.width === 1 && imported.height === 1;
 
-      // 11) Delete + 全画布 undo：生产快捷键删除，store 历史原样复活
+      // 11) 橡皮：E 武装，按住划过同步删除；整笔 coalesce 成一步 undo
+      const eraseTarget = imported;
+      const eraseX = eraseTarget.x + eraseTarget.width / 2;
+      const eraseY = eraseTarget.y + eraseTarget.height / 2;
+      key('e');
+      await waitFor(() => probe().snapshot().tool === 'eraser', 'eraser shortcut');
+      pointer('pointerdown', { x: eraseX, y: eraseY });
+      pointer('pointerup', { x: eraseX, y: eraseY });
+      await waitFor(() => !store.get().drawing.some(el => el.id === eraseTarget.id), 'eraser delete');
+      store.undo();
+      await waitFor(() => store.get().drawing.some(el => el.id === eraseTarget.id), 'eraser undo');
+      checks.eraserUndo = true;
+      key('v');
+      probe().setSelectedId(eraseTarget.id);
+      await waitFor(() => probe().snapshot().selectedIds[0] === eraseTarget.id, 'delete target selection');
+
+      // 12) Delete + 全画布 undo：生产快捷键删除，store 历史原样复活
       await waitFor(() => dom() === store.get().drawing.length, 'alt clone dom commit');
       const beforeDelete = dom();
       details.delete = {
@@ -237,12 +253,12 @@ function InteractionCanvas() {
       await waitFor(() => dom() === beforeDelete, 'undo revives');
       checks.deleteUndo = true;
 
-      // 12) 后台冲刷：防抖后 persist 收到最终文档，以上输入没有一步等待它
+      // 13) 后台冲刷：防抖后 persist 收到最终文档，以上输入没有一步等待它
       await waitFor(() => flushedRef.current.length > 0, 'background flush', 5000);
       checks.backgroundFlush = flushedRef.current.at(-1).canvas.drawing.some(el => el.id === 'fixture-landmark');
       details.flushCount = flushedRef.current.length;
 
-      // 13) 浏览器原生诊断由 main.jsx 统一收集；套件内也必须保持零错误/零警告
+      // 14) 浏览器原生诊断由 main.jsx 统一收集；套件内也必须保持零错误/零警告
       checks.consoleClean = window.__CANVAS_CONSOLE_ERRORS__.length === 0
         && window.__CANVAS_CONSOLE_WARNINGS__.length === 0
         && window.__CANVAS_PAGE_ERRORS__.length === 0;

@@ -163,7 +163,7 @@ def verify_interaction(browser):
     report = wait_for_probe(page)
     assert report["status"] == "complete", json.dumps(report, ensure_ascii=False)
     checks = report["report"]["checks"]
-    assert len(checks) >= 13, checks
+    assert len(checks) >= 15, checks
     assert all(checks.values()), json.dumps(checks, ensure_ascii=False)
     assert page.get_attribute("html", "data-interaction-status") == "pass"
     assert_clean(diagnostics)

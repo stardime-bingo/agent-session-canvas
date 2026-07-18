@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 api 的动作通道、ui 的 Icon/toast/confirmPop
- * [OUTPUT]: 对外提供七套右键菜单构建器（session/workspace/district/board/note/pane/edge）
+ * [OUTPUT]: 对外提供八套右键菜单构建器（session/workspace/district/board/note/drawing/pane/edge）
  *           与三个删除流程（deleteSessionFlow/deleteBoardFlow/deleteNoteFlow）——菜单、节点按钮、详情面板共用同一条河
  * [POS]: canvas 的菜单与危险动作层。铁律：拉起必有 toast 回执，删除必过自绘确认，绝不碰原生弹窗
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -9,6 +9,7 @@ import React from 'react';
 import { api } from '../api.js';
 import { handoffSkillPrompt } from '../util.js';
 import { Icon, toast, confirmPop } from '../ui.jsx';
+import { deleteDrawingElement, setDrawingElementPlane } from './drawing.js';
 
 const L = (icon, text) => <><Icon name={icon} /> {text}</>;
 
@@ -111,6 +112,24 @@ export const noteMenu = (n, ctx) => [
   }) },
   { sep: true },
   { label: L('trash', '删除便签'), danger: true, fn: pos => deleteNoteFlow(n, pos, ctx.onCanvasAction) },
+];
+
+export const drawingMenu = (drawing, { enterSelection, mutateDrawing, store }) => [
+  { label: drawing.customData?.below ? L('up', '浮到卡片上面') : L('down', '沉到卡片下面'), fn: () => {
+    mutateDrawing(elements => setDrawingElementPlane(elements, drawing.id, !drawing.customData?.below));
+    toast(drawing.customData?.below ? '已浮到卡片上面' : '已沉为背景底板——不再遮挡卡片点击', 'ok');
+  } },
+  { label: L('cursor', '选中编辑此绘图'), fn: () => enterSelection(drawing) },
+  { label: L('trash', '删除此绘图'), danger: true, fn: async pos => {
+    const ok = await confirmPop({
+      x: pos?.x, y: pos?.y, danger: true, yesLabel: '删除',
+      text: '删除这段绘图？', detail: '仅删除这一个绘图元素，画布其余笔迹不受影响。',
+    });
+    if (!ok) return;
+    mutateDrawing(elements => deleteDrawingElement(elements, drawing.id));
+    toast('绘图已删除', 'ok', { label: '撤销', onClick: () => store.undo() });
+  } },
+  { sep: true },
 ];
 
 export const paneMenu = (at, ctx) => [

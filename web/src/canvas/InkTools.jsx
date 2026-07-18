@@ -1,7 +1,7 @@
 /**
  * [INPUT]: scene-store、ink.js 元素工厂、ink-selection.js 选择内核、drawing.js 命中、gestures.js 相机数学、RF instance
  * [OUTPUT]: useInkTools——笔/形状/文字直写文档；单选/框选/多选、批量移动/缩放/旋转/删除/改样式、复制粘贴与 Alt 拖；
- *           V/P/R/O/A/T 快捷键、就地文字编辑和单相机滚轮
+ *           V/P/R/O/A/T/E 快捷键、橡皮、就地文字编辑和单相机滚轮
  * [POS]: canvas 的自研墨迹交互层。每一帧手势只做同步内存 mutate；持久化永远在 scene-store 后台
  * [PROTOCOL]: 变更时更新此头部，然后检查 web/CLAUDE.md
  */
@@ -22,9 +22,9 @@ import { Icon, toast } from '../ui.jsx';
 
 const DRAW_TOOLS = [
   ['freedraw', 'pen', '画笔'], ['rectangle', 'board', '矩形'], ['ellipse', 'circle', '椭圆'],
-  ['arrow', 'up', '箭头'], ['text', 'edit', '文字'],
+  ['arrow', 'up', '箭头'], ['text', 'edit', '文字'], ['eraser', 'trash', '橡皮'],
 ];
-const TOOL_KEYS = Object.freeze({ v: 'select', p: 'freedraw', r: 'rectangle', o: 'ellipse', a: 'arrow', t: 'text' });
+const TOOL_KEYS = Object.freeze({ v: 'select', p: 'freedraw', r: 'rectangle', o: 'ellipse', a: 'arrow', t: 'text', e: 'eraser' });
 const CLIPBOARD_MIME = 'application/x-agent-canvas-ink+json';
 const CLIPBOARD_TAG = 'agent-canvas-ink';
 const TEXT_SIZES = [14, 20, 28, 40];
@@ -82,6 +82,16 @@ export function useInkTools({ store, instRef, rootRef, hitAt, wheelModeRef, minZ
     const drawing = fn(doc.drawing);
     return drawing === doc.drawing ? doc : { ...doc, drawing };
   }, options), [store]);
+
+  const eraseAt = useCallback((gesture, point) => {
+    const hit = hitAt(point.x, point.y, 'all', true);
+    if (!hit || gesture.erased.has(hit.id)) return;
+    gesture.erased.add(hit.id);
+    mutateDrawing(elements => deleteDrawingElements(elements, [hit.id]), { coalesce: gesture.coalesce });
+    if (selectedIdsRef.current.includes(hit.id)) {
+      setSelectedIds(selectedIdsRef.current.filter(id => id !== hit.id));
+    }
+  }, [hitAt, mutateDrawing, setSelectedIds]);
 
   useEffect(() => {
     const onDown = e => {
@@ -256,6 +266,14 @@ export function useInkTools({ store, instRef, rootRef, hitAt, wheelModeRef, minZ
     if (!p) return;
     if (textEdit) closeTextEditor();
     if (active === 'select') return beginSelectGesture(e, p);
+    if (active === 'eraser') {
+      store.endCoalescing();
+      const gesture = { kind: 'erase', erased: new Set(), coalesce: `ink-erase:${Date.now()}` };
+      gestureRef.current = gesture;
+      eraseAt(gesture, p);
+      capturePointer(e.currentTarget, e.pointerId);
+      return;
+    }
     if (active === 'text') {
       const element = createInkElement('text', p.x, p.y, { ...style, fontSize: 20 });
       mutateDrawing(els => upsertInkElement(els, element), { coalesce: `ink:${element.id}` });
@@ -266,7 +284,7 @@ export function useInkTools({ store, instRef, rootRef, hitAt, wheelModeRef, minZ
     gestureRef.current = { kind: 'draw', id: element.id, element, moved: false };
     mutateDrawing(els => upsertInkElement(els, element), { coalesce: `ink:${element.id}` });
     capturePointer(e.currentTarget, e.pointerId);
-  }, [flowPoint, textEdit, closeTextEditor, beginSelectGesture, style, mutateDrawing, openTextEditor]);
+  }, [flowPoint, textEdit, closeTextEditor, beginSelectGesture, eraseAt, style, mutateDrawing, openTextEditor, store]);
 
   const onPointerMove = useCallback(e => {
     const gesture = gestureRef.current;
@@ -304,12 +322,16 @@ export function useInkTools({ store, instRef, rootRef, hitAt, wheelModeRef, minZ
       ), { coalesce: gesture.coalesce });
       return;
     }
+    if (gesture.kind === 'erase') {
+      eraseAt(gesture, p);
+      return;
+    }
     const updated = updateInkElementDrag(gesture.element, p.x, p.y);
     if (updated === gesture.element) return;
     gesture.element = updated;
     gesture.moved = true;
     mutateDrawing(els => upsertInkElement(els, updated), { coalesce: `ink:${gesture.id}` });
-  }, [flowPoint, instRef, mutateDrawing, setSelectedIds, store]);
+  }, [eraseAt, flowPoint, instRef, mutateDrawing, setSelectedIds, store]);
 
   const onPointerUp = useCallback(() => {
     const gesture = gestureRef.current;
@@ -449,7 +471,7 @@ export function useInkTools({ store, instRef, rootRef, hitAt, wheelModeRef, minZ
   const overlay = tool !== 'none' ? (
     <>
       <div
-        className={`ink-input-layer${tool === 'select' ? ' ink-tool-select' : ''}`}
+        className={`ink-input-layer ink-tool-${tool}`}
         style={spaceHeld ? { pointerEvents: 'none' } : undefined}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}

@@ -16,17 +16,16 @@ import SessionNode from './SessionNode.jsx';
 import DistrictNode from './DistrictNode.jsx';
 import BoardNode, { BOARD_COLORS } from './BoardNode.jsx';
 import NoteNode from './NoteNode.jsx';
-import { buildGraph, COL_W, PAD, resizedContainerChildren } from './layout.js';
-import { sessionMenu, workspaceMenu, districtMenu, boardMenu, noteMenu, paneMenu, edgeMenu, deleteBoardFlow, deleteNoteFlow } from './menus.jsx';
-import { connectionDrop, syncHandleHitArea } from './connections.js';
+import { buildGraph, PAD, resizedContainerChildren } from './layout.js';
+import { sessionMenu, workspaceMenu, districtMenu, boardMenu, noteMenu, drawingMenu, paneMenu, edgeMenu, deleteBoardFlow, deleteNoteFlow } from './menus.jsx';
+import { connectionDrop, describeEdge, EDGE_META, syncHandleHitArea } from './connections.js';
 import {
-  committedDrawingElements, deleteDrawingElement, DRAWING_HIT_BLOCK,
-  hitDrawingElement, setDrawingElementPlane,
+  committedDrawingElements, DRAWING_HIT_BLOCK, hitDrawingElement,
 } from './drawing.js';
 import InkLayer from './InkLayer.jsx';
 import { useInkTools } from './InkTools.jsx';
 import MiniMapInk from './MiniMapInk.jsx';
-import { createBatchCarryBridge, createInkDragBridge, planBatchCarry } from './container-carry.js';
+import { createBatchCarryBridge, createInkDragBridge, hitContainer, planBatchCarry } from './container-carry.js';
 import { applyBatchCarry, applyCarry, computeAnchorIds } from '../../../shared/canvas-carry.mjs';
 import { WHEEL_MODES, nextWheelMode, wheelDevice, zoomViewport } from './gestures.js';
 import { Icon, toast, confirmPop } from '../ui.jsx';
@@ -35,30 +34,6 @@ const nodeTypes = { workspace: WorkspaceNode, session: SessionNode, district: Di
 
 const MIN_ZOOM = 0.1, MAX_ZOOM = 1.8;   // 缩放界限唯一真相：RF props 与滚轮内核共用
 const containerKey = id => id.startsWith('district:') ? id.slice(9) : id;
-
-// 命中检测：工作区中心落在哪个容器矩形里——拖动预览与松手落定共用同一双眼睛
-function hitContainer(node, all) {
-  const containers = all.filter(n => n.type === 'district' || n.type === 'board');
-  const oldParent = containers.find(n => n.id === node.parentId);
-  if (!oldParent) return { oldParent: null, hit: null, abs: null };
-  const abs = { x: oldParent.position.x + node.position.x, y: oldParent.position.y + node.position.y };
-  const center = { x: abs.x + COL_W / 2, y: abs.y + 30 };
-  const hit = containers.find(c => {
-    const w = c.width ?? c.data._w ?? c.data.width, h = c.height ?? c.data._h ?? c.data.height;
-    return center.x >= c.position.x && center.x <= c.position.x + w &&
-           center.y >= c.position.y && center.y <= c.position.y + h;
-  });
-  return { oldParent, hit, abs };
-}
-
-const EDGE_LABEL = { worktree: 'worktree 分支', family: '同族项目', handoff: '接力血缘', manual: '手动连线' };
-// 箭头语义：有方向的关系（分支/接力/手动）带箭头，亲缘无先后不带
-const EDGE_META = {
-  worktree: { color: '#e2611f', arrow: true },
-  family: { color: '#155eef', arrow: false },
-  handoff: { color: '#12b76a', arrow: true },
-  manual: { color: '#7c3aed', arrow: true },
-};
 
 export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, canvas, store, onMoveNode, onCanvasAction, onRenameSession, onRenameWs, selectedKey, onSelect, onChanged, onArrange, focusRef, actionsRef, expanded, searching, onToggleExpand, frameTestProbeRef }) {
   const instRef = useRef(null);
@@ -151,27 +126,9 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     toast('已选中绘图——可拖动、缩放、旋转，Shift 加选');
   };
 
-  const drawingMenuItems = hit => [
-    { label: hit.customData?.below
-        ? <><Icon name="up" /> 浮到卡片上面</>
-        : <><Icon name="down" /> 沉到卡片下面</>,
-      fn: () => {
-        mutateDrawing(els => setDrawingElementPlane(els, hit.id, !hit.customData?.below));
-        toast(hit.customData?.below ? '已浮到卡片上面' : '已沉为背景底板——不再遮挡卡片点击', 'ok');
-      } },
-    { label: <><Icon name="cursor" /> 选中编辑此绘图</>, fn: () => enterInkSelection(hit) },
-    { label: <><Icon name="trash" /> 删除此绘图</>, danger: true, fn: async mpos => {
-      const ok = await confirmPop({
-        x: mpos?.x, y: mpos?.y, danger: true, yesLabel: '删除',
-        text: '删除这段绘图？', detail: '仅删除这一个绘图元素，画布其余笔迹不受影响。',
-      });
-      if (ok) {
-        mutateDrawing(els => deleteDrawingElement(els, hit.id));
-        toast('绘图已删除', 'ok', { label: '撤销', onClick: () => store.undo() });
-      }
-    } },
-    { sep: true },
-  ];
+  const drawingMenuItems = hit => drawingMenu(hit, {
+    enterSelection: enterInkSelection, mutateDrawing, store,
+  });
 
   // ---- 悬停绘图描边带 → 指针光标（rAF 节流）；移动中整体静默 ----
   const overDrawRaf = useRef(0);
@@ -199,9 +156,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     setMenu(null);
   }, [onSelect, inkArmed, hitDrawingAt]);   // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ============================================================
   //  节点装配：便签自由漂浮；选中态交 React Flow 原生管理
-  // ============================================================
   const allNodes = useMemo(() => [
     ...built.nodes.map(n => {
       if (n.type === 'board') return {
@@ -311,17 +266,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     }
   }, [onCanvasAction]);
 
-  // ---- 边的名与解释：点击/悬停都说人话 ----
-  const nameOf = useCallback(end => {
-    const s = sessionsByKey[end];
-    if (s) return s.title;
-    if (end.startsWith('note:')) return '便签';
-    return end.split('/').filter(Boolean).pop() || end;
-  }, [sessionsByKey]);
-
-  const edgeText = useCallback(edge =>
-    `${EDGE_LABEL[edge.className] || '关联'}：${nameOf(edge.source)} ⇄ ${nameOf(edge.target)}`,
-  [nameOf]);
+  const edgeText = useCallback(edge => describeEdge(edge, sessionsByKey), [sessionsByKey]);
 
   const onEdgeClick = useCallback((_, edge) => {
     if (edge.className !== 'manual') toast(edgeText(edge));
@@ -335,9 +280,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   }, [edgeText]);
   const onEdgeMouseLeave = useCallback(() => setEdgeTip(null), []);
 
-  // ============================================================
   //  删除治理：Backspace/Delete 只对便签/画板/手动边生效
-  // ============================================================
   const posOf = n => {
     const p = instRef.current?.flowToScreenPosition?.(n.position);
     return p ? { x: p.x, y: p.y } : {};
@@ -397,9 +340,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     });
   }, [onCanvasAction, sessionsByKey]);
 
-  // ============================================================
   //  右键快捷菜单：七套（含街区与手动边），构建器在 menus.jsx
-  // ============================================================
   const openMenu = (e, items) => {
     e.preventDefault();
     const h = items.length * 34 + 16;
@@ -844,7 +785,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       {ink.toolButtons.map(([t, icon, label]) => (
         <button key={t} className={`btn ${ink.tool === t ? 'primary' : 'ghost'}`}
           onClick={() => ink.setTool(ink.tool === t ? 'none' : t)}
-          title={`${label}（${({ freedraw: 'P', rectangle: 'R', ellipse: 'O', arrow: 'A', text: 'T' })[t]}，Esc 收起）`}>
+          title={`${label}（${({ freedraw: 'P', rectangle: 'R', ellipse: 'O', arrow: 'A', text: 'T', eraser: 'E' })[t]}，Esc 收起）`}>
           <Icon name={icon} /> {label}
         </button>
       ))}

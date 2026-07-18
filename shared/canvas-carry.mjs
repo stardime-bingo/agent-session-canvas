@@ -19,7 +19,7 @@ export function computeAnchorIds(elements = [], containers = []) {
     const container = validContainers.find(c => x >= c.x && x <= c.x + c.w && y >= c.y && y <= c.y + c.h);
     if (container) owner.set(element.id, container.id);
   }
-  // Only Excalidraw bound text inherits its container host; bound arrows keep
+  // Only legacy-format bound text inherits its container host; bound arrows keep
   // their own geometric ownership and cannot be claimed by traversal order.
   for (const element of elements) {
     if (element?.type !== 'text' || !element.containerId || !byId.has(element.containerId)) continue;
