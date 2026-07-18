@@ -1,6 +1,6 @@
 interface:
   display_name: "AGENT 会话指挥塔"
-  short_description: "安装、启动、诊断并打开本地会话画布"
+  short_description: "安装、启停、诊断并查看本地会话画布"
   icon_small: "./assets/agent-session-canvas.svg"
   icon_large: "./assets/agent-session-canvas.svg"
   brand_color: "#155EEF"

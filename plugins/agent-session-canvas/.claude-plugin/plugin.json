@@ -1,12 +1,12 @@
 {
   "name": "agent-session-canvas",
-  "version": "1.1.0",
-  "description": "Install, diagnose, start, and open the real local AGENT Session Canvas.",
+  "version": "1.2.0",
+  "description": "Install, diagnose, start, stop, inspect, and open the real local AGENT Session Canvas.",
   "author": {
     "name": "BINGOAI",
-    "url": "https://github.com/bingo0621"
+    "url": "https://github.com/stardime-bingo"
   },
-  "repository": "https://github.com/bingo0621/agent-session-canvas",
+  "repository": "https://github.com/stardime-bingo/agent-session-canvas",
   "license": "MIT",
   "keywords": ["claude-code", "codex", "sessions", "canvas", "local-first"]
 }

@@ -7,6 +7,5 @@ data/
 output/
 *.bak
 *.backup
-审计提示词.md
 infra/*.plist
 !infra/*.plist.template

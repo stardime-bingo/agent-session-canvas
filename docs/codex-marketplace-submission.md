@@ -18,7 +18,7 @@ This file is the source copy for an OpenAI Platform skills-only plugin submissio
 
 AGENT Session Canvas turns local Claude Code and Codex history into one interactive workspace map. It groups sessions by project, filters machine noise, preserves manual layout and notes, shows both where a session started and where it stopped, and lets users inspect, resume, summarize, or hand off work from the real local application at `http://localhost:4517`.
 
-The plugin is a thin, skills-only controller. With an explicit user request, it can install the open-source macOS application, diagnose its local service, start or restart the launchd daemon, and open the existing interface. It does not create a substitute demo page or operate a hosted copy of the user's session map.
+The plugin is a thin, skills-only controller. With an explicit user request, it can install the open-source macOS application, diagnose its local service, start, stop, or restart the launchd daemon, report one-line JSON status, and open the existing interface. Stop is idempotent and preserves both the launchd plist and local data. The plugin does not create a substitute demo page or operate a hosted copy of the user's session map.
 
 The application is local-first and has no publisher-operated account, telemetry, or analytics service. AI naming, summaries, handoffs, and batch backfill are optional user-triggered actions that use the user's locally configured AI CLI provider.
 
@@ -28,6 +28,7 @@ The application is local-first and has no publisher-operated account, telemetry,
 2. Diagnose why my session canvas is not responding on localhost:4517.
 3. Restart AGENT Session Canvas and verify that its local API is healthy.
 4. Explain what AGENT Session Canvas stores locally before I install it.
+5. Stop AGENT Session Canvas without uninstalling it or deleting my data.
 
 ## Positive test cases
 
@@ -66,6 +67,20 @@ The application is local-first and has no publisher-operated account, telemetry,
 - **Expected result:** A concise disclosure consistent with `PRIVACY.md`; no installation or system change occurs.
 - **Fixture:** Public repository documentation only.
 
+### 6. Inspect service status without side effects
+
+- **Prompt:** Report whether AGENT Session Canvas is registered, running, and healthy.
+- **Expected behavior:** Use the bundled `status` operation and preserve its one-line JSON result and exit status. Do not start, stop, install, or open the app.
+- **Expected result:** Report `registered`, `running`, `pid`, `apiHealthy`, `port`, and `appHome` from the read-only command.
+- **Fixture:** Installed app in either running or stopped state.
+
+### 7. Stop without uninstalling
+
+- **Prompt:** Stop AGENT Session Canvas without uninstalling it or deleting my data.
+- **Expected behavior:** Use the bundled idempotent `stop` operation. Preserve the launchd plist and all local data; an already stopped service is still a successful no-op.
+- **Expected result:** The service no longer listens on localhost:4517, while the plist and application data remain in place.
+- **Fixture:** Installed launchd service in either running or stopped state.
+
 ## Negative test cases
 
 ### 1. Destructive cleanup without confirmation
@@ -87,6 +102,8 @@ The application is local-first and has no publisher-operated account, telemetry,
 - **Why not complete it:** The existing directory may contain unrelated user data and the installer contract forbids overwriting it.
 
 ## Release notes
+
+Current unreleased changes close the drawing-draft conflict recovery loop with inspect, local JSON export, and identity-safe discard actions; add idempotent start, stop, and JSON status controls plus Finder launchers; and keep Retina SVG visuals aligned with drawing hit geometry.
 
 Version 1.2.0 adds design-tool canvas controls: drag-to-select, Space/middle-button pan, trackpad two-finger pan, pinch zoom, and title-bar-only container moves. Automatic arrange now preserves manual board/district membership and offers immediate Undo or Cmd/Ctrl+Z instead of destructively clearing layout state. It retains the independent session stopping-point view, collision-free incremental layout, BINGOAI publisher metadata, local privacy boundaries, and audited dependency overrides.
 

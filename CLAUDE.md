@@ -6,7 +6,7 @@ Node.js 24 (零依赖后端) + React 18 + @xyflow/react 12 + Vite 8
 > 地图从地形自动生长，点击地图反向驱动地形。
 
 <directory>
-server/ - 零依赖 Node 后端 daemon (9文件 + adapters/: 扫描/拉起/模型路由/AI/回填/HTTP/画布动作与图片仓)
+server/ - 零依赖 Node 后端 daemon (10文件 + adapters/: 扫描/拉起/模型路由/AI/回填/HTTP/画布事务与图片仓)
 web/ - React Flow 画布前端 (src/: 总装 + ui 原子库(toast/确认/就地改名/图标) + canvas/ 画布引擎/手势内核/菜单 + panels/ 四面板含终端框)
 hooks/ - Claude Code SessionEnd 接力钩子 (自动生成接力提示词)
 data/ - 运行时产物: scan-cache.json(可丢弃) enrich/canvas/layout/drawing-files.json(珍贵) launch/(临时脚本)
@@ -15,7 +15,7 @@ tests/ - 零依赖 node:test 回归：持久层并发、尾部停止点、增量
 scripts/ - 开源安装、只读诊断、Finder 双击启停薄入口与发布资产准备；安装脚本按当前 checkout 生成 launchd plist，不写死个人路径；
   prepare-assets 从 lock 精确固定的 Excalidraw 包同步离线字体，verify-subset-worker-build 递归守住 worker/prod/main 三闭包；serve-canvas-acceptance 只绑 4518、只暴露 allowlist fixture 的 production dist，拒绝 /api、/data、/@fs、/.git
 plugins/ - Claude Code / Codex 共用的薄插件；统一控制脚本负责安装、诊断、启停、单行 JSON 状态与打开本地实机，stop 保留 plist/data，start 可从保留 plist 恢复注册
-docs/ + PRIVACY.md + TERMS.md - Codex 市场提交文案、隐私披露与公开使用条款
+docs/ + PRIVACY.md + TERMS.md - 文档索引、Codex 市场文案、已完成工程记录、隐私披露与公开使用条款
 </directory>
 
 <config>
@@ -41,7 +41,7 @@ npm run scan         # 仅扫描，输出统计
 
 ## 架构决策
 
-> **v17 绘图融合根治已完成（2026-07-17）**：LE-008～LE-014 已按 `docs/绘图融合根治计划-v2.md` 全部独立验收并合入，Loop 最终全局门通过；后续 SceneStore 必须另立 RFC，不得继续扩张本轮合同。
+> **v17 绘图融合根治已完成（2026-07-17）**：LE-008～LE-014 已按 `docs/绘图融合根治计划-v2.md` 全部独立验收并合入，Loop 最终全局门通过；2026-07-18 总验收遗留的草稿冲突出路、快捷启停与 Retina 命中同尺也已在本分支收口。后续 SceneStore 必须另立 RFC，不得继续扩张本轮合同。
 
 - **Adapter 模式**: 每个 Agent 工具一个适配器输出统一 Session 模型，新增工具=新增一个文件
 - **首尾局部读取**: 只读 JSONL 首 64KB + 尾 8KB，3700 文件冷扫 1.5s，mtime 缓存命中 53ms

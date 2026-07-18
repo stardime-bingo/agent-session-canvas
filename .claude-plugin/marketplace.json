@@ -11,7 +11,7 @@
     {
       "name": "agent-session-canvas",
       "source": "./plugins/agent-session-canvas",
-      "description": "Install, diagnose, start, and open the real local AGENT Session Canvas.",
+      "description": "Install, diagnose, start, stop, inspect, and open the real local AGENT Session Canvas.",
       "version": "1.2.0",
       "author": {
         "name": "BINGOAI"
