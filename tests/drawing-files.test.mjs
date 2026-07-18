@@ -1,179 +1,77 @@
+/**
+ * [INPUT]: server/drawing-files.mjs 规范化纯函数与 server/scene.mjs 场景仓
+ * [OUTPUT]: BinaryFiles 规范化/引用收集回归 + 场景仓资产先行/不可变/孤儿裁剪回归
+ * [POS]: tests 的图片资产证伪层——资产永远先于引用落盘，孤儿随场景写顺手裁剪
+ * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+ */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createCanvasRepository, SceneError } from '../server/canvas-repository.mjs';
-import { commitDrawingWithReceipt } from '../web/src/api.js';
-import { createDrawingCommitQueue, drawingFilesDelta } from '../web/src/canvas/drawing.js';
+import { normalizeDrawingFiles, drawingFileIds } from '../server/drawing-files.mjs';
+import { createScene } from '../server/scene.mjs';
 
-const binary = (id, data = 'YQ==', extra = {}) => ({
-  id, mimeType: 'image/png', dataURL: `data:image/png;base64,${data}`, created: 1, ...extra,
-});
-const image = id => ({ id: `element-${id}`, type: 'image', fileId: id, x: 0, y: 0 });
-const makeDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'drawing-files-'));
-const seed = dir => {
-  fs.writeFileSync(path.join(dir, 'canvas.json'), JSON.stringify({
-    edges: [], notes: [], boards: [], drawing: [],
-  }));
-  fs.writeFileSync(path.join(dir, 'layout.json'), '{}');
-  fs.writeFileSync(path.join(dir, 'drawing-files.json'), '{}');
-};
-const invariant = dir => {
-  const canvas = JSON.parse(fs.readFileSync(path.join(dir, 'canvas.json')));
-  const files = JSON.parse(fs.readFileSync(path.join(dir, 'drawing-files.json')));
-  for (const element of canvas.drawing) {
-    if (element.type === 'image' && !element.isDeleted) assert.ok(files[element.fileId]);
-  }
-};
+const tmpDir = () => fs.mkdtempSync(path.join(os.tmpdir(), 'scene-files-'));
+const img = (id, body = 'AAAA') => ({ [id]: { id, mimeType: 'image/png', dataURL: `data:image/png;base64,${body}`, created: 1 } });
+const imageEl = (id, fileId) => ({ id, type: 'image', fileId, x: 0, y: 0, width: 10, height: 10 });
+const emptyCanvas = { edges: [], notes: [], boards: [], drawing: [] };
 
-test('BinaryFiles delta 精确覆盖规范字段，平移/删除不重传 base64', () => {
-  const a = binary('a');
-  assert.deepEqual(drawingFilesDelta({ a }, { a: { ...a } }), {});
-  assert.deepEqual(Object.keys(drawingFilesDelta({ a }, { a, b: binary('b') })), ['b']);
-  assert.deepEqual(Object.keys(drawingFilesDelta({ a }, { a: { ...a, lastRetrieved: 2 } })), ['a']);
-  assert.deepEqual(drawingFilesDelta({ a }, {}), {});
-});
-
-test('drawing commit 资产先写引用后写；同 ID 保留首份 canonical 且内容变化零写拒绝', () => {
-  const dir = makeDir(); seed(dir);
-  const repo = createCanvasRepository(dir);
-  let token = repo.readWithDrawingFiles().sceneToken;
-  const first = repo.commitDrawing({
-    opId: 'one', baseToken: token, elements: [image('a')], files: { a: binary('a') },
+test('normalizeDrawingFiles 只留合法 data URL 与 ID，剥掉杂字段', () => {
+  const clean = normalizeDrawingFiles({
+    ok: { dataURL: 'data:image/png;base64,AA', mimeType: 'image/png', junk: true },
+    'bad id!': { dataURL: 'data:image/png;base64,AA' },
+    noUrl: { mimeType: 'image/png' },
+    httpUrl: { dataURL: 'https://evil/x.png' },
   });
-  token = first.sceneToken;
-  const metadata = repo.commitDrawing({
-    opId: 'meta', baseToken: token, elements: [image('a')],
-    files: { a: binary('a', 'YQ==', { lastRetrieved: 2 }) },
-  });
-  assert.equal(metadata.status, 'committed');
-  assert.deepEqual(repo.readWithDrawingFiles().drawingFiles.a, binary('a'));
-  const before = [fs.readFileSync(repo.paths.canvasFile), fs.readFileSync(repo.paths.drawingFilesFile)];
-  assert.throws(() => repo.commitDrawing({
-    opId: 'bad', baseToken: metadata.sceneToken, elements: [image('a')],
-    files: { a: binary('a', 'Yg==') },
-  }), error => error instanceof SceneError && error.code === 'DRAWING_FILE_IMMUTABLE');
-  assert.deepEqual(fs.readFileSync(repo.paths.canvasFile), before[0]);
-  assert.deepEqual(fs.readFileSync(repo.paths.drawingFilesFile), before[1]);
+  assert.deepEqual(Object.keys(clean), ['ok']);
+  assert.equal(clean.ok.junk, undefined);
+  assert.equal(clean.ok.mimeType, 'image/png');
 });
 
-test('committed queue 把 previousSuccessful 交给 persist，几何提交与同内容 clone 都是零 base64 delta', async () => {
-  const photo = binary('photo');
-  const calls = [];
-  const queue = createDrawingCommitQueue({
-    elements: [image('photo')],
-    files: { photo },
-  }, async (next, previousSuccessful) => {
-    calls.push({ next, previousSuccessful, delta: drawingFilesDelta(previousSuccessful.files, next.files) });
-  });
-  await queue.submit(base => ({
-    elements: [{ ...base.elements[0], x: 10 }],
-    files: { photo: { ...base.files.photo } },
-  }));
-  assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0].delta, {});
-  assert.equal(calls[0].previousSuccessful.elements[0].x, 0);
-  assert.equal(calls[0].next.elements[0].x, 10);
+test('drawingFileIds 只收活着的 image 元素引用，去重排序', () => {
+  assert.deepEqual(drawingFileIds([
+    imageEl('a', 'f2'), imageEl('b', 'f1'), { ...imageEl('c', 'f9'), isDeleted: true },
+    imageEl('d', 'f1'), { id: 'e', type: 'rectangle' },
+  ]), ['f1', 'f2']);
 });
 
-test('committed queue 把本笔 persist receipt 与对应 snapshot 一起交给 closing', async () => {
-  const queue = createDrawingCommitQueue({ elements: [], files: {} }, async next => ({
-    status: 'committed',
-    opId: next.elements[0].id,
-    sceneToken: `token-${next.elements[0].id}`,
-  }));
-  const committed = await queue.submitWithReceipt(() => ({
-    elements: [{ id: 'shape', type: 'rectangle' }],
-    files: {},
-  }));
-  assert.equal(committed.snapshot.elements[0].id, 'shape');
-  assert.equal(committed.receipt.sceneToken, 'token-shape');
-  assert.equal(queue.snapshot(), committed.snapshot);
+test('场景仓：引用缺失的写被拒，资产先行后写成功，rev 单调推进', () => {
+  const scene = createScene(tmpDir());
+  const withImage = { ...emptyCanvas, drawing: [imageEl('el1', 'f1')] };
+  assert.throws(() => scene.write({ layout: {}, canvas: withImage }), /图片不在仓内/);
+  assert.deepEqual(scene.addFiles(img('f1')), { added: 1 });
+  const { rev } = scene.write({ layout: {}, canvas: withImage });
+  assert.equal(rev, 2);
+  const read = scene.read();
+  assert.equal(read.rev, 2);
+  assert.equal(read.canvas.drawing.length, 1);
+  assert.ok(read.drawingFiles.f1);
 });
 
-test('drawing response loss queries receipt; only dual uncertainty poisons authority', async () => {
-  const responseLost = Object.assign(new Error('network'), { status: 500 });
-  const committed = { status: 'committed', opId: 'op', sceneToken: 'next' };
-  assert.deepEqual(await commitDrawingWithReceipt(
-    { opId: 'op' },
-    async () => { throw responseLost; },
-    async () => committed,
-  ), committed);
-
-  await assert.rejects(commitDrawingWithReceipt(
-    { opId: 'op' },
-    async () => { throw responseLost; },
-    async () => { throw new Error('status network'); },
-  ), error => error.code === 'AUTHORITY_UNKNOWN' && error.authorityUnknown);
-
-  await assert.rejects(commitDrawingWithReceipt(
-    { opId: 'op' },
-    async () => { throw responseLost; },
-    async () => ({ status: 'unknown', opId: 'op' }),
-  ), error => error.code === 'DRAWING_NOT_COMMITTED' && !error.authorityUnknown);
-
-  let queried = false;
-  await assert.rejects(commitDrawingWithReceipt(
-    { opId: 'op' },
-    async () => { throw Object.assign(new Error('conflict'), { status: 409 }); },
-    async () => { queried = true; },
-  ), error => error.status === 409);
-  assert.equal(queried, false);
+test('场景仓：同 ID 资产不可变（重复上传幂等零覆盖），孤儿随场景写裁剪', () => {
+  const dir = tmpDir();
+  const scene = createScene(dir);
+  scene.addFiles(img('f1', 'FIRST'));
+  scene.addFiles({ ...img('f1', 'SECOND'), ...img('f2') });
+  const files = scene.read().drawingFiles;
+  assert.match(files.f1.dataURL, /FIRST/);   // 首份内容胜，二次上传不覆盖
+  assert.ok(files.f2);
+  // 场景只引用 f1 → f2 是孤儿，写场景时顺手裁剪
+  scene.write({ layout: {}, canvas: { ...emptyCanvas, drawing: [imageEl('el1', 'f1')] } });
+  const pruned = JSON.parse(fs.readFileSync(path.join(dir, 'drawing-files.json'), 'utf8'));
+  assert.deepEqual(Object.keys(pruned), ['f1']);
 });
 
-test('缺引用与非法 delta typed error 且两个持久文件 byte-zero', () => {
-  const dir = makeDir(); seed(dir);
-  const repo = createCanvasRepository(dir);
-  const token = repo.read().sceneToken;
-  const before = [fs.readFileSync(repo.paths.canvasFile), fs.readFileSync(repo.paths.drawingFilesFile)];
-  assert.throws(() => repo.commitDrawing({
-    opId: 'missing', baseToken: token, elements: [image('missing')], files: {},
-  }), error => error.code === 'DRAWING_FILE_MISSING');
-  assert.throws(() => repo.commitDrawing({
-    opId: 'invalid', baseToken: token, elements: [], files: { bad: { id: 'bad', dataURL: 'nope' } },
-  }), error => error.code === 'INVALID_DRAWING_COMMIT');
-  assert.deepEqual(fs.readFileSync(repo.paths.canvasFile), before[0]);
-  assert.deepEqual(fs.readFileSync(repo.paths.drawingFilesFile), before[1]);
-});
-
-test('drawing 各故障窗恢复后只允许 before+孤儿或 after+完整引用', () => {
-  for (const stage of ['drawing:assets', 'drawing:prepared', 'drawing:canvas', 'drawing:committed', 'drawing:receipt', 'drawing:prune']) {
-    const dir = makeDir(); seed(dir);
-    const repo = createCanvasRepository(dir, { fault: at => { if (at === stage) throw new Error(stage); } });
-    const token = repo.read().sceneToken;
-    try {
-      repo.commitDrawing({
-        opId: `op-${stage}`, baseToken: token, elements: [image('a')], files: { a: binary('a') },
-      });
-    } catch { /* injected */ }
-    createCanvasRepository(dir).readWithDrawingFiles();
-    invariant(dir);
-  }
-});
-
-test('response loss 由 receipt/status 确认；journal token 篡改在写前阻断恢复', () => {
-  const dir = makeDir(); seed(dir);
-  const repo = createCanvasRepository(dir);
-  const result = repo.commitDrawing({
-    opId: 'lost-response', baseToken: repo.read().sceneToken,
-    elements: [image('a')], files: { a: binary('a') },
-  });
-  assert.deepEqual(repo.drawingStatus('lost-response'), result);
-
-  const tamperedDir = makeDir(); seed(tamperedDir);
-  const crashing = createCanvasRepository(tamperedDir, {
-    fault: stage => { if (stage === 'drawing:canvas') throw new Error('stop'); },
-  });
-  assert.throws(() => crashing.commitDrawing({
-    opId: 'tamper', baseToken: crashing.read().sceneToken,
-    elements: [image('a')], files: { a: binary('a') },
-  }));
-  const journal = JSON.parse(fs.readFileSync(crashing.paths.drawingJournalFile));
-  journal.baseToken = '0'.repeat(64);
-  fs.writeFileSync(crashing.paths.drawingJournalFile, JSON.stringify(journal));
-  const canvasBefore = fs.readFileSync(crashing.paths.canvasFile);
-  assert.throws(() => createCanvasRepository(tamperedDir).read(), error =>
-    error.code === 'DRAWING_JOURNAL_CORRUPT');
-  assert.deepEqual(fs.readFileSync(crashing.paths.canvasFile), canvasBefore);
+test('场景仓：结构性垃圾被拒且磁盘零字节变化', () => {
+  const dir = tmpDir();
+  const scene = createScene(dir);
+  scene.write({ layout: { a: { x: 1, y: 2 } }, canvas: emptyCanvas });
+  const before = fs.readFileSync(path.join(dir, 'canvas.json'), 'utf8');
+  assert.throws(() => scene.write({ layout: {}, canvas: { ...emptyCanvas, notes: 'bad' } }), /必须是数组/);
+  assert.throws(() => scene.write({ layout: { a: { x: Infinity } }, canvas: emptyCanvas }), /有限数/);
+  assert.throws(() => scene.write({
+    layout: {}, canvas: { ...emptyCanvas, drawing: [{ id: 'dup' }, { id: 'dup' }] },
+  }), /唯一字符串 id/);
+  assert.equal(fs.readFileSync(path.join(dir, 'canvas.json'), 'utf8'), before);
 });

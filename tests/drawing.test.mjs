@@ -12,9 +12,6 @@ import {
   mergeDrawingTransaction, translateDrawingElements,
 } from '../web/src/canvas/drawing.js';
 import {
-  advanceAutoSinkUndoTicket, submitAutoSinkUndo,
-} from '../web/src/canvas/drawing-draft-store.js';
-import {
   acceptanceCspFor, classifyAcceptanceRequest, selectAcceptanceFixture,
 } from '../scripts/serve-canvas-acceptance.mjs';
 import {
@@ -516,46 +513,32 @@ test('相机呈现策略只在 live 隐藏且 preview 在场时挂输入盾', ()
   });
 });
 
-test('生产 FlowCanvas 真正消费相机呈现策略，快捷键不再归 DrawLayer 双重持有', () => {
+test('生产 FlowCanvas 真正消费相机呈现策略，缩放键唯一 owner 在相机钩子', () => {
   const flowCanvas = fs.readFileSync(path.resolve('web/src/canvas/FlowCanvas.jsx'), 'utf8');
+  const cameraHook = fs.readFileSync(path.resolve('web/src/canvas/drawing-camera.jsx'), 'utf8');
   const drawLayer = fs.readFileSync(path.resolve('web/src/canvas/DrawLayer.jsx'), 'utf8');
   const css = fs.readFileSync(path.resolve('web/src/theme.css'), 'utf8');
-  assert.match(flowCanvas, /drawingCameraPresentation\(\{[\s\S]*active:\s*penActive[\s\S]*visible:\s*drawVisible[\s\S]*hasPreview:\s*!!draftPreview/);
+  assert.match(flowCanvas, /drawingCameraPresentation\(\{[\s\S]*active:\s*penActive[\s\S]*visible:\s*drawVisible[\s\S]*hasPreview:\s*!!camera\.draftPreview/);
   assert.match(flowCanvas, /cameraPresentation\.showShield\s*&&[\s\S]*data-drawing-camera-shield/);
-  assert.match(flowCanvas, /target\s*===\s*document\.body\s*\|\|\s*target\s*===\s*document\.documentElement/,
+  assert.match(cameraHook, /target\s*===\s*document\.body\s*\|\|\s*target\s*===\s*document\.documentElement/,
     '画布点击后焦点回 body 时快捷键仍必须归 RF');
-  assert.doesNotMatch(flowCanvas, /target\?\.closest\?\.\(CAMERA_EXTERNAL_EXCLUDE\)\) return;[\s\S]{0,300}drawingZoomKeyCommand/,
-    '焦点留在 z:7 缩放岛时不得把快捷键放给 Excal');
-  const fitDefinition = flowCanvas.indexOf('const navigateDrawingFit = useCallback');
-  const keyboardOwner = flowCanvas.indexOf('drawingZoomKeyCommand({');
-  assert.ok(fitDefinition >= 0 && keyboardOwner > fitDefinition,
-    '键盘 owner 必须在 navigateDrawingFit 定义后安装，不得在 render 依赖求值时触发 TDZ');
-  assert.match(flowCanvas, /command\s*===\s*['"]fit['"]\s*\?\s*navigateDrawingFit\(null\)\s*:\s*navigateDrawingZoom\(command\)/,
+  assert.match(cameraHook, /command\s*===\s*['"]fit['"]\s*\?\s*navigateDrawingFit\(null\)\s*:\s*navigateDrawingZoom\(command\)/,
     'Shift+Digit1/2/3 必须分流到已有 RF 全景事务');
+  assert.doesNotMatch(flowCanvas, /drawingZoomKeyCommand/,
+    'FlowCanvas 不得再持第二套缩放键 owner——唯一 owner 在 drawing-camera');
   assert.match(css, /\.drawing-camera-shield\s*\{[^}]*z-index:\s*6[^}]*pointer-events:\s*auto/s);
   assert.doesNotMatch(drawLayer, /drawingZoomKeyRoute|onKeyDownCapture=/,
     'DrawLayer 不得保留第二套缩放键 owner');
 });
 
-test('生产 FlowCanvas 只经唯一 align wrapper 与只读完整计数暴露真实资源生命周期', () => {
+test('align 只有唯一入口在相机钩子，FlowCanvas 与 DrawLayer 不再旁路', () => {
   const flowCanvas = fs.readFileSync(path.resolve('web/src/canvas/FlowCanvas.jsx'), 'utf8');
-  const interactionFixture = fs.readFileSync(path.resolve('tests/fixtures/canvas-acceptance/interaction-data.js'), 'utf8');
-  assert.match(flowCanvas, /const alignDrawingViewport\s*=\s*useCallback\(\(controller,\s*vp\)\s*=>/);
-  assert.equal((flowCanvas.match(/\.alignViewport\(/g) || []).length, 1,
-    '除唯一 wrapper 内真实调用外不得绕过计数直接 align');
-  assert.equal((flowCanvas.match(/alignDrawingViewport\(/g) || []).length, 3,
-    'opening、尾部、suspended exit 三个生产点必须全部且只能走 wrapper');
-  assert.match(flowCanvas, /cameraAlignCount:\s*drawingViewportAlignCountRef\.current/);
-  assert.doesNotMatch(flowCanvas, /cameraResumeAlignCount|cameraResumeAlignCountRef/,
-    '只读 snapshot 不得继续暴露只统计尾部的误导字段');
-  assert.match(flowCanvas, /pointerAcquisitionCount:\s*pointerAcquisitionCountRef\.current/);
-  assert.match(flowCanvas, /pointerCleanupCount:\s*pointerCleanupCountRef\.current/);
-  assert.match(flowCanvas, /if\s*\(resource\.attach\(\)\)\s*\{\s*pointerAcquisitionCountRef\.current\+\+/s);
-  assert.match(flowCanvas, /if\s*\(resource\?\.cleanup\(\)\)\s*pointerCleanupCountRef\.current\+\+/s);
-  assert.match(interactionFixture, /alignCount:\s*state\?\.cameraAlignCount/);
-  assert.match(interactionFixture, /pointerAcquisitionCount:\s*state\?\.pointerAcquisitionCount/);
-  assert.match(interactionFixture, /pointerCleanupCount:\s*state\?\.pointerCleanupCount/);
-  assert.doesNotMatch(interactionFixture, /resumeAlignCount|cameraResumeAlignCount/);
+  const cameraHook = fs.readFileSync(path.resolve('web/src/canvas/drawing-camera.jsx'), 'utf8');
+  assert.equal((cameraHook.match(/\.alignViewport\(/g) || []).length, 1,
+    '相机钩子内 wrapper 是唯一真实 align 调用点');
+  assert.equal((flowCanvas.match(/\.alignViewport\(/g) || []).length, 0,
+    'FlowCanvas 不得绕过相机钩子直接 align');
+  assert.match(cameraHook, /const alignDrawingViewport\s*=\s*useCallback/);
 });
 
 test('exit 抢占 freezing：未 ready preview 必须清掉，迟到 ready 不得再挂双影', async () => {
@@ -2276,107 +2259,6 @@ test('committed 队列单笔 reject 不推进基线也不毒死后续提交', as
   const final = await recovered;
   assert.equal(attempt, 2);
   assert.deepEqual(final.elements.map(e => [e.id, e.x, e.y]), [['host', 15, 26]]);
-});
-
-test('自动沉底撤销只浮起票据底板与绑定文字，新建及后续元素和文件必须保留', async () => {
-  const beforeElements = [image('photo'), rect('host', 0, 0, 50, 50)];
-  const beforeFiles = { photo: binary('photo') };
-  const writes = [];
-  const queue = createDrawingCommitQueue({ elements: beforeElements, files: beforeFiles }, async snapshot => { writes.push(snapshot); });
-  const after = await queue.submit(base => ({
-    elements: [
-      ...base.elements,
-      rect('zone', 0, 0, 500, 400, { backgroundColor: '#fff', customData: { below: true } }),
-      { id: 'zone-label', type: 'text', containerId: 'zone', customData: { below: true } },
-    ],
-    files: base.files,
-  }));
-  const withLaterContent = await queue.submit(base => ({
-    elements: [...base.elements, rect('unrelated', 560, 0, 30, 30), image('later')],
-    files: { ...base.files, later: binary('later') },
-  }));
-  const ticket = { after: withLaterContent, sunkIds: ['zone'] };
-
-  assert.equal(after.elements.find(element => element.id === 'zone').customData.below, true);
-  const result = await submitAutoSinkUndo(queue, ticket, setDrawingElementPlane);
-  assert.equal(result.restored, true);
-  assert.deepEqual(result.snapshot.elements.map(el => el.id), [
-    'element-photo', 'host', 'zone', 'zone-label', 'unrelated', 'element-later',
-  ]);
-  assert.equal(result.snapshot.elements.find(el => el.id === 'zone').customData.below, false);
-  assert.equal(result.snapshot.elements.find(el => el.id === 'zone-label').customData.below, false);
-  assert.deepEqual(result.snapshot.files, { photo: binary('photo'), later: binary('later') });
-  assert.equal(writes.length, 3);
-});
-
-test('自动沉底撤销在真正出队时判代：后续成功使其失效，后续失败则仍可恢复', async () => {
-  let failNext = false;
-  const queue = createDrawingCommitQueue({ elements: [rect('host', 0, 0, 50, 50)], files: {} }, async () => {
-    if (failNext) {
-      failNext = false;
-      throw new Error('synthetic later failure');
-    }
-  });
-  const after = await queue.submit(base => ({ elements: [...base.elements, rect('zone', 0, 0, 500, 400)], files: base.files }));
-  const later = queue.submit(base => ({ elements: translateDrawingElements(base.elements, ['host'], 5, 0), files: base.files }));
-  const staleUndo = submitAutoSinkUndo(queue, { after, sunkIds: ['zone'] }, setDrawingElementPlane);
-  await later;
-  assert.equal((await staleUndo).restored, false);
-  assert.equal(queue.snapshot().elements.find(el => el.id === 'host').x, 5);
-
-  const afterSecond = await queue.submit(base => ({ elements: [...base.elements, rect('zone-2', 0, 0, 500, 400)], files: base.files }));
-  failNext = true;
-  const failedLater = queue.submit(base => ({ elements: deleteDrawingElement(base.elements, 'host'), files: base.files }));
-  const survivingUndo = submitAutoSinkUndo(queue, { after: afterSecond, sunkIds: ['zone-2'] }, setDrawingElementPlane);
-  await assert.rejects(failedLater, /synthetic later failure/);
-  assert.equal((await survivingUndo).restored, true);
-  assert.equal(queue.snapshot().elements.find(el => el.id === 'zone-2').customData.below, false);
-});
-
-test('撤销持久化失败不推进 committed 队列成功代际', async () => {
-  let writes = 0;
-  const queue = createDrawingCommitQueue({ elements: [rect('host', 0, 0, 50, 50)], files: {} }, async () => {
-    writes++;
-    if (writes === 2) throw new Error('synthetic undo failure');
-  });
-  const after = await queue.submit(base => ({ elements: [...base.elements, rect('zone', 0, 0, 500, 400)], files: base.files }));
-  await assert.rejects(
-    submitAutoSinkUndo(queue, { after, sunkIds: ['zone'] }, setDrawingElementPlane),
-    /synthetic undo failure/,
-  );
-  assert.equal(queue.snapshot(), after);
-});
-
-test('closing paint retry advances only the exact auto-sink ticket generation', () => {
-  const transaction = { kind: 'new' };
-  const advanced = { kind: 'new', originalIds: ['zone'] };
-  const sunk = id => rect(id, 0, 0, 500, 400, { customData: { below: true } });
-  const first = { elements: [sunk('zone'), sunk('other')], files: {} };
-  const ticket = advanceAutoSinkUndoTicket(null, {
-    transaction, commitBase: {}, committed: first, advancedTransaction: advanced, sunkIds: ['zone'],
-  });
-  assert.deepEqual(ticket.sunkIds, ['zone']);
-  assert.equal(ticket.after, first);
-  assert.equal(ticket.transaction, advanced);
-
-  const retried = { elements: [sunk('zone'), { ...sunk('other'), customData: { below: false } }], files: {} };
-  const retryAdvanced = { kind: 'new', originalIds: ['zone'] };
-  const continued = advanceAutoSinkUndoTicket(ticket, {
-    transaction: advanced, commitBase: first, committed: retried, advancedTransaction: retryAdvanced,
-  });
-  assert.equal(continued.after, retried, '同一 closing retry 必须延续票据到新成功代');
-  assert.equal(continued.transaction, retryAdvanced);
-
-  const partialTicket = { ...ticket, sunkIds: ['zone', 'other', 'deleted'] };
-  const partial = advanceAutoSinkUndoTicket(partialTicket, {
-    transaction: advanced, commitBase: first, committed: retried, advancedTransaction: retryAdvanced,
-  });
-  assert.deepEqual(partial.sunkIds, ['zone'], '已手动浮起或删除的 sunkId 不得被重试票据重新接管');
-
-  const other = advanceAutoSinkUndoTicket(ticket, {
-    transaction: {}, commitBase: first, committed: retried, advancedTransaction: {},
-  });
-  assert.equal(other, ticket, '别代事务不得接管票据');
 });
 
 test('4518 只选择 allowlisted production fixture，并拒绝写请求、仓库路径与编码 traversal', () => {

@@ -117,9 +117,8 @@ test('production buildGraph planning includes a board displaced only by collisio
   assert.deepEqual(boardBefore.position, { x: 0, y: 0 });
   assert.ok(boardAfter.position.y > 0);
 
-  const moves = planBatchCarry(before.nodes, after.nodes, {
-    elements: [{ id: 'board-ink', x: 20, y: 20, width: 10, height: 10 }],
-  });
+  const moves = planBatchCarry(before.nodes, after.nodes,
+    [{ id: 'board-ink', x: 20, y: 20, width: 10, height: 10 }]);
   assert.deepEqual(moves.find(move => move.containerId === 'board:b1'), {
     containerId: 'board:b1',
     from: { x: 0, y: 0 },
