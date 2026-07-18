@@ -82,6 +82,7 @@ function InteractionCanvas() {
   );
   const [suite, setSuite] = useState({ status: 'idle', checks: null, details: null });
   const frameTestProbeRef = useRef(null);
+  window.__FIXTURE_PROBE__ = frameTestProbeRef;   // 透视窗必须在声明之后（v23 TDZ 教训）
   const focusRef = useRef(() => {});
   const actionsRef = useRef({});
   const shellRef = useRef(null);

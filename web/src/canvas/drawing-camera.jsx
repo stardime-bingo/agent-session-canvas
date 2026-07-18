@@ -54,8 +54,8 @@ export function useDrawingCamera({
   const clearCameraTiming = useCallback(() => {
     clearTimeout(cameraResumeTimerRef.current);
     cameraResumeTimerRef.current = null;
-    if (cameraRafOneRef.current !== null) cancelAnimationFrame(cameraRafOneRef.current);
-    if (cameraRafTwoRef.current !== null) cancelAnimationFrame(cameraRafTwoRef.current);
+    clearTimeout(cameraRafOneRef.current);
+    clearTimeout(cameraRafTwoRef.current);
     cameraRafOneRef.current = null;
     cameraRafTwoRef.current = null;
   }, []);
@@ -80,6 +80,17 @@ export function useDrawingCamera({
   const alignDrawingViewport = useCallback((controller, vp) =>
     !!(controller && vp && controller.alignViewport(vp)), []);
 
+  // 恢复链不可卡死律：握手全部走定时器（rAF 会在后台/重载荷下整体停摆——实测 1.5s 零 tick），
+  // 外加 400ms 看门狗强制收尾。宁可极端情况下轻微跳变，绝不允许"墨迹消失且永不回来"。
+  const finishResume = useCallback(token => {
+    const ready = drawingCameraStep(cameraStateRef.current, { type: 'resume-ready', token });
+    if (ready === cameraStateRef.current) return;
+    cameraStateRef.current = ready;
+    cameraPendingVpRef.current = null;
+    setEditorVisible(true);
+    setDraftPreview(null);
+  }, [setEditorVisible]);
+
   const scheduleCameraResume = useCallback(() => {
     clearCameraTiming();
     cameraResumeTimerRef.current = setTimeout(() => {
@@ -98,20 +109,11 @@ export function useDrawingCamera({
       const next = drawingCameraStep(cameraStateRef.current, { type: 'resume-aligned', token });
       if (next === cameraStateRef.current) return;
       cameraStateRef.current = next;
-      cameraRafOneRef.current = requestAnimationFrame(() => {
-        cameraRafOneRef.current = null;
-        cameraRafTwoRef.current = requestAnimationFrame(() => {
-          cameraRafTwoRef.current = null;
-          const ready = drawingCameraStep(cameraStateRef.current, { type: 'resume-ready', token });
-          if (ready === cameraStateRef.current) return;
-          cameraStateRef.current = ready;
-          cameraPendingVpRef.current = null;
-          setEditorVisible(true);
-          setDraftPreview(null);
-        });
-      });
+      // 两帧等待近似（对齐后的 Excalidraw 画完再揭幕）+ 看门狗兜底，全部 rAF 无关
+      cameraRafOneRef.current = setTimeout(() => { cameraRafOneRef.current = null; finishResume(token); }, 64);
+      cameraRafTwoRef.current = setTimeout(() => { cameraRafTwoRef.current = null; finishResume(token); }, 400);
     }, CAMERA_TAIL_MS);
-  }, [alignDrawingViewport, clearCameraTiming, drawRef, instRef, setEditorVisible]);
+  }, [alignDrawingViewport, clearCameraTiming, drawRef, finishResume, instRef, setEditorVisible]);
 
   const failCameraFreeze = useCallback((token, message) => {
     const next = drawingCameraStep(cameraStateRef.current, { type: 'preview-error', token });
