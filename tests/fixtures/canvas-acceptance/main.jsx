@@ -16,6 +16,7 @@ import { createCanvasAcceptanceElements } from './fixture-data.js';
 const params = new URLSearchParams(location.search);
 const MODE = params.get('mode') === 'interaction' ? 'interaction' : 'performance';
 const SIZE = Number(params.get('size')) === 800 ? 800 : 300;
+const MOUNT_BUDGET_MS = Object.freeze({ 300: 900, 800: 1600 });
 
 const PAGE_ERRORS = [];
 const CONSOLE_ERRORS = [];
@@ -52,10 +53,14 @@ function PerformanceCanvas() {
       const domCount = document.querySelectorAll('[data-ink-element-id]').length;
       const expected = elements.filter(el => !el.isDeleted).length;
       const mountMs = Math.round(performance.now() - startedRef.current);
-      const pass = domCount === expected && CONSOLE_ERRORS.length === 0 && PAGE_ERRORS.length === 0;
-      const final = { size: SIZE, domCount, expected, mountMs, pass };
+      const budgetMs = MOUNT_BUDGET_MS[SIZE];
+      const pass = domCount === expected && mountMs <= budgetMs
+        && CONSOLE_ERRORS.length === 0 && CONSOLE_WARNINGS.length === 0 && PAGE_ERRORS.length === 0;
+      const final = { size: SIZE, domCount, expected, mountMs, budgetMs, pass };
       probe.status = pass ? 'complete' : 'fail';
       probe.report = final;
+      document.documentElement.dataset.acceptanceStatus = pass ? 'pass' : 'fail';
+      document.documentElement.dataset.acceptanceReport = JSON.stringify(final);
       setReport(final);
       window.dispatchEvent(new CustomEvent('canvas-acceptance-complete', { detail: final }));
     }, 200);

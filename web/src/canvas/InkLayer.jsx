@@ -1,5 +1,5 @@
 /**
- * [INPUT]: 场景文档的 drawing/drawingFiles、选中 id、ink.js 的路径纯函数；@xyflow/react 的 ViewportPortal
+ * [INPUT]: 场景文档的 drawing/drawingFiles、选中 ids、ink.js/ink-selection.js 纯函数；@xyflow/react 的 ViewportPortal
  * [OUTPUT]: 对外提供 InkLayer——把元素直接渲染成 SVG（沉/浮两平面），与卡片共用唯一 RF 相机；
  *           每个元素带 data-ink-element-id（承载桥/命中共用），选中元素画选择环
  * [POS]: canvas 的自研墨迹渲染层。没有导出、没有帧、没有交接——React 渲染就是全部管线，
@@ -8,8 +8,9 @@
  */
 import React, { memo } from 'react';
 import { ViewportPortal } from '@xyflow/react';
-import { committedDrawingElements, drawingBounds } from './drawing.js';
+import { committedDrawingElements } from './drawing.js';
 import { arrowPath, diamondPath, freedrawPath, INK_FONT } from './ink.js';
+import { selectionBounds, selectionHandlePoints } from './ink-selection.js';
 
 const fill = el => el.backgroundColor && el.backgroundColor !== 'transparent' ? el.backgroundColor : 'none';
 const rotation = el => el.angle
@@ -67,34 +68,41 @@ const InkPlane = memo(function InkPlane({ elements, files, name }) {
   );
 });
 
-// 选择环：贴着元素包围盒的呼吸描边——选中态一眼可见，双击提示文字编辑
-function SelectionRing({ element }) {
-  if (!element) return null;
-  const b = drawingBounds([element]);
+// 同一选择框承载单选/多选、八向缩放与旋转；命中仍由 InkTools 的 flow 几何负责。
+function SelectionRing({ elements, selectedIds }) {
+  const b = selectionBounds(elements, selectedIds);
   if (!b) return null;
   const pad = 6;
+  const box = { minX: b.minX - pad, minY: b.minY - pad, maxX: b.maxX + pad, maxY: b.maxY + pad };
+  const handles = selectionHandlePoints(b);
   return (
     <svg style={{ position: 'absolute', left: 0, top: 0, overflow: 'visible', pointerEvents: 'none' }}
       width="1" height="1" aria-hidden="true">
-      <rect x={b.minX - pad} y={b.minY - pad} width={b.maxX - b.minX + pad * 2} height={b.maxY - b.minY + pad * 2}
-        fill="none" stroke="#155eef" strokeWidth={1.5} strokeDasharray="6 4" rx={6} />
+      <rect x={box.minX} y={box.minY} width={box.maxX - box.minX} height={box.maxY - box.minY}
+        fill="none" stroke="#155eef" strokeWidth={1.5} rx={4} vectorEffect="non-scaling-stroke" />
+      <line x1={handles.n[0]} y1={handles.n[1]} x2={handles.rotate[0]} y2={handles.rotate[1]}
+        stroke="#155eef" strokeWidth={1.25} vectorEffect="non-scaling-stroke" />
+      {Object.entries(handles).map(([handle, [x, y]]) => (
+        <circle key={handle} data-ink-handle={handle} cx={x} cy={y} r={handle === 'rotate' ? 4.5 : 4}
+          fill="#fff" stroke="#155eef" strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
+      ))}
     </svg>
   );
 }
 
-export default function InkLayer({ elements, files, selectedId, hideIds }) {
+export default function InkLayer({ elements, files, selectedId, selectedIds, hideIds }) {
   const alive = committedDrawingElements(elements);
   const hidden = hideIds?.size ? alive.filter(el => !hideIds.has(el.id)) : alive;
   const below = hidden.filter(el => el.customData?.below);
   const above = hidden.filter(el => !el.customData?.below);
-  const selected = selectedId ? alive.find(el => el.id === selectedId) : null;
+  const selection = selectedIds || (selectedId ? [selectedId] : []);
   return (
     <ViewportPortal>
       {/* 沉层垫底：zIndex 由 DOM 顺序天然决定——portal 内容先于节点渲染即在下方 */}
       <div className="ink-world" data-ink-native="true" style={{ pointerEvents: 'none' }}>
         <InkPlane elements={below} files={files} name="below" />
         <InkPlane elements={above} files={files} name="above" />
-        <SelectionRing element={selected} />
+        <SelectionRing elements={alive} selectedIds={selection} />
       </div>
     </ViewportPortal>
   );

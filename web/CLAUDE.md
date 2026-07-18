@@ -2,7 +2,7 @@
 > L2 | 父级: ../CLAUDE.md
 
 React Flow 画布前端。**岛屿架构（v15）：画布即世界满屏铺底，一切 UI 都是漂浮岛（.island 同族皮肤）**——
-左=导航岛(品牌/搜索/过滤/清单)、顶中=常驻画布工具岛(选绘图/画笔激活后 Excalidraw 工具栏进驻上方)、右上=动作岛、右=详情岛。
+左=导航岛(品牌/搜索/过滤/清单)、顶中=常驻画布工具岛(选择/画笔/形状/箭头/文字)、右上=动作岛、右=详情岛。
 Dify 浅色基因：Dify 蓝 #155eef 锚点，Claude 橙 / Codex 青绿作工具身份色。
 
 **v19 自研墨迹（2026-07-18）**：Excalidraw 整体拆除，绘画=ink 三件套直写场景文档，单表征单相机。
@@ -45,10 +45,11 @@ src/canvas/FlowCanvas.jsx: 画布引擎总装（≤1000 行）——统一容器
   容器承载=乐观拖动+DOM 桥跟随+松手一次 mutate+帧追上撤桥（Escape 取消弹回）、applyArrange 同步规划一次 mutate、
   普通模式绘图命中（pane/一切节点同一条河、HIT_BLOCK 功能件排除、节点上只认浮层/pane 先浮后沉、
   待选态封闭形状内部热区）、右键沉浮/删除（可 undo）、落空连线选择菜单、连接点缩放感知、
-  世界装配 world={doc.drawing, files, excludedIds, seq} 交 InkWorldLayer、4518 只读探针 seam
+  世界装配 doc.drawing/drawingFiles 交 InkLayer、4518 只读动作探针 seam
 src/canvas/ink.js: 自研墨迹模型纯函数——freedraw 中点贝塞尔路径/箭头端头/形状路径/元素工厂/拖画更新(反向拖归一化+亚像素节流)/收笔定稿判废/文字度量/样式常量，node:test 证伪
-src/canvas/InkLayer.jsx: 墨迹渲染层——元素直出 SVG（沉/浮两平面 + 选择环），ViewportPortal 共用唯一 RF 相机，每元素带 data-ink-element-id 供承载桥；没有导出没有帧
-src/canvas/InkTools.jsx: 墨迹交互层 useInkTools——工具状态/输入捕获层(笔形状箭头文字拖画即 coalesce mutate)/就地文字 textarea/选中移动删除/样式岛(描边/填充/线宽/沉浮/删除)；armed 滚轮直改 RF 相机、空格让路原生平移
+src/canvas/ink-selection.js: 选择纯内核——绑定闭包/框选/批量平移删除/八向缩放/旋转/复制 id 重映射，node:test 直接证伪
+src/canvas/InkLayer.jsx: 墨迹渲染层——元素直出 SVG（沉/浮两平面 + 多选框/八手柄/旋转柄），ViewportPortal 共用唯一 RF 相机，每元素带 data-ink-element-id 供承载桥；没有导出没有帧
+src/canvas/InkTools.jsx: 墨迹交互层 useInkTools——拖画/文字击键 coalesce mutate；框选/Shift 多选/批量移动缩放旋转删除改样式、ClipboardEvent 复制粘贴、Alt 拖、V/P/R/O/A/T；armed 滚轮直改 RF 相机、空格让路原生平移
 src/canvas/drawing.js: 墨迹纯几何——命中检测双模(描边带/热区/旋转逆变换/折线段/后画者优先)/精确包围盒/平移删除沉浮不可变变换/大实心底板判定/功能件排除清单，node:test 证伪
 src/canvas/MiniMapInk.jsx: 小地图墨迹层——镜像 minimap svg viewBox，区域底板/批注投进缩略图，纯展示穿透
 src/canvas/container-carry.js: 承载纯规划与 DOM 桥——planBatchCarry(before/after 容器差+锚定)、

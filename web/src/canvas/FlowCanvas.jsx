@@ -3,7 +3,7 @@
  *          layout 纯布局内核、五种自定义节点、menus 菜单构建器、connections 连接点内核、container-carry 承载规划与 DOM 桥
  * [OUTPUT]: 对外提供 FlowCanvas 组件：统一容器模型、弹性生长、拖放改归属、三系统边+手动边、
  *           Figma 式框选/平移/触控板手势、滚轮双模、容器缩放定桩、落空连线选择、缩放感知连接点、
- *           自研墨迹（笔迹/形状/箭头/文字直写文档、选中/移动/删除/样式岛、大底板自动沉层）、
+ *           自研墨迹（直写文档、框选/多选/复制、缩放/旋转、样式岛、大底板自动沉层）、
  *           容器承载=乐观拖动+一次 mutate、整理动效、普通模式绘图命中与删除治理
  * [POS]: canvas 的画布引擎总装。单一世界单一相机：墨迹与卡片同住 RF viewport，
  *        文档变更到像素可见=一次 React commit——没有导出、没有帧、没有交接
@@ -148,7 +148,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   const enterInkSelection = hit => {
     ink.setTool('select');
     ink.setSelectedId(hit.id);
-    toast('已选中绘图——拖动移动，Delete 删除，Esc 返回');
+    toast('已选中绘图——可拖动、缩放、旋转，Shift 加选');
   };
 
   const drawingMenuItems = hit => [
@@ -656,17 +656,20 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
         docSeq: store.get().seq,
         tool: ink.tool,
         selectedId: ink.selectedId,
+        selectedIds: ink.selectedIds,
         inkDomCount: rootRef.current?.querySelectorAll('[data-ink-element-id]').length ?? 0,
       }),
       setTool: t => ink.setTool(t),
       setSelectedId: id => ink.setSelectedId(id),
+      setSelectedIds: ids => ink.setSelectedIds(ids),
       mutateDrawing: fn => mutateDrawing(fn),
+      flowToScreen: point => instRef.current?.flowToScreenPosition(point),
     };
     frameTestProbeRef.current = probe;
     return () => {
       if (frameTestProbeRef.current === probe) frameTestProbeRef.current = null;
     };
-  }, [frameTestProbeRef, ink.tool, ink.selectedId, mutateDrawing, store]);   // eslint-disable-line react-hooks/exhaustive-deps
+  }, [frameTestProbeRef, ink.tool, ink.selectedId, ink.selectedIds, mutateDrawing, store]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   // 视口记忆：刷新回到上次看的地方，不再被甩回原点
   const initVp = useRef(undefined);
@@ -748,6 +751,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
         elements={canvas.drawing}
         files={canvas.drawingFiles}
         selectedId={ink.selectedId}
+        selectedIds={ink.selectedIds}
       />
       {/* ===== 关系图例：四种线各是什么，一眼即懂（绘图工具激活时让位） ===== */}
       {!inkArmed && <Panel position="bottom-center" style={{ pointerEvents: 'none' }}>
@@ -822,13 +826,13 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       <span className="topbar-sep" />
       <button className={`btn ${ink.tool === 'select' ? 'primary' : 'ghost'}`}
         onClick={() => ink.setTool(ink.tool === 'select' ? 'none' : 'select')}
-        title="选择绘图：点选/拖动移动/Delete 删除/样式岛调整（Esc 返回）">
+        title="选择绘图（V）：框选/Shift 多选/拖动/缩放/旋转/Cmd+C/V/Alt 拖">
         <Icon name="cursor" /> 选择
       </button>
       {ink.toolButtons.map(([t, icon, label]) => (
         <button key={t} className={`btn ${ink.tool === t ? 'primary' : 'ghost'}`}
           onClick={() => ink.setTool(ink.tool === t ? 'none' : t)}
-          title={`${label}（画完继续画，Esc 收起）`}>
+          title={`${label}（${({ freedraw: 'P', rectangle: 'R', ellipse: 'O', arrow: 'A', text: 'T' })[t]}，Esc 收起）`}>
           <Icon name={icon} /> {label}
         </button>
       ))}

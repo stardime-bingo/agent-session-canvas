@@ -711,6 +711,11 @@ div.draw-layer .excalidraw {
   cursor: crosshair; touch-action: none;
 }
 .ink-input-layer.ink-tool-select { cursor: default; }
+.ink-marquee {
+  position: absolute; z-index: 6; pointer-events: none;
+  border: 1px solid var(--accent); background: color-mix(in srgb, var(--accent) 9%, transparent);
+  border-radius: 3px; box-shadow: 0 0 0 1px color-mix(in srgb, #fff 70%, transparent) inset;
+}
 .ink-text-editor {
   position: absolute; z-index: 7; min-width: 30px;
   background: transparent; border: 1.5px dashed #155eef; border-radius: 4px;
@@ -718,6 +723,8 @@ div.draw-layer .excalidraw {
   font-family: var(--sans); white-space: pre; padding: 0;
 }
 .ink-style-island { display: flex; gap: 10px; align-items: center; padding: 8px 12px; }
+.ink-style-sep { width: 1px; height: 18px; background: var(--line); flex: 0 0 1px; }
+.ink-selection-count { color: var(--ink-faint); font: 600 10px/1 var(--sans); white-space: nowrap; }
 .ink-style-island .swatch {
   width: 16px; height: 16px; border-radius: 50%; cursor: pointer;
   border: 2px solid transparent; box-sizing: border-box;

@@ -1,14 +1,17 @@
 /**
- * [INPUT]: scene-store 的 mutate/undo、ink.js 元素工厂与拖画更新、drawing.js 命中/沉浮/删除、gestures.js 滚轮数学、RF instance
- * [OUTPUT]: 对外提供 useInkTools——工具状态 + 输入捕获层（笔/形状/箭头/线/文字拖画即写入文档）+
- *           就地文字编辑 + 选中移动/删除 + 样式岛；armed 期间滚轮直接改 RF 相机（单相机，无冻结无预览）
- * [POS]: canvas 的自研墨迹交互层。每一笔从第一毫秒起就活在场景文档里，coalesce 保证一笔=一步 undo
- * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
+ * [INPUT]: scene-store、ink.js 元素工厂、ink-selection.js 选择内核、drawing.js 命中、gestures.js 相机数学、RF instance
+ * [OUTPUT]: useInkTools——笔/形状/文字直写文档；单选/框选/多选、批量移动/缩放/旋转/删除/改样式、复制粘贴与 Alt 拖；
+ *           V/P/R/O/A/T 快捷键、就地文字编辑和单相机滚轮
+ * [POS]: canvas 的自研墨迹交互层。每一帧手势只做同步内存 mutate；持久化永远在 scene-store 后台
+ * [PROTOCOL]: 变更时更新此头部，然后检查 web/CLAUDE.md
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { isLargeFilledDrawingElement } from './drawing.js';
 import {
-  deleteDrawingElement, isLargeFilledDrawingElement, setDrawingElementPlane, translateDrawingElements,
-} from './drawing.js';
+  deleteDrawingElements, drawingElementsInBox, duplicateDrawingElements, hitSelectionHandle,
+  resizeBoundsFromHandle, resizeSelectedElements, rotateSelectedElements, selectionBounds,
+  selectionClosureIds, setDrawingElementsPlane, translateSelectedElements,
+} from './ink-selection.js';
 import {
   createInkElement, finishInkElement, INK_COLORS, INK_FILLS, INK_FONT, INK_WIDTHS,
   measureInkText, updateInkElementDrag, upsertInkElement,
@@ -20,22 +23,58 @@ const DRAW_TOOLS = [
   ['freedraw', 'pen', '画笔'], ['rectangle', 'board', '矩形'], ['ellipse', 'circle', '椭圆'],
   ['arrow', 'up', '箭头'], ['text', 'edit', '文字'],
 ];
+const TOOL_KEYS = Object.freeze({ v: 'select', p: 'freedraw', r: 'rectangle', o: 'ellipse', a: 'arrow', t: 'text' });
+const CLIPBOARD_MIME = 'application/x-agent-canvas-ink+json';
+const CLIPBOARD_TAG = 'agent-canvas-ink';
+const TEXT_SIZES = [14, 20, 28, 40];
+
+const editableTarget = target => target?.tagName === 'TEXTAREA' || target?.tagName === 'INPUT' || target?.isContentEditable;
+const uniq = ids => [...new Set(ids)];
+const capturePointer = (target, pointerId) => {
+  try { target.setPointerCapture?.(pointerId); } catch { /* 4518 合成 pointer 不属于原生 active pointer */ }
+};
+
+function clipboardPayload(doc, ids) {
+  const closed = new Set(selectionClosureIds(doc.drawing, ids));
+  const elements = doc.drawing.filter(el => closed.has(el.id));
+  const fileIds = new Set(elements.filter(el => el.type === 'image').map(el => el.fileId).filter(Boolean));
+  const files = Object.fromEntries(Object.entries(doc.drawingFiles || {}).filter(([id]) => fileIds.has(id)));
+  return JSON.stringify({ type: CLIPBOARD_TAG, version: 1, elements, files });
+}
+
+function readClipboardPayload(data) {
+  try {
+    const parsed = JSON.parse(data);
+    return parsed?.type === CLIPBOARD_TAG && parsed.version === 1 && Array.isArray(parsed.elements) ? parsed : null;
+  } catch { return null; }
+}
 
 export function useInkTools({ store, instRef, rootRef, hitAt, wheelModeRef, minZoom, maxZoom }) {
-  const [tool, setToolState] = useState('none');       // none | select | freedraw | rectangle | ellipse | diamond | arrow | line | text
-  const [selectedId, setSelectedId] = useState(null);
+  const [tool, setToolState] = useState('none');
+  const [selectedIds, setSelectedIdsState] = useState([]);
   const [style, setStyle] = useState({ strokeColor: '#e2611f', backgroundColor: 'transparent', strokeWidth: 2.5 });
-  const [textEdit, setTextEdit] = useState(null);      // { id, flowX, flowY, fontSize }
+  const [textEdit, setTextEdit] = useState(null);
+  const [marquee, setMarquee] = useState(null);
+  const [spaceHeld, setSpaceHeld] = useState(false);
   const toolRef = useRef(tool);
-  const gestureRef = useRef(null);                     // { kind:'draw'|'move', id, startFx, startFy, moved }
+  const selectedIdsRef = useRef(selectedIds);
+  const gestureRef = useRef(null);
   const spaceRef = useRef(false);
   const wheelStreakRef = useRef(null);
+  const pasteCountRef = useRef(1);
+
+  const setSelectedIds = useCallback(ids => {
+    const next = uniq(ids || []);
+    selectedIdsRef.current = next;
+    setSelectedIdsState(next);
+  }, []);
+  const setSelectedId = useCallback(id => setSelectedIds(id ? [id] : []), [setSelectedIds]);
 
   const setTool = useCallback(next => {
     toolRef.current = next;
     setToolState(next);
-    if (next === 'none') setSelectedId(null);
-  }, []);
+    if (next === 'none') setSelectedIds([]);
+  }, [setSelectedIds]);
 
   const flowPoint = useCallback(e => instRef.current?.screenToFlowPosition({ x: e.clientX, y: e.clientY }), [instRef]);
   const mutateDrawing = useCallback((fn, options) => store.mutate(doc => {
@@ -43,11 +82,17 @@ export function useInkTools({ store, instRef, rootRef, hitAt, wheelModeRef, minZ
     return drawing === doc.drawing ? doc : { ...doc, drawing };
   }, options), [store]);
 
-  // ---- 空格平移：按住空格时捕获层让路，RF 原生拖拽平移接管 ----
   useEffect(() => {
-    const editable = t => t?.tagName === 'TEXTAREA' || t?.tagName === 'INPUT' || t?.isContentEditable;
-    const onDown = e => { if (e.code === 'Space' && !editable(e.target)) spaceRef.current = true; };
-    const onUp = e => { if (e.code === 'Space') spaceRef.current = false; };
+    const onDown = e => {
+      if (e.code !== 'Space' || editableTarget(e.target)) return;
+      spaceRef.current = true;
+      setSpaceHeld(true);
+    };
+    const onUp = e => {
+      if (e.code !== 'Space') return;
+      spaceRef.current = false;
+      setSpaceHeld(false);
+    };
     window.addEventListener('keydown', onDown, true);
     window.addEventListener('keyup', onUp, true);
     return () => {
@@ -56,11 +101,10 @@ export function useInkTools({ store, instRef, rootRef, hitAt, wheelModeRef, minZ
     };
   }, []);
 
-  // ---- 文字编辑：开一块与画布同倍率的 textarea，击键直写文档 ----
   const openTextEditor = useCallback(element => {
     setSelectedId(element.id);
     setTextEdit({ id: element.id, fontSize: element.fontSize || 20 });
-  }, []);
+  }, [setSelectedId]);
 
   const closeTextEditor = useCallback(() => {
     const edit = textEdit;
@@ -69,28 +113,69 @@ export function useInkTools({ store, instRef, rootRef, hitAt, wheelModeRef, minZ
     store.endCoalescing();
     const el = store.get().drawing.find(item => item.id === edit.id);
     if (el && !String(el.text || '').trim()) {
-      mutateDrawing(els => deleteDrawingElement(els, edit.id), { history: false });
+      mutateDrawing(els => deleteDrawingElements(els, [edit.id]), { history: false });
       setSelectedId(null);
     }
-  }, [textEdit, store, mutateDrawing]);
+  }, [textEdit, store, mutateDrawing, setSelectedId]);
 
-  // ---- 主手势：落笔即元素，拖画即 mutate（coalesce 一笔一步），收笔定稿 ----
+  const beginSelectGesture = useCallback((e, p) => {
+    const currentIds = selectedIdsRef.current;
+    const elements = store.get().drawing;
+    const bounds = selectionBounds(elements, currentIds);
+    const zoom = instRef.current?.getZoom() || 1;
+    const handle = bounds && hitSelectionHandle(bounds, p.x, p.y, 10 / zoom, 28);
+    if (handle) {
+      const coalesce = `ink-${handle}:${Date.now()}`;
+      store.endCoalescing();
+      if (handle === 'rotate') {
+        const cx = (bounds.minX + bounds.maxX) / 2, cy = (bounds.minY + bounds.maxY) / 2;
+        gestureRef.current = {
+          kind: 'rotate', ids: currentIds, original: elements, bounds, cx, cy,
+          startAngle: Math.atan2(p.y - cy, p.x - cx), coalesce,
+        };
+      } else {
+        gestureRef.current = { kind: 'resize', ids: currentIds, original: elements, bounds, handle, coalesce };
+      }
+      capturePointer(e.currentTarget, e.pointerId);
+      return;
+    }
+
+    const hit = hitAt(p.x, p.y, 'all', true);
+    if (hit) {
+      if (e.shiftKey) {
+        setSelectedIds(currentIds.includes(hit.id)
+          ? currentIds.filter(id => id !== hit.id)
+          : [...currentIds, hit.id]);
+        return;
+      }
+      const ids = currentIds.includes(hit.id) ? currentIds : [hit.id];
+      setSelectedIds(ids);
+      store.endCoalescing();
+      gestureRef.current = {
+        kind: 'move', ids, lastFx: p.x, lastFy: p.y, moved: false,
+        alt: e.altKey, cloned: false, coalesce: `ink-move:${Date.now()}`,
+      };
+      capturePointer(e.currentTarget, e.pointerId);
+      return;
+    }
+
+    const baseIds = e.shiftKey ? currentIds : [];
+    if (!e.shiftKey) setSelectedIds([]);
+    gestureRef.current = {
+      kind: 'marquee', startFx: p.x, startFy: p.y, lastFx: p.x, lastFy: p.y,
+      startX: e.clientX, startY: e.clientY, baseIds,
+    };
+    setMarquee({ x1: e.clientX, y1: e.clientY, x2: e.clientX, y2: e.clientY });
+    capturePointer(e.currentTarget, e.pointerId);
+  }, [hitAt, instRef, setSelectedIds, store]);
+
   const onPointerDown = useCallback(e => {
     if (!e.isPrimary || e.button !== 0 || spaceRef.current) return;
     const active = toolRef.current;
     const p = flowPoint(e);
     if (!p) return;
     if (textEdit) closeTextEditor();
-
-    if (active === 'select') {
-      const hit = hitAt(p.x, p.y, 'all', true);
-      setSelectedId(hit?.id || null);
-      if (hit) {
-        gestureRef.current = { kind: 'move', id: hit.id, lastFx: p.x, lastFy: p.y, moved: false };
-        e.currentTarget.setPointerCapture?.(e.pointerId);
-      }
-      return;
-    }
+    if (active === 'select') return beginSelectGesture(e, p);
     if (active === 'text') {
       const element = createInkElement('text', p.x, p.y, { ...style, fontSize: 20 });
       mutateDrawing(els => upsertInkElement(els, element), { coalesce: `ink:${element.id}` });
@@ -100,19 +185,43 @@ export function useInkTools({ store, instRef, rootRef, hitAt, wheelModeRef, minZ
     const element = createInkElement(active, p.x, p.y, style);
     gestureRef.current = { kind: 'draw', id: element.id, element, moved: false };
     mutateDrawing(els => upsertInkElement(els, element), { coalesce: `ink:${element.id}` });
-    e.currentTarget.setPointerCapture?.(e.pointerId);
-  }, [flowPoint, hitAt, style, textEdit, closeTextEditor, mutateDrawing, openTextEditor]);
+    capturePointer(e.currentTarget, e.pointerId);
+  }, [flowPoint, textEdit, closeTextEditor, beginSelectGesture, style, mutateDrawing, openTextEditor]);
 
   const onPointerMove = useCallback(e => {
     const gesture = gestureRef.current;
     if (!gesture) return;
     const p = flowPoint(e);
     if (!p) return;
+    if (gesture.kind === 'marquee') {
+      gesture.lastFx = p.x; gesture.lastFy = p.y;
+      setMarquee({ x1: gesture.startX, y1: gesture.startY, x2: e.clientX, y2: e.clientY });
+      return;
+    }
     if (gesture.kind === 'move') {
       const dx = p.x - gesture.lastFx, dy = p.y - gesture.lastFy;
       if (!dx && !dy) return;
+      if (gesture.alt && !gesture.cloned) {
+        const copied = duplicateDrawingElements(store.get().drawing, gesture.ids, { dx: 0, dy: 0 });
+        gesture.ids = copied.ids;
+        gesture.cloned = true;
+        setSelectedIds(copied.ids);
+        mutateDrawing(() => copied.elements, { coalesce: gesture.coalesce });
+      }
       gesture.lastFx = p.x; gesture.lastFy = p.y; gesture.moved = true;
-      mutateDrawing(els => translateDrawingElements(els, [gesture.id], dx, dy), { coalesce: `ink-move:${gesture.id}` });
+      mutateDrawing(els => translateSelectedElements(els, gesture.ids, dx, dy), { coalesce: gesture.coalesce });
+      return;
+    }
+    if (gesture.kind === 'resize') {
+      const target = resizeBoundsFromHandle(gesture.bounds, gesture.handle, p.x, p.y, 8 / (instRef.current?.getZoom() || 1));
+      mutateDrawing(() => resizeSelectedElements(gesture.original, gesture.ids, gesture.bounds, target), { coalesce: gesture.coalesce });
+      return;
+    }
+    if (gesture.kind === 'rotate') {
+      const angle = Math.atan2(p.y - gesture.cy, p.x - gesture.cx);
+      mutateDrawing(() => rotateSelectedElements(
+        gesture.original, gesture.ids, gesture.bounds, angle - gesture.startAngle,
+      ), { coalesce: gesture.coalesce });
       return;
     }
     const updated = updateInkElementDrag(gesture.element, p.x, p.y);
@@ -120,24 +229,32 @@ export function useInkTools({ store, instRef, rootRef, hitAt, wheelModeRef, minZ
     gesture.element = updated;
     gesture.moved = true;
     mutateDrawing(els => upsertInkElement(els, updated), { coalesce: `ink:${gesture.id}` });
-  }, [flowPoint, mutateDrawing]);
+  }, [flowPoint, instRef, mutateDrawing, setSelectedIds, store]);
 
   const onPointerUp = useCallback(() => {
     const gesture = gestureRef.current;
     gestureRef.current = null;
     if (!gesture) return;
+    if (gesture.kind === 'marquee') {
+      setMarquee(null);
+      const hitIds = drawingElementsInBox(store.get().drawing, {
+        minX: gesture.startFx, minY: gesture.startFy, maxX: gesture.lastFx, maxY: gesture.lastFy,
+      });
+      setSelectedIds([...gesture.baseIds, ...hitIds]);
+      return;
+    }
     store.endCoalescing();
-    if (gesture.kind === 'move') return;
+    if (gesture.kind !== 'draw') return;
     const { element, discard } = finishInkElement(gesture.element);
     if (discard) {
-      mutateDrawing(els => deleteDrawingElement(els, element.id), { history: false });
+      mutateDrawing(els => deleteDrawingElements(els, [element.id]), { history: false });
       return;
     }
     let sunk = false;
     mutateDrawing(els => {
       let next = upsertInkElement(els, element);
-      if (isLargeFilledDrawingElement(element)) {   // 大块实心底板自动沉层，不挡卡片点击
-        next = setDrawingElementPlane(next, element.id, true);
+      if (isLargeFilledDrawingElement(element)) {
+        next = setDrawingElementsPlane(next, [element.id], true);
         sunk = true;
       }
       return next;
@@ -145,13 +262,11 @@ export function useInkTools({ store, instRef, rootRef, hitAt, wheelModeRef, minZ
     store.endCoalescing();
     if (sunk) {
       toast('大块底板已自动沉到卡片下面', 'ok', {
-        label: '撤销',
-        onClick: () => mutateDrawing(els => setDrawingElementPlane(els, element.id, false)),
+        label: '撤销', onClick: () => mutateDrawing(els => setDrawingElementsPlane(els, [element.id], false)),
       });
     }
-  }, [store, mutateDrawing]);
+  }, [mutateDrawing, setSelectedIds, store]);
 
-  // ---- armed 期间滚轮：直接改 RF 相机（触控板平移/捏合与鼠标缩放同一套数学），单相机无冻结 ----
   const onWheel = useCallback(e => {
     const inst = instRef.current;
     const root = rootRef.current;
@@ -166,28 +281,77 @@ export function useInkTools({ store, instRef, rootRef, hitAt, wheelModeRef, minZ
     inst.setViewport(result.viewport);
   }, [instRef, rootRef, wheelModeRef, minZoom, maxZoom]);
 
-  // ---- 键盘：Esc 收工具/取消选中；Delete 删选中（文字编辑中不劫持） ----
   useEffect(() => {
-    if (tool === 'none') return;
     const onKey = e => {
-      const t = e.target;
-      if (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable) return;
-      if (e.key === 'Escape') {
-        if (textEdit) { closeTextEditor(); return; }
-        if (selectedId) { setSelectedId(null); return; }
-        setTool('none');
-      } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedId) {
+      if (editableTarget(e.target)) return;
+      if (!e.metaKey && !e.ctrlKey && !e.altKey) {
+        const shortcut = TOOL_KEYS[e.key.toLowerCase()];
+        if (shortcut) {
+          e.preventDefault();
+          e.stopPropagation();
+          setTool(shortcut);
+          return;
+        }
+      }
+      if (e.key === 'Escape' && toolRef.current !== 'none') {
         e.preventDefault();
-        mutateDrawing(els => deleteDrawingElement(els, selectedId));
-        setSelectedId(null);
-        toast('绘图已删除', 'ok', { label: '撤销', onClick: () => store.undo() });
+        e.stopPropagation();
+        if (textEdit) return closeTextEditor();
+        if (selectedIdsRef.current.length) return setSelectedIds([]);
+        setTool('none');
+        return;
+      }
+      if ((e.key === 'Delete' || e.key === 'Backspace') && toolRef.current === 'select' && selectedIdsRef.current.length) {
+        e.preventDefault();
+        e.stopPropagation();
+        const removed = selectedIdsRef.current;
+        mutateDrawing(els => deleteDrawingElements(els, removed));
+        setSelectedIds([]);
+        toast(removed.length > 1 ? `已删除 ${removed.length} 个绘图` : '绘图已删除', 'ok', {
+          label: '撤销', onClick: () => store.undo(),
+        });
       }
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [tool, selectedId, textEdit, closeTextEditor, mutateDrawing, setTool, store]);
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [closeTextEditor, mutateDrawing, setSelectedIds, setTool, store, textEdit]);
 
-  // ---- 双击文字进入编辑（select 模式）----
+  useEffect(() => {
+    const onCopy = e => {
+      if (editableTarget(e.target) || toolRef.current !== 'select' || !selectedIdsRef.current.length) return;
+      const payload = clipboardPayload(store.get(), selectedIdsRef.current);
+      e.clipboardData?.setData(CLIPBOARD_MIME, payload);
+      e.clipboardData?.setData('text/plain', payload);
+      e.preventDefault();
+      pasteCountRef.current = 1;
+      toast(selectedIdsRef.current.length > 1 ? `已复制 ${selectedIdsRef.current.length} 个绘图` : '已复制绘图');
+    };
+    const onPaste = e => {
+      if (editableTarget(e.target)) return;
+      const raw = e.clipboardData?.getData(CLIPBOARD_MIME) || e.clipboardData?.getData('text/plain');
+      const payload = readClipboardPayload(raw);
+      if (!payload) return;
+      e.preventDefault();
+      const offset = 24 * pasteCountRef.current++;
+      const sourceIds = payload.elements.map(el => el.id).filter(Boolean);
+      const copied = duplicateDrawingElements(payload.elements, sourceIds, { dx: offset, dy: offset });
+      store.mutate(doc => ({
+        ...doc,
+        drawing: [...doc.drawing.filter(el => !el.isDeleted), ...copied.clones],
+        drawingFiles: { ...(payload.files || {}), ...doc.drawingFiles },
+      }));
+      setTool('select');
+      setSelectedIds(copied.ids);
+      toast(copied.ids.length > 1 ? `已粘贴 ${copied.ids.length} 个绘图` : '已粘贴绘图', 'ok');
+    };
+    window.addEventListener('copy', onCopy);
+    window.addEventListener('paste', onPaste);
+    return () => {
+      window.removeEventListener('copy', onCopy);
+      window.removeEventListener('paste', onPaste);
+    };
+  }, [setSelectedIds, setTool, store]);
+
   const onDoubleClick = useCallback(e => {
     if (toolRef.current !== 'select') return;
     const p = flowPoint(e);
@@ -195,14 +359,14 @@ export function useInkTools({ store, instRef, rootRef, hitAt, wheelModeRef, minZ
     if (hit?.type === 'text') openTextEditor(hit);
   }, [flowPoint, hitAt, openTextEditor]);
 
-  // ---- 覆盖层与就地文字编辑器 ----
   const editingEl = textEdit ? store.get().drawing.find(el => el.id === textEdit.id) : null;
   const vp = textEdit ? instRef.current?.getViewport() : null;
+  const rootRect = marquee ? rootRef.current?.getBoundingClientRect() : null;
   const overlay = tool !== 'none' ? (
     <>
       <div
         className={`ink-input-layer${tool === 'select' ? ' ink-tool-select' : ''}`}
-        style={spaceRef.current ? { pointerEvents: 'none' } : undefined}
+        style={spaceHeld ? { pointerEvents: 'none' } : undefined}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
@@ -210,6 +374,14 @@ export function useInkTools({ store, instRef, rootRef, hitAt, wheelModeRef, minZ
         onWheel={onWheel}
         onDoubleClick={onDoubleClick}
       />
+      {marquee && rootRect && (
+        <div className="ink-marquee" style={{
+          left: Math.min(marquee.x1, marquee.x2) - rootRect.left,
+          top: Math.min(marquee.y1, marquee.y2) - rootRect.top,
+          width: Math.abs(marquee.x2 - marquee.x1),
+          height: Math.abs(marquee.y2 - marquee.y1),
+        }} />
+      )}
       {editingEl && vp && (
         <textarea
           className="ink-text-editor nodrag nowheel"
@@ -237,23 +409,33 @@ export function useInkTools({ store, instRef, rootRef, hitAt, wheelModeRef, minZ
     </>
   ) : null;
 
-  // ---- 样式岛：armed 或选中时在场；改样式=改默认 + 改选中元素 ----
+  const selectedElements = selectedIds
+    .map(id => store.get().drawing.find(el => el.id === id && !el.isDeleted))
+    .filter(Boolean);
   const applyStyle = patch => {
     setStyle(s => ({ ...s, ...patch }));
-    if (selectedId) {
-      mutateDrawing(els => els.map(el => el.id === selectedId ? { ...el, ...patch } : el));
+    if (selectedElements.length) {
+      const ids = new Set(selectionClosureIds(store.get().drawing, selectedIds));
+      mutateDrawing(els => els.map(el => {
+        if (!ids.has(el.id)) return el;
+        if (el.type === 'text' && patch.fontSize) {
+          return { ...el, ...patch, ...measureInkText(el.text || '', patch.fontSize) };
+        }
+        return { ...el, ...patch };
+      }));
     }
   };
-  const selectedEl = selectedId ? store.get().drawing.find(el => el.id === selectedId) : null;
-  const shown = selectedEl || style;
-  const styleIsland = (tool !== 'none' && tool !== 'select') || selectedEl ? (
+  const primary = selectedElements.at(-1);
+  const shown = primary || style;
+  const allBelow = selectedElements.length > 0 && selectedElements.every(el => el.customData?.below);
+  const styleIsland = (tool !== 'none' && tool !== 'select') || selectedElements.length ? (
     <div className="island ink-style-island" data-ink-style-island="true">
       {INK_COLORS.map(c => (
         <span key={c} className={`swatch${shown.strokeColor === c ? ' on' : ''}`}
           style={{ background: c }} title="描边颜色"
           onClick={() => applyStyle({ strokeColor: c })} />
       ))}
-      <span style={{ width: 1, height: 18, background: 'var(--line)' }} />
+      <span className="ink-style-sep" />
       {INK_FILLS.map(f => (
         <span key={f} className={`swatch${(shown.backgroundColor || 'transparent') === f ? ' on' : ''}`}
           style={f === 'transparent'
@@ -262,25 +444,39 @@ export function useInkTools({ store, instRef, rootRef, hitAt, wheelModeRef, minZ
           title={f === 'transparent' ? '无填充' : '填充颜色'}
           onClick={() => applyStyle({ backgroundColor: f })} />
       ))}
-      <span style={{ width: 1, height: 18, background: 'var(--line)' }} />
+      <span className="ink-style-sep" />
       {INK_WIDTHS.map(w => (
         <button key={w} type="button" className={`wbtn${(shown.strokeWidth || 2.5) === w ? ' on' : ''}`}
           title={`线宽 ${w}`} onClick={() => applyStyle({ strokeWidth: w })}>
           <span style={{ width: 14, height: w, borderRadius: 2, background: '#344054' }} />
         </button>
       ))}
-      {selectedEl && (
+      {selectedElements.some(el => el.type === 'text') && (
         <>
-          <span style={{ width: 1, height: 18, background: 'var(--line)' }} />
-          <button type="button" className="wbtn" title={selectedEl.customData?.below ? '浮到卡片上面' : '沉到卡片下面'}
-            onClick={() => mutateDrawing(els => setDrawingElementPlane(els, selectedEl.id, !selectedEl.customData?.below))}>
-            <Icon name={selectedEl.customData?.below ? 'up' : 'down'} size={12} />
+          <span className="ink-style-sep" />
+          {TEXT_SIZES.map(size => (
+            <button key={size} type="button" className={`wbtn${Math.round(primary?.fontSize || 20) === size ? ' on' : ''}`}
+              title={`字号 ${size}`} onClick={() => applyStyle({ fontSize: size })}>{size}</button>
+          ))}
+        </>
+      )}
+      {!!selectedElements.length && (
+        <>
+          <span className="ink-style-sep" />
+          <span className="ink-selection-count">{selectedElements.length > 1 ? `${selectedElements.length} 项` : ''}</span>
+          <button type="button" className="wbtn" title={allBelow ? '浮到卡片上面' : '沉到卡片下面'}
+            onClick={() => mutateDrawing(els => setDrawingElementsPlane(els, selectedIds, !allBelow))}>
+            <Icon name={allBelow ? 'up' : 'down'} size={12} />
           </button>
+          <button type="button" className="wbtn" title="复制（Cmd/Ctrl+C）"
+            onClick={() => document.execCommand?.('copy')}><Icon name="copy" size={12} /></button>
           <button type="button" className="wbtn" title="删除（Delete）"
             onClick={() => {
-              mutateDrawing(els => deleteDrawingElement(els, selectedEl.id));
-              setSelectedId(null);
-              toast('绘图已删除', 'ok', { label: '撤销', onClick: () => store.undo() });
+              mutateDrawing(els => deleteDrawingElements(els, selectedIds));
+              setSelectedIds([]);
+              toast(selectedIds.length > 1 ? `已删除 ${selectedIds.length} 个绘图` : '绘图已删除', 'ok', {
+                label: '撤销', onClick: () => store.undo(),
+              });
             }}>
             <Icon name="trash" size={12} />
           </button>
@@ -290,9 +486,7 @@ export function useInkTools({ store, instRef, rootRef, hitAt, wheelModeRef, minZ
   ) : null;
 
   return {
-    tool, setTool, selectedId, setSelectedId, overlay, styleIsland,
-    toolButtons: DRAW_TOOLS,
-    editingText: !!textEdit,
-    openTextEditor,
+    tool, setTool, selectedId: selectedIds.at(-1) || null, selectedIds, setSelectedId, setSelectedIds,
+    overlay, styleIsland, toolButtons: DRAW_TOOLS, editingText: !!textEdit, openTextEditor,
   };
 }

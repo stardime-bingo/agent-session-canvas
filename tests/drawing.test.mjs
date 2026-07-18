@@ -89,13 +89,21 @@ test('大实心底板判定：宽≥400 高≥300 面积≥120000 且有填充',
   assert.equal(isLargeFilledDrawingElement(rect('hollow', 0, 0, 500, 400)), false);
 });
 
-test('4518 新合同夹具：不派发合成输入、timer 轮询后台可跑', () => {
+test('4518 新合同夹具：合成 input/pointer 只在隔离页驱动真实 FlowCanvas，timer 轮询后台可跑', () => {
   const fixture = fs.readFileSync(path.resolve('tests/fixtures/canvas-acceptance/interaction-data.js'), 'utf8');
-  assert.doesNotMatch(fixture, /dispatchEvent\s*\(|new\s+PointerEvent\s*\(|\.click\s*\(|\.focus\s*\(/,
-    'fixture 不得派发合成输入、程序点击或焦点切换');
+  assert.match(fixture, /new\s+PointerEvent\s*\(/, 'A 组能力必须由 pointer 输入扩链证伪');
+  assert.match(fixture, /new\s+KeyboardEvent\s*\(/, '工具快捷键/Delete 必须由键盘输入证伪');
+  assert.match(fixture, /new\s+ClipboardEvent\s*\(/, '复制粘贴必须走 production clipboard listener');
+  assert.match(fixture, /127\.0\.0\.1:4518|4518/, '合成输入只能存在于 4518 隔离夹具');
   assert.doesNotMatch(fixture, /requestAnimationFrame/,
     '验收轮询必须用 setTimeout——隐藏窗格 rAF 停摆（v23 教训）');
   assert.match(fixture, /data-run-suite/, '必须有可见的手动运行按钮');
+});
+
+test('300/800 直渲性能红线写死进 4518 合同', () => {
+  const fixture = fs.readFileSync(path.resolve('tests/fixtures/canvas-acceptance/main.jsx'), 'utf8');
+  assert.match(fixture, /MOUNT_BUDGET_MS\s*=.*300:\s*900.*800:\s*1600/s);
+  assert.match(fixture, /mountMs\s*<=\s*budgetMs/);
 });
 
 test('4518 静态服务只暴露 allowlist fixture 并拒绝写请求', () => {
