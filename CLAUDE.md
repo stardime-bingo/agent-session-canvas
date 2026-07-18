@@ -12,7 +12,7 @@ hooks/ - Claude Code SessionEnd 接力钩子 (自动生成接力提示词)
 data/ - 运行时产物: scan-cache.json(可丢弃) enrich/canvas/layout/drawing-files.json(珍贵) launch/(临时脚本)
 tests/ - 零依赖 node:test 回归：场景仓 LWW/资产先行、scene-store(合并 undo/防抖冲刷/退避/LWW 采纳)、增量布局/容器缩放、
   滚轮设备判定与缩放数学、绘图命中与选择(框选/闭包/缩放/旋转/复制)、上下文倒序分页；fixtures/canvas-acceptance 是
-  4518 无数据性能(300/800 红线)/交互验收夹具(十三链)；archive/ 存放 v17 事务机器的陪葬测试与旧夹具（归档不删除）
+  4518 无数据性能(300/800 红线)/交互验收夹具(十四链)；archive/ 存放 v17 事务机器的陪葬测试与旧夹具（归档不删除）
 scripts/ - 开源安装、只读诊断、Finder 双击启停薄入口与验收服务；安装脚本按当前 checkout 生成 launchd plist，不写死个人路径；
   serve-canvas-acceptance 只绑 4518、只暴露 allowlist production/fixture dist，拒绝 /api、/data、/@fs、/.git
 plugins/ - Claude Code / Codex 共用的薄插件；统一控制脚本负责安装、诊断、启停、单行 JSON 状态与打开本地实机，stop 保留 plist/data，start 可从保留 plist 恢复注册
@@ -60,7 +60,7 @@ npm run scan         # 仅扫描，输出统计
   渲染=React 直出 SVG（沉层负 z 垫底/浮层高 z 盖顶），与卡片共用唯一 RF 相机——
   没有导出、没有帧、没有交接：文档变更到像素可见=一次 React commit；
   armed 期间滚轮直接改 RF 相机（gestures 数学复用），空格让路 RF 原生平移——单相机，冻结/预览/对齐/握手这一类问题不存在；
-  选择态支持框选/Shift 多选、批量移动/八向缩放/旋转/删除/改样式、Cmd/Ctrl+C/V 与 Alt 拖复制；V/P/R/O/A/T 对齐 Figma 肌肉记忆，
+  选择态支持框选/Shift 多选、批量移动/八向缩放/旋转/删除/改样式、Cmd/Ctrl+C/V 与 Alt 拖复制；图片粘贴/拖入先同步占位，后台 SHA-256 内容寻址并回填既有资产仓；V/P/R/O/A/T 对齐 Figma 肌肉记忆，
   大实心底板收笔自动沉层 + toast 撤销；选择几何集中在 ink-selection.js 纯内核，元素结构沿用旧格式兼容子集，磁盘零迁移
 - **容器承载律 (FigJam/Miro 共识)**: 墨迹中心落在街区/画板内就跟容器走——拖动乐观进行（DOM 桥 CSS 变量跟随），
   松手一次 mutate（容器新位 + 锚定墨迹平移），含平移的世界帧进 DOM 才撤桥，肉眼无缝；

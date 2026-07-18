@@ -48,8 +48,9 @@ src/canvas/FlowCanvas.jsx: 画布引擎总装（≤1000 行）——统一容器
   世界装配 doc.drawing/drawingFiles 交 InkLayer、4518 只读动作探针 seam
 src/canvas/ink.js: 自研墨迹模型纯函数——freedraw 中点贝塞尔路径/箭头端头/形状路径/元素工厂/拖画更新(反向拖归一化+亚像素节流)/收笔定稿判废/文字度量/样式常量，node:test 证伪
 src/canvas/ink-selection.js: 选择纯内核——绑定闭包/框选/批量平移删除/八向缩放/旋转/复制 id 重映射，node:test 直接证伪
+src/canvas/image-import.js: 图片导入边界——同步占位、后台 FileReader/解码/SHA-256 内容 id、有界等比尺寸；迟到读取不能复活已 undo 元素
 src/canvas/InkLayer.jsx: 墨迹渲染层——元素直出 SVG（沉/浮两平面 + 多选框/八手柄/旋转柄），ViewportPortal 共用唯一 RF 相机，每元素带 data-ink-element-id 供承载桥；没有导出没有帧
-src/canvas/InkTools.jsx: 墨迹交互层 useInkTools——拖画/文字击键 coalesce mutate；框选/Shift 多选/批量移动缩放旋转删除改样式、ClipboardEvent 复制粘贴、Alt 拖、V/P/R/O/A/T；armed 滚轮直改 RF 相机、空格让路原生平移
+src/canvas/InkTools.jsx: 墨迹交互层 useInkTools——拖画/文字击键 coalesce mutate；框选/Shift 多选/批量移动缩放旋转删除改样式、ClipboardEvent 复制粘贴、Alt 拖、图片粘贴/拖入、V/P/R/O/A/T；armed 滚轮直改 RF 相机、空格让路原生平移
 src/canvas/drawing.js: 墨迹纯几何——命中检测双模(描边带/热区/旋转逆变换/折线段/后画者优先)/精确包围盒/平移删除沉浮不可变变换/大实心底板判定/功能件排除清单，node:test 证伪
 src/canvas/MiniMapInk.jsx: 小地图墨迹层——镜像 minimap svg viewBox，区域底板/批注投进缩略图，纯展示穿透
 src/canvas/container-carry.js: 承载纯规划与 DOM 桥——planBatchCarry(before/after 容器差+锚定)、

@@ -47,7 +47,19 @@ function InkElement({ el, files }) {
     );
   } else if (el.type === 'image') {
     const url = files?.[el.fileId]?.dataURL;
-    shape = url ? <image href={url} x={el.x} y={el.y} width={el.width} height={el.height} preserveAspectRatio="none" /> : null;
+    shape = url ? (
+      <image href={url} x={el.x} y={el.y} width={el.width} height={el.height} preserveAspectRatio="none" />
+    ) : (
+      <g>
+        <rect x={el.x} y={el.y} width={el.width} height={el.height} rx={10}
+          fill={el.customData?.importError ? '#fef3f2' : '#f2f4f7'} stroke={el.customData?.importError ? '#f97066' : '#98a2b3'}
+          strokeWidth={1.5} strokeDasharray="7 5" />
+        <text x={el.x + el.width / 2} y={el.y + el.height / 2} textAnchor="middle" dominantBaseline="middle"
+          fill={el.customData?.importError ? '#b42318' : '#667085'} stroke="none" fontSize="14" fontFamily={INK_FONT}>
+          {el.customData?.importError ? '图片导入失败' : '正在导入图片…'}
+        </text>
+      </g>
+    );
   }
   if (!shape) return null;
   return (

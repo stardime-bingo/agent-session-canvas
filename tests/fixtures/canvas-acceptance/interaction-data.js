@@ -1,7 +1,7 @@
 /**
  * [INPUT]: 依赖真实 FlowCanvas/scene-store/UIHost 与 4518 synthetic 数据；自研墨迹直渲，无故障注入
- * [OUTPUT]: 无 fetch 全内存交互画布 + 原生墨迹十三链自动验收：冷渲/连发即时/快捷键/框选多选/
- *           批量移动/缩放/旋转/复制粘贴/Alt 拖/删除撤销/后台冲刷；window.__CANVAS_ACCEPTANCE__ 输出报告
+ * [OUTPUT]: 无 fetch 全内存交互画布 + 原生墨迹十四链自动验收：冷渲/连发即时/快捷键/框选多选/
+ *           批量移动/缩放/旋转/复制粘贴/Alt 拖/图片粘贴/删除撤销/后台冲刷；window.__CANVAS_ACCEPTANCE__ 输出报告
  * [POS]: 仅由 ?mode=interaction 动态加载；证伪"文档变更到像素可见=一次 React commit"的宪法
  * [PROTOCOL]: 变更时更新此头部，然后检查 main.jsx/README/web/CLAUDE.md
  */
@@ -202,7 +202,21 @@ function InteractionCanvas() {
       pointer('pointerup', { x: px + 24, y: py + 16 }, { altKey: true });
       checks.altDrag = store.get().drawing.length === beforeAlt + 1 && probe().snapshot().selectedIds.length === 1;
 
-      // 10) Delete + 全画布 undo：生产快捷键删除，store 历史原样复活
+      // 10) 图片粘贴：占位同步出现，内容寻址资产在后台补齐，不阻塞 ClipboardEvent
+      const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='), ch => ch.charCodeAt(0));
+      const imageTransfer = new DataTransfer();
+      imageTransfer.items.add(new File([png], 'fixture.png', { type: 'image/png' }));
+      const filesBefore = Object.keys(store.get().drawingFiles).length;
+      input().dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: imageTransfer }));
+      const placeholder = store.get().drawing.at(-1);
+      const placeholderImmediate = placeholder?.type === 'image' && placeholder.customData?.importing === true && !placeholder.fileId;
+      await waitFor(() => store.get().drawing.find(el => el.id === placeholder.id)?.fileId, 'image content address');
+      const imported = store.get().drawing.find(el => el.id === placeholder.id);
+      checks.imagePaste = placeholderImmediate
+        && Object.keys(store.get().drawingFiles).length === filesBefore + 1
+        && imported.width === 1 && imported.height === 1;
+
+      // 11) Delete + 全画布 undo：生产快捷键删除，store 历史原样复活
       await waitFor(() => dom() === store.get().drawing.length, 'alt clone dom commit');
       const beforeDelete = dom();
       details.delete = {
@@ -223,12 +237,12 @@ function InteractionCanvas() {
       await waitFor(() => dom() === beforeDelete, 'undo revives');
       checks.deleteUndo = true;
 
-      // 11) 后台冲刷：防抖后 persist 收到最终文档，以上输入没有一步等待它
+      // 12) 后台冲刷：防抖后 persist 收到最终文档，以上输入没有一步等待它
       await waitFor(() => flushedRef.current.length > 0, 'background flush', 5000);
       checks.backgroundFlush = flushedRef.current.at(-1).canvas.drawing.some(el => el.id === 'fixture-landmark');
       details.flushCount = flushedRef.current.length;
 
-      // 12) 浏览器原生诊断由 main.jsx 统一收集；套件内也必须保持零错误/零警告
+      // 13) 浏览器原生诊断由 main.jsx 统一收集；套件内也必须保持零错误/零警告
       checks.consoleClean = window.__CANVAS_CONSOLE_ERRORS__.length === 0
         && window.__CANVAS_CONSOLE_WARNINGS__.length === 0
         && window.__CANVAS_PAGE_ERRORS__.length === 0;

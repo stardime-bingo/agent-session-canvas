@@ -16,6 +16,7 @@ import {
   createInkElement, finishInkElement, INK_COLORS, INK_FILLS, INK_FONT, INK_WIDTHS,
   measureInkText, updateInkElementDrag, upsertInkElement,
 } from './ink.js';
+import { createImagePlaceholder, loadImageFile } from './image-import.js';
 import { wheelViewport } from './gestures.js';
 import { Icon, toast } from '../ui.jsx';
 
@@ -117,6 +118,85 @@ export function useInkTools({ store, instRef, rootRef, hitAt, wheelModeRef, minZ
       setSelectedId(null);
     }
   }, [textEdit, store, mutateDrawing, setSelectedId]);
+
+  // 图片交互只同步放占位；读取/哈希/解码完成后 history:false 回填，同一 undo 仍撤整次导入。
+  const importImages = useCallback((fileList, dropPoint = null) => {
+    const files = [...(fileList || [])].filter(file => file?.type?.startsWith('image/'));
+    if (!files.length) return false;
+    let point = dropPoint;
+    if (!point) {
+      const rect = rootRef.current?.getBoundingClientRect();
+      if (rect) point = instRef.current?.screenToFlowPosition({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+    }
+    point ||= { x: 0, y: 0 };
+    const placeholders = files.map((file, index) => createImagePlaceholder(
+      point.x + index * 28, point.y + index * 28, file.name || `图片 ${index + 1}`,
+    ));
+    store.mutate(doc => ({ ...doc, drawing: [...doc.drawing.filter(el => !el.isDeleted), ...placeholders] }));
+    setTool('select');
+    setSelectedIds(placeholders.map(el => el.id));
+    toast(files.length > 1 ? `正在加入 ${files.length} 张图片` : '正在加入图片');
+
+    files.forEach((file, index) => {
+      const placeholder = placeholders[index];
+      void loadImageFile(file).then(asset => {
+        store.mutate(doc => {
+          if (!doc.drawing.some(el => el.id === placeholder.id)) return doc;   // 用户已 undo：迟到读取没有复活权
+          return {
+            ...doc,
+            drawingFiles: { [asset.id]: asset.file, ...doc.drawingFiles },
+            drawing: doc.drawing.map(el => el.id === placeholder.id ? {
+              ...el, fileId: asset.id, width: asset.width, height: asset.height,
+              customData: Object.fromEntries(Object.entries(el.customData || {})
+                .filter(([key]) => key !== 'importing' && key !== 'importError')),
+              updated: Date.now(),
+            } : el),
+          };
+        }, { history: false });
+      }).catch(error => {
+        store.mutate(doc => {
+          if (!doc.drawing.some(el => el.id === placeholder.id)) return doc;
+          return {
+            ...doc,
+            drawing: doc.drawing.map(el => el.id === placeholder.id
+              ? { ...el, customData: { ...el.customData, importing: false, importError: String(error.message || error) } }
+              : el),
+          };
+        }, { history: false });
+        toast(`${file.name || '图片'}导入失败`, 'error');
+      });
+    });
+    return true;
+  }, [instRef, rootRef, setSelectedIds, setTool, store]);
+
+  useEffect(() => {
+    const root = rootRef.current;
+    if (!root) return undefined;
+    const carriesImages = event => [...(event.dataTransfer?.items || [])].some(item => item.kind === 'file' && item.type.startsWith('image/'));
+    const onDragOver = event => {
+      if (!carriesImages(event)) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'copy';
+      root.classList.add('ink-file-over');
+    };
+    const onDragLeave = event => {
+      if (!root.contains(event.relatedTarget)) root.classList.remove('ink-file-over');
+    };
+    const onDrop = event => {
+      root.classList.remove('ink-file-over');
+      const point = instRef.current?.screenToFlowPosition({ x: event.clientX, y: event.clientY });
+      if (importImages(event.dataTransfer?.files, point)) event.preventDefault();
+    };
+    root.addEventListener('dragover', onDragOver);
+    root.addEventListener('dragleave', onDragLeave);
+    root.addEventListener('drop', onDrop);
+    return () => {
+      root.classList.remove('ink-file-over');
+      root.removeEventListener('dragover', onDragOver);
+      root.removeEventListener('dragleave', onDragLeave);
+      root.removeEventListener('drop', onDrop);
+    };
+  }, [importImages, instRef, rootRef]);
 
   const beginSelectGesture = useCallback((e, p) => {
     const currentIds = selectedIdsRef.current;
@@ -328,6 +408,10 @@ export function useInkTools({ store, instRef, rootRef, hitAt, wheelModeRef, minZ
     };
     const onPaste = e => {
       if (editableTarget(e.target)) return;
+      if (importImages(e.clipboardData?.files)) {
+        e.preventDefault();
+        return;
+      }
       const raw = e.clipboardData?.getData(CLIPBOARD_MIME) || e.clipboardData?.getData('text/plain');
       const payload = readClipboardPayload(raw);
       if (!payload) return;
@@ -350,7 +434,7 @@ export function useInkTools({ store, instRef, rootRef, hitAt, wheelModeRef, minZ
       window.removeEventListener('copy', onCopy);
       window.removeEventListener('paste', onPaste);
     };
-  }, [setSelectedIds, setTool, store]);
+  }, [importImages, setSelectedIds, setTool, store]);
 
   const onDoubleClick = useCallback(e => {
     if (toolRef.current !== 'select') return;

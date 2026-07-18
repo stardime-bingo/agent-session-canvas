@@ -5,7 +5,7 @@
 ## 两种模式
 
 - performance：真实 `ReactFlow + InkLayer` 直渲 300/800 元素，要求 DOM 数量完整、console/page error 为零，并守住 900ms/1600ms 挂载红线。
-- interaction：真实 `FlowCanvas + SceneStore + UIHost` 全内存运行十三链：冷渲、连发即时、DOM 同步、V/P 快捷键、框选多选、批量移动、缩放、旋转、复制粘贴、Alt 拖、删除撤销、后台冲刷、console clean。
+- interaction：真实 `FlowCanvas + SceneStore + UIHost` 全内存运行十四链：冷渲、连发即时、DOM 同步、V/P 快捷键、框选多选、批量移动、缩放、旋转、复制粘贴、Alt 拖、图片粘贴、删除撤销、后台冲刷、console clean。
 
 所有轮询使用 `setTimeout`，不依赖隐藏标签页会停摆的 `requestAnimationFrame`。输入先同步进入 SceneStore；验收观察者只等待 React commit 与后台冲刷，不把等待塞回产品交互路径。
 
@@ -29,7 +29,7 @@ python3 tests/fixtures/canvas-acceptance/verify.py --suite canvas
 python3 tests/fixtures/canvas-acceptance/verify.py --suite prod
 ```
 
-`--suite prod` 先以只读 graph/EventSource stub 启动真实 production 入口，再在 fresh context 运行十三链；两段都要求 console error/warning、page error、失败请求、外联与 `/api` 资源为零。
+`--suite prod` 先以只读 graph/EventSource stub 启动真实 production 入口，再在 fresh context 运行十四链；两段都要求 console error/warning、page error、失败请求、外联与 `/api` 资源为零。
 
 隔离闸门：
 
