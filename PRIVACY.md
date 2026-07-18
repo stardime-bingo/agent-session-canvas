@@ -1,6 +1,6 @@
 # Privacy Policy
 
-Last updated: July 14, 2026
+Last updated: July 18, 2026
 
 AGENT Session Canvas is a local-first, open-source macOS application. This policy explains what the application and its companion Claude Code / Codex plugin access and where that information goes.
 
@@ -8,13 +8,13 @@ AGENT Session Canvas is a local-first, open-source macOS application. This polic
 
 The application reads local Claude Code and Codex session files from the current macOS user's home directory to build the session map. It may read session metadata, workspace paths, prompts, assistant messages, tool activity, and errors. The normal scanner uses bounded sections of session files; user-requested AI summaries and handoffs may sample larger sections.
 
-The application stores generated titles, summaries, handoffs, canvas objects, layout positions, configuration, caches, temporary launch scripts, and daemon logs in its local `data/` directory. Browser layout preferences are stored in local browser storage for `localhost:4517`.
+The application stores generated titles, summaries, handoffs, canvas objects, layout positions, content-addressed images pasted or dropped onto the canvas, configuration, caches, temporary launch scripts, and daemon logs in its local `data/` directory. Browser layout preferences are stored in local browser storage for `localhost:4517`.
 
 ## Network and AI processing
 
 The web application and daemon listen only on `127.0.0.1`. The project does not operate a hosted backend, user account system, telemetry service, advertising service, or analytics service.
 
-Scanning, searching, editing the canvas, and launching or resuming a session do not send session content to the project publisher.
+Scanning, searching, editing the canvas, importing canvas images, and launching or resuming a session do not send session content or canvas assets to the project publisher. Canvas edits are written to the local in-memory scene immediately and persisted to the local daemon in the background.
 
 When the user explicitly requests AI naming, summarization, handoff generation, or batch backfill, the application sends extracted session content to a locally installed command-line provider selected in the user's configuration. Supported routes are Codex CLI, Claude Code, and an optional DeepSeek CLI integration. Those providers may transmit the content to their own services and process it under the user's account, provider settings, and provider terms. The publisher of this project does not receive that content.
 

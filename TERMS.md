@@ -1,6 +1,6 @@
 # Terms of Use
 
-Last updated: July 14, 2026
+Last updated: July 18, 2026
 
 By installing or using AGENT Session Canvas, you agree to these terms.
 
@@ -10,7 +10,7 @@ The source code is provided under the [MIT License](./LICENSE). These terms supp
 
 ## Local access and user responsibility
 
-The application is designed to read and organize Claude Code and Codex session data belonging to the current macOS user. You are responsible for having the right to access the files and workspaces you use with it, protecting your device and backups, and reviewing actions before allowing changes to local configuration or data.
+The application is designed to read and organize Claude Code and Codex session data belonging to the current macOS user and to persist user-created canvas objects and imported images locally. You are responsible for having the right to access or import that content, protecting your device and backups, and reviewing actions before allowing changes to local configuration or data.
 
 The application can open terminals, resume agent sessions, and invoke locally installed AI command-line tools. Those actions may execute commands or send extracted content to third-party AI providers under your account. You are responsible for the provider accounts, charges, data settings, and terms that apply to those services.
 

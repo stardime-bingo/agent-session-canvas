@@ -16,7 +16,7 @@ This file is the source copy for an OpenAI Platform skills-only plugin submissio
 
 ### Long description
 
-AGENT Session Canvas turns local Claude Code and Codex history into one interactive workspace map. It groups sessions by project, filters machine noise, preserves manual layout and notes, shows both where a session started and where it stopped, and lets users inspect, resume, summarize, or hand off work from the real local application at `http://localhost:4517`.
+AGENT Session Canvas turns local Claude Code and Codex history into one interactive workspace map. It groups sessions by project, filters machine noise, preserves manual layout, notes, boards, links, and freeform ink, shows both where a session started and where it stopped, and lets users inspect, resume, summarize, or hand off work from the real local application at `http://localhost:4517`. Its dependency-free SVG ink layer shares one camera and one undo history with the session map.
 
 The plugin is a thin, skills-only controller. With an explicit user request, it can install the open-source macOS application, diagnose its local service, start, stop, or restart the launchd daemon, report one-line JSON status, and open the existing interface. Stop is idempotent and preserves both the launchd plist and local data. The plugin does not create a substitute demo page or operate a hosted copy of the user's session map.
 
@@ -103,7 +103,7 @@ The application is local-first and has no publisher-operated account, telemetry,
 
 ## Release notes
 
-Current unreleased changes close the drawing-draft conflict recovery loop with inspect, local JSON export, and identity-safe discard actions; add idempotent start, stop, and JSON status controls plus Finder launchers; and keep Retina SVG visuals aligned with drawing hit geometry.
+Current unreleased changes replace the former third-party drawing transaction stack with a local-first SceneStore and dependency-free SVG ink layer. Selection now supports marquee and Shift multi-select, batch move/resize/rotate/style, copy/paste, Alt-drag duplication, editable text sizes, one-stroke erasing, and image paste/drop with an immediate placeholder and background content addressing. Cards, notes, boards, and ink share one React Flow camera and one undo history; synchronization remains non-blocking and is shown by a quiet status dot.
 
 Version 1.2.0 adds design-tool canvas controls: drag-to-select, Space/middle-button pan, trackpad two-finger pan, pinch zoom, and title-bar-only container moves. Automatic arrange now preserves manual board/district membership and offers immediate Undo or Cmd/Ctrl+Z instead of destructively clearing layout state. It retains the independent session stopping-point view, collision-free incremental layout, BINGOAI publisher metadata, local privacy boundaries, and audited dependency overrides.
 
