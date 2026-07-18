@@ -1,6 +1,7 @@
 /**
- * [INPUT]: 依赖 @excalidraw/excalidraw 与局部事务 elements/files；持久化主权由 FlowCanvas 的全量队列持有
- * [OUTPUT]: 对外提供仅在编辑态挂载的 DrawLayer；维护/flush/freeze 局部 draft、水合后上报本地 journal、上报 IME 周期、在手势跟踪前排除编辑器功能岛、识别新事务单次大底板落笔，并仅在 opening/resume 同步对齐 RF viewport
+ * [INPUT]: 依赖 @excalidraw/excalidraw 与局部事务 elements/files；持久化主权由 scene-store 经 FlowCanvas 连续合并持有
+ * [OUTPUT]: 对外提供仅在编辑态挂载的 DrawLayer；水合握手后把每次稳定 change 上报父层（连续合并源头）、
+ *           上报 IME 周期、在手势跟踪前排除编辑器功能岛、识别新事务单次大底板落笔、opening/resume 同步对齐 RF viewport
  * [POS]: 临时目标事务编辑器；绝不直接保存局部副本，普通态与未选目标始终不挂载
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -12,7 +13,7 @@ import {
   setDrawingElementPlane, translateDrawingElements,
 } from './drawing.js';
 
-export default forwardRef(function DrawLayer({ active, visible = true, initialElements, initialFiles, autoExitLargeNew = false, onToolChange, onReady, onDraftChange, onDraftLocalFlush, onExitToCanvas, onAutoExitLargeNew, onCompositionChange }, ref) {
+export default forwardRef(function DrawLayer({ active, visible = true, initialElements, initialFiles, autoExitLargeNew = false, onToolChange, onReady, onDraftChange, onExitToCanvas, onAutoExitLargeNew, onCompositionChange }, ref) {
   const apiRef = useRef(null);
   const rootRef = useRef(null);
   const composingRef = useRef(false);
@@ -57,18 +58,6 @@ export default forwardRef(function DrawLayer({ active, visible = true, initialEl
     if (autoExitRafRef.current !== null) cancelAnimationFrame(autoExitRafRef.current);
     autoExitRafRef.current = requestAnimationFrame(frame);
   };
-
-  // 关标签页/切后台只 flush 同源本地 journal；绝不在尾窗发网络请求。
-  useEffect(() => {
-    const onHide = () => onDraftLocalFlush?.();
-    const onVisibility = () => { if (document.visibilityState === 'hidden') onHide(); };
-    window.addEventListener('pagehide', onHide);
-    document.addEventListener('visibilitychange', onVisibility);
-    return () => {
-      window.removeEventListener('pagehide', onHide);
-      document.removeEventListener('visibilitychange', onVisibility);
-    };
-  }, [onDraftLocalFlush]);
 
   useEffect(() => {
     if (!active || !visible || !autoExitLargeNew) cancelAutoExit();

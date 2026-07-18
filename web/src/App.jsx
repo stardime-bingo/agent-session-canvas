@@ -1,17 +1,15 @@
 /**
- * [INPUT]: 依赖 api 的数据通道、canvas/FlowCanvas 画布、panels 三件套、ui 的 UIHost/toast
- * [OUTPUT]: 对外提供 App 根组件：全局状态、过滤管道、SSE 订阅、岛屿布局（含绘图属性面板动态让位）、
- *           production buildGraph 同步规划且以 batch carry 原子提交的整理/单步撤销事务、带未知权威屏障的单一串行写队列与响应丢失 receipt 的 sceneToken 接管、落空连线原子动作分发、
- *           committed 绘图 elements/files 原子回写、画布终端框开合
- * [POS]: web 的总装线——数据如河流单向流动：graph → 过滤 → 画布/面板
+ * [INPUT]: 依赖 api 的数据通道、scene-store 的场景真相源、canvas/FlowCanvas 画布、panels 三件套、ui 的 UIHost/toast
+ * [OUTPUT]: 对外提供 App 根组件：全局状态、过滤管道、SSE 订阅（地形举旗 + 场景回声采纳）、
+ *           岛屿布局、对象动作分发（全部同步 mutate）、整理与全画布 undo、画布终端框开合
+ * [POS]: web 的总装线——数据如河流单向流动：地形 graph + 场景 doc → 过滤 → 画布/面板；
+ *        一切写动作同步进 store，磁盘由 store 后台冲刷，交互路径零等待
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
-import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
-import { flushSync } from 'react-dom';
-import { api, commitDrawingWithReceipt, subscribeEvents } from './api.js';
+import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { api, subscribeEvents, WRITER_ID } from './api.js';
+import { createSceneStore } from './scene-store.js';
 import FlowCanvas from './canvas/FlowCanvas.jsx';
-import { createSceneMutationQueue, executeBatchArrange } from './canvas/container-carry.js';
-import { drawingFilesDelta } from './canvas/drawing.js';
 import { tidyLayoutEntries } from './canvas/layout.js';
 import TopBar from './panels/TopBar.jsx';
 import Sidebar from './panels/Sidebar.jsx';
@@ -27,22 +25,68 @@ const DEFAULT_FILTERS = () => ({
 });
 const layoutFromEntries = entries => Object.fromEntries(entries.map(({ path, ...entry }) => [path, entry]));
 
+// 布局条目字段合并：x/y/d/w/h 只更新送来的（w/h 支撑容器手动调尺寸）
+const pickLayout = (src, prev) => {
+  const out = { ...prev };
+  for (const k of ['x', 'y', 'd', 'w', 'h']) if (src[k] !== undefined) out[k] = src[k];
+  return out;
+};
+
+// 落空连线：对象与手动边同一次 mutate，同生同灭
+function nodeFromEdge(doc, body, now = Date.now()) {
+  const x = Math.round(Number(body.x) || 0);
+  const y = Math.round(Number(body.y) || 0);
+  const node = body.kind === 'note'
+    ? { id: `note:${now}`, x, y: y - 40, text: '', color: 'yellow' }
+    : { id: `${now}`, x, y: y - 30, w: 520, h: 360, name: '新画板', color: 'blue' };
+  const target = body.kind === 'note' ? node.id : `board:${node.id}`;
+  return {
+    ...doc,
+    notes: body.kind === 'note' ? [...doc.notes, node] : doc.notes,
+    boards: body.kind === 'board' ? [...doc.boards, node] : doc.boards,
+    edges: [...doc.edges, { id: `manual:${now}`, from: body.from, to: target }],
+  };
+}
+
 export default function App() {
-  const [graph, setGraph] = useState(null);
+  const [graph, setGraph] = useState(null);            // 地形：sessions/workspaces/系统边/stats
   const [live, setLive] = useState(false);
-  const [pending, setPending] = useState(false);   // 有新活动但不打断用户：举旗，不抢方向盘
+  const [pending, setPending] = useState(false);       // 有新活动但不打断用户：举旗，不抢方向盘
   const [selectedKey, setSelectedKey] = useState(null);
-  const [ctxFrame, setCtxFrame] = useState(null);   // 画布终端框 {key, x, y}
+  const [ctxFrame, setCtxFrame] = useState(null);      // 画布终端框 {key, x, y}
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
   const [expandedWs, setExpandedWs] = useState(() => new Set());   // 会话级展开记忆，刷新即收
   const focusRef = useRef(() => {});
   const actionsRef = useRef({});
-  const layoutUndoRef = useRef(null);
-  const geometryPendingRef = useRef(false);
-  const sceneStaleRef = useRef(false);
-  const sceneMutationQueueRef = useRef(null);
-  if (!sceneMutationQueueRef.current) sceneMutationQueueRef.current = createSceneMutationQueue();
-  const sceneMutationQueue = sceneMutationQueueRef.current;
+
+  // ---- 场景真相源：首次 graph 到达即诞生（随 setGraph 同帧可见），此后一切画布写动作同步进它 ----
+  const storeRef = useRef(null);
+  const adoptScene = useCallback(g => {
+    const sceneDoc = {
+      layout: g.layout || {},
+      edges: g.canvas?.edges || [],
+      notes: g.canvas?.notes || [],
+      boards: g.canvas?.boards || [],
+      drawing: g.canvas?.drawing || [],
+      drawingFiles: g.canvas?.drawingFiles || {},
+    };
+    if (!storeRef.current) {
+      storeRef.current = createSceneStore(sceneDoc, {
+        persistScene: scene => api.putScene(scene),
+        persistFiles: files => api.putDrawingFiles(files),
+      });
+    } else {
+      storeRef.current.adoptRemote(sceneDoc);   // 本地有脏改动时静默保留本地（LWW）
+    }
+  }, []);
+  const store = storeRef.current;
+
+  const reload = useCallback(() => api.graph().then(g => {
+    adoptScene(g);
+    setGraph(g);
+    setLive(true);
+    setPending(false);
+  }), [adoptScene]);
 
   // ---- 双侧边栏：宽度可拖、可收回，记进 localStorage ----
   const [leftW, setLeftW] = useState(+localStorage.leftW || 250);
@@ -71,260 +115,87 @@ export default function App() {
     strip.addEventListener('pointerup', up);
   };
 
-  const reload = useCallback(() => sceneMutationQueue.reloadAuthority(
-    () => api.graph(),
-    g => {
-      sceneStaleRef.current = false;
-      setGraph(g); setLive(true); setPending(false);
-    },
-  ), [sceneMutationQueue]);
-
-  const executeArrangeBatch = useCallback((plan, baseToken) => {
-    return executeBatchArrange({
-      queue: sceneMutationQueue,
-      plan,
-      baseToken,
-      commit: value => api.containerBatchCarry(value),
-      queryStatus: opId => api.containerCarryStatus(opId),
-      present: result => actionsRef.current.presentBatchCarryResult?.(result),
-      install: result => setGraph(current => ({
-        ...current,
-        sceneToken: result.sceneToken,
-        layout: result.layout,
-        canvas: { ...current.canvas, drawing: result.drawing },
-      })),
-      // Bridge/target generation 与权威 layout+drawing 必须在同一次同步 commit 内安装；
-      // 浏览器不能观察到“新容器 + 旧 SVG”或“旧容器 + 已平移 SVG”。
-      flush: flushSync,
-    });
-  }, [sceneMutationQueue]);
-
-  const undoArrange = useCallback(async () => {
-    if (sceneStaleRef.current) return toast('画布已有新修改，请先刷新', 'error');
-    const undo = layoutUndoRef.current;
-    if (!undo) {
-      toast('已有新的手工调整，不能再撤销上次整理');
-      return;
-    }
-    const prepared = await actionsRef.current.prepareGeometry?.();
-    if (prepared === false) return;
-    geometryPendingRef.current = true;
-    layoutUndoRef.current = null;
-    try {
-      const plan = actionsRef.current.planArrangeBatch?.(undo.snapshot);
-      if (!plan) throw new Error('绘图正在换帧，请稍后再试');
-      const baseToken = sceneMutationQueue.authorityRef.current || graph.sceneToken;
-      const outcome = await executeArrangeBatch(plan, baseToken);
-      focusRef.current(null);
-      toast(outcome.presentation.status === 'retryable-paint'
-        ? '撤销已保存，批注画面交接失败，请点“重试显示批注”'
-        : '已撤销整理', outcome.presentation.status === 'retryable-paint' ? 'error' : 'ok');
-    } catch (e) {
-      if (!e.persistedResult) layoutUndoRef.current = undo;
-      if (e.status === 409 || e.authorityUnknown) {
-        sceneStaleRef.current = true;
-        setGraph(current => ({ ...current, sceneStale: true }));
-      }
-      toast(e.persistedResult
-        ? `撤销已保存，但批注显示失败：${e.message}`
-        : `撤销失败：${e.message}`, 'error');
-    } finally {
-      geometryPendingRef.current = false;
-    }
-  }, [executeArrangeBatch, graph?.sceneToken, sceneMutationQueue]);
-
-  // ---- 自动整理只清几何、不清人工归属；原子替换后可由按钮或 Cmd/Ctrl+Z 撤销 ----
+  // ---- 整理：production buildGraph 同步规划（FlowCanvas 暴露），一次 mutate 落定，撤销走全局 undo ----
   const arrange = useCallback(async () => {
-    if (sceneStaleRef.current) return toast('画布已有新修改，请先刷新', 'error');
-    const prepared = await actionsRef.current.prepareGeometry?.();
+    const prepared = await actionsRef.current.prepareGeometry?.();   // 绘图激活时先收笔
     if (prepared === false) return;
-    geometryPendingRef.current = true;
-    const snapshot = structuredClone(graph?.layout || {});
-    try {
-      const targetLayout = layoutFromEntries(tidyLayoutEntries(snapshot));
-      const plan = actionsRef.current.planArrangeBatch?.(targetLayout);
-      if (!plan) throw new Error('绘图正在换帧，请稍后再试');
-      const baseToken = sceneMutationQueue.authorityRef.current || graph.sceneToken;
-      const outcome = await executeArrangeBatch(plan, baseToken);
-      // 成熟画布的 Cmd+Z 是一次撤一笔：新整理必须覆盖旧票据。
-      layoutUndoRef.current = { snapshot };
-      focusRef.current(null);
-      if (outcome.presentation.status === 'retryable-paint') {
-        toast('整理已保存，批注画面交接失败，请点“重试显示批注”', 'error');
-      } else {
-        toast('已整理位置，人工归属保持不变', 'ok', { label: '撤销', onClick: undoArrange });
-      }
-    } catch (e) {
-      if (e.persistedResult) layoutUndoRef.current = { snapshot };
-      if (e.status === 409 || e.authorityUnknown) {
-        sceneStaleRef.current = true;
-        setGraph(current => ({ ...current, sceneStale: true }));
-      }
-      toast(e.persistedResult
-        ? `整理已保存，但批注显示失败：${e.message}`
-        : `整理失败：${e.message}`, 'error');
-    } finally {
-      geometryPendingRef.current = false;
-    }
-  }, [executeArrangeBatch, graph?.layout, graph?.sceneToken, sceneMutationQueue, undoArrange]);
-
-  const installCarryResult = useCallback(result => {
-    setGraph(g => {
-      const next = {
-        ...g, sceneToken: result.sceneToken,
-        canvas: {
-          ...g.canvas,
-          drawing: result.movedIds.length ? result.drawing : g.canvas.drawing,
-        },
-      };
-      if (result.container.kind === 'board') {
-        const rawId = result.container.id.slice(6);
-        next.canvas.boards = (g.canvas.boards || []).map(board => String(board.id) === rawId
-          ? { ...board, x: result.container.x, y: result.container.y } : board);
-      } else {
-        next.layout = {
-          ...g.layout,
-          [result.container.id]: {
-            ...(g.layout[result.container.id] || {}),
-            x: result.container.x, y: result.container.y,
-          },
-        };
-      }
-      return next;
-    });
+    const doc = storeRef.current.get();
+    const targetLayout = layoutFromEntries(tidyLayoutEntries(structuredClone(doc.layout)));
+    const applied = actionsRef.current.applyArrange?.(targetLayout);
+    if (!applied) return toast('整理失败：画布尚未就绪', 'error');
+    focusRef.current(null);
+    toast('已整理位置，人工归属保持不变', 'ok', { label: '撤销', onClick: () => storeRef.current.undo() });
   }, []);
 
-  // ---- 手绘层动作分发：先落后端，再改本地状态；失败一律回读真相 ----
+  // ---- 对象动作分发：全部同步 mutate，磁盘由 store 后台冲刷 ----
   const handleCanvas = useCallback((action, payload) => {
-    if (action === 'sceneConflict') {
-      sceneStaleRef.current = true;
-      setGraph(g => ({ ...g, sceneStale: true }));
-      return;
-    }
-    if (sceneStaleRef.current && !['openContext', 'containerCarryStatus'].includes(action)) {
-      const error = new Error('画布已有新修改，请先刷新');
-      toast(error.message, 'error');
-      return ['drawingCommit', 'containerCarry'].includes(action) ? Promise.reject(error) : false;
-    }
-    const patch = (fn, sceneToken) => setGraph(g => ({
-      ...g, ...(sceneToken ? { sceneToken } : {}),
-      canvas: fn(g.canvas || { edges: [], notes: [], boards: [] }),
-    }));
-    const recover = e => {
-      toast(`操作失败：${e.message}`, 'error');
-      return sceneMutationQueue.reloadAuthority(() => api.graph(), setGraph).catch(() => {});
-    };
-    if (action === 'openContext') {
-      setCtxFrame(payload);   // 纯视图动作：画布就地弹终端框，不碰盘
-    } else if (action === 'drawingCommit') {
-      // 普通看板态的沉浮/删除/承载动作：后端落盘成功才原子换本地 committed 快照。
-      const { next, previousSuccessful } = payload;
-      const opId = globalThis.crypto.randomUUID();
-      const files = drawingFilesDelta(previousSuccessful.files, next.files);
-      return sceneMutationQueue.enqueue(
-        () => {
-          const command = {
-            opId,
-            baseToken: sceneMutationQueue.authorityRef.current,
-            elements: next.elements,
-            files,
-          };
-          return commitDrawingWithReceipt(command, api.setDrawing, api.drawingCommitStatus);
-        },
-        result => patch(c => ({ ...c, drawing: result.drawing, drawingFiles: next.files }), result.sceneToken),
-      ).then(result => {
-        if (result?.status === 'superseded') {
-          const error = new Error('较新的画布修改已接管');
-          error.status = 409;
-          throw error;
-        }
-        return result;
-      }).catch(error => {
-        if (error.status === 409 || error.authorityUnknown) {
-          sceneStaleRef.current = true;
-          setGraph(current => ({ ...current, sceneStale: true }));
-        }
-        throw error;
+    if (action === 'openContext') return setCtxFrame(payload);   // 纯视图动作：画布就地弹终端框
+    const store = storeRef.current;
+    if (!store) return false;
+    if (action === 'addEdge') {
+      store.mutate(doc => {
+        const dup = doc.edges.find(e =>
+          (e.from === payload.from && e.to === payload.to) || (e.from === payload.to && e.to === payload.from));
+        if (dup) return doc;
+        return { ...doc, edges: [...doc.edges, { id: `manual:${Date.now()}`, from: payload.from, to: payload.to }] };
       });
-    } else if (action === 'drawingPersisted') {
-      // 临时编辑器 flush 成功后回写；兼容旧的纯 elements 回调。
-      const drawing = Array.isArray(payload) ? payload : payload.elements;
-      const files = Array.isArray(payload) ? undefined : payload.files;
-      patch(c => ({ ...c, drawing, ...(files === undefined ? {} : { drawingFiles: files }) }));
-    } else if (action === 'addEdge') {
-      return sceneMutationQueue.enqueue(
-        () => api.addEdge(payload.from, payload.to),
-        ({ sceneToken, ...edge }) => patch(c => ({ ...c, edges: [...c.edges.filter(e => e.id !== edge.id), edge] }), sceneToken),
-      )
-        .catch(recover);
     } else if (action === 'delEdge') {
-      return sceneMutationQueue.enqueue(
-        () => api.delEdge(payload),
-        result => patch(c => ({ ...c, edges: c.edges.filter(e => e.id !== payload) }), result.sceneToken),
-      ).catch(recover);
+      store.mutate(doc => ({ ...doc, edges: doc.edges.filter(e => e.id !== payload) }));
     } else if (action === 'setNote') {
-      return sceneMutationQueue.enqueue(
-        () => api.setNote(payload),
-        ({ sceneToken, ...note }) => patch(c => ({ ...c, notes: [...c.notes.filter(n => n.id !== note.id), note] }), sceneToken),
-      )
-        .catch(recover);
+      // 补丁式合并：拖动/打字/换色各发各的字段，不互相覆盖；打字流合并为一步 undo
+      store.mutate(doc => {
+        const i = doc.notes.findIndex(n => n.id === payload.id);
+        if (i >= 0) {
+          const patch = {};
+          for (const k of ['x', 'y', 'text', 'color', 'w', 'h']) if (payload[k] !== undefined) patch[k] = payload[k];
+          const notes = [...doc.notes];
+          notes[i] = { ...notes[i], ...patch };
+          return { ...doc, notes };
+        }
+        return { ...doc, notes: [...doc.notes, { id: payload.id || `note:${Date.now()}`, x: 0, y: 0, text: '', color: 'yellow', ...payload }] };
+      }, payload.text !== undefined ? { coalesce: `note-text:${payload.id}` } : {});
     } else if (action === 'delNote') {
-      return sceneMutationQueue.enqueue(
-        () => api.delNote(payload),
-        result => patch(c => ({ ...c, notes: c.notes.filter(n => n.id !== payload) }), result.sceneToken),
-      ).catch(recover);
+      store.mutate(doc => ({ ...doc, notes: doc.notes.filter(n => n.id !== payload) }));
     } else if (action === 'setBoard') {
-      // 画板：创建（无 id）与改动（有 id）同一条河——服务端补丁式合并后返回完整实体
-      return sceneMutationQueue.enqueue(
-        () => api.setBoard(payload),
-        ({ sceneToken, ...board }) => patch(c => ({ ...c, boards: [...(c.boards || []).filter(b => b.id !== board.id), board] }), sceneToken),
-      )
-        .catch(recover);
+      store.mutate(doc => {
+        const i = doc.boards.findIndex(b => b.id === payload.id);
+        if (i >= 0) {
+          const patch = {};
+          for (const k of ['x', 'y', 'w', 'h', 'name', 'color']) if (payload[k] !== undefined) patch[k] = payload[k];
+          const boards = [...doc.boards];
+          boards[i] = { ...boards[i], ...patch };
+          return { ...doc, boards };
+        }
+        return { ...doc, boards: [...doc.boards, { id: payload.id || `${Date.now()}`, x: 0, y: 0, w: 520, h: 360, name: '新画板', color: 'blue', ...payload }] };
+      });
     } else if (action === 'delBoard') {
-      return sceneMutationQueue.enqueue(
-        () => api.delBoard(payload),
-        result => {
-          patch(c => ({ ...c, boards: (c.boards || []).filter(b => b.id !== payload) }), result.sceneToken);
-          toast('画板已删除，成员回到原街区');
-        },
-      )
-        .catch(recover);
+      store.mutate(doc => ({ ...doc, boards: doc.boards.filter(b => b.id !== payload) }));
+      toast('画板已删除，成员回到原街区');
     } else if (action === 'nodeFromEdge') {
-      return sceneMutationQueue.enqueue(
-        () => api.createFromEdge(payload),
-        ({ kind, node, edge, sceneToken }) => patch(c => ({
-          ...c,
-          notes: kind === 'note' ? [...c.notes, node] : c.notes,
-          boards: kind === 'board' ? [...(c.boards || []), node] : (c.boards || []),
-          edges: [...c.edges, edge],
-        }), sceneToken),
-      )
-        .catch(recover);
-    } else if (action === 'containerCarry') {
-      return sceneMutationQueue.enqueue(
-        () => api.containerCarry(payload),
-        installCarryResult,
-      );
-    } else if (action === 'containerCarryStatus') {
-      const { opId, baseToken } = typeof payload === 'string'
-        ? { opId: payload, baseToken: null }
-        : payload;
-      return sceneMutationQueue.enqueue(
-        () => api.containerCarryStatus(opId),
-        result => {
-          if (result.status === 'committed') installCarryResult(result);
-        },
-        { baseToken },
-      );
+      store.mutate(doc => nodeFromEdge(doc, payload));
     }
-  }, [installCarryResult, sceneMutationQueue]);
+    return true;
+  }, []);
 
   useEffect(() => {
     reload();
-    return subscribeEvents(() => setPending(true), up => setLive(up));
-  }, [reload]);
+    return subscribeEvents(evt => {
+      if (evt.type === 'graph-updated') setPending(true);          // 地形变化举旗，用户主动刷新才重排
+      else if (evt.type === 'scene-updated' && evt.writerId !== WRITER_ID) {
+        // 别的标签页写了场景：本地干净才采纳，静默同步不打扰
+        api.graph().then(adoptScene).catch(() => {});
+      }
+    }, up => setLive(up));
+  }, [reload, adoptScene]);
 
-  // ---- 快捷键：N 便签 / B 画板 / F 全景 / "/" 搜索 / Esc 关面板；输入框内不劫持 ----
+  // pagehide 兜底：离开页面前把未冲刷的场景推一把（keepalive 尽力而为，失败由下次会话的重试兜住）
+  useEffect(() => {
+    const onHide = () => { storeRef.current?.flushNow(); };
+    window.addEventListener('pagehide', onHide);
+    return () => window.removeEventListener('pagehide', onHide);
+  }, []);
+
+  // ---- 快捷键：N 便签 / B 画板 / F 全景 / "/" 搜索 / Esc 关面板 / Cmd+Z 全画布撤销；输入框内不劫持 ----
   useEffect(() => {
     const onKey = e => {
       const t = e.target;
@@ -332,11 +203,14 @@ export default function App() {
         if (e.key === 'Escape') t.blur();
         return;
       }
-      // 绘图编辑激活时快捷键交给 Excalidraw（含选择、形状、文字与图片）
+      // 绘图编辑激活时快捷键交给 Excalidraw（含它自己的撤销栈）
       if (document.querySelector('.draw-active')) return;
-      if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'z' && layoutUndoRef.current) {
+      if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'z') {
         e.preventDefault();
-        undoArrange();
+        const store = storeRef.current;
+        if (!store) return;
+        const done = e.shiftKey ? store.redo() : store.undo();
+        if (!done) toast(e.shiftKey ? '没有可重做的操作' : '没有可撤销的操作');
         return;
       }
       if (e.metaKey || e.ctrlKey || e.altKey) return;
@@ -354,12 +228,18 @@ export default function App() {
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [undoArrange]);
+  }, []);
+
+  // ---- 场景文档订阅：store 是外部真相，React 只做镜子 ----
+  const doc = useSyncExternalStore(
+    useCallback(cb => store ? store.subscribe(cb) : () => {}, [store]),
+    useCallback(() => store ? store.get() : null, [store]),
+  );
+  const syncInfo = doc && store ? store.status() : { status: 'saved' };
 
   // ============================================================
   //  过滤管道：会话级过滤（工具/状态/时间/搜索）→ 工作区聚合裁剪
   // ============================================================
-  // 搜索防抖：每击键全图重排太贵，让渲染在输入间隙进行
   const deferredQ = useDeferredValue(filters.q);
 
   const view = useMemo(() => {
@@ -390,7 +270,7 @@ export default function App() {
     return { workspaces, sessionsByKey, edges: graph.edges };
   }, [graph, deferredQ, filters.range, filters.tools, filters.statuses]);
 
-  if (!view) {
+  if (!view || !doc) {
     return (
       <div className="mono" style={{ height: '100%', display: 'grid', placeItems: 'center', color: 'var(--ink-faint)' }}>
         正在扫描本地会话地形…
@@ -412,11 +292,9 @@ export default function App() {
           workspaces={view.workspaces}
           sessionsByKey={view.sessionsByKey}
           edges={view.edges}
-          layout={graph.layout}
-          canvas={graph.canvas}
-          sceneToken={graph.sceneToken}
-          sceneStale={!!graph.sceneStale}
-          sceneMutationPendingRef={sceneMutationQueue.pendingRef}
+          layout={doc.layout}
+          canvas={doc}
+          store={store}
           onCanvasAction={handleCanvas}
           onRenameSession={(key, title) =>
             api.rename(key, title).then(r => { toast(r.synced ? '已重命名并同步回工具本体' : '已重命名（本体热文件，稍后自动同步）'); reload(); })
@@ -425,28 +303,16 @@ export default function App() {
             api.wsRename(path, name).then(reload).catch(e => toast(`改名失败：${e.message}`, 'error'))}
           selectedKey={selectedKey}
           actionsRef={actionsRef}
-          geometryPendingRef={geometryPendingRef}
           expanded={expandedWs}
           searching={!!deferredQ.trim()}
           onToggleExpand={path => setExpandedWs(s => {
             const n = new Set(s); n.has(path) ? n.delete(path) : n.add(path); return n;
           })}
-          onMoveNode={entries => {
-            if (sceneStaleRef.current) return toast('画布已有新修改，请先刷新', 'error');
-            layoutUndoRef.current = null;   // 整理后又手动摆过，旧快照不再有资格覆盖新意图
-            sceneMutationQueue.enqueue(
-              () => api.layoutBatch(entries),
-              result => setGraph(g => {
-                const layout = { ...g.layout };
-                for (const e of entries) {
-                  const prev = { ...layout[e.path] };
-                  for (const k of ['x', 'y', 'd', 'w', 'h']) if (e[k] !== undefined) prev[k] = e[k];
-                  layout[e.path] = prev;
-                }
-                return { ...g, sceneToken: result.sceneToken, layout };
-              }),
-            ).catch(() => sceneMutationQueue.reloadAuthority(() => api.graph(), setGraph).catch(() => {}));
-          }}
+          onMoveNode={entries => store.mutate(doc => {
+            const layout = { ...doc.layout };
+            for (const e of entries) layout[e.path] = pickLayout(e, layout[e.path]);
+            return { ...doc, layout };
+          })}
           onSelect={k => { setSelectedKey(k); if (k) setRightOpen(true); }}
           onChanged={reload}
           onArrange={arrange}
@@ -502,8 +368,9 @@ export default function App() {
       }}>
         <TopBar
           pending={pending} onRefresh={reload}
+          syncStatus={syncInfo.status}
           onRescan={() => api.rescan().then(() => { reload(); toast('已全量重扫', 'ok'); })}
-          onArrange={e => arrange({ x: e.clientX - 250, y: e.clientY + 14 })}
+          onArrange={() => arrange()}
         />
       </div>
 

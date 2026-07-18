@@ -7,9 +7,12 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { ViewportPortal } from '@xyflow/react';
 import {
-  drawingFontSignature, drawingFontWorkRoute, drawingFrameRetryDecision, drawingPlaneGroupPlan, drawingPlaneGroups, drawingPlaneSettledInFlight,
+  drawingFontSignature, drawingFontWorkRoute, drawingPlaneGroupPlan, drawingPlaneGroups, drawingPlaneSettledInFlight,
   drawingTransactionVisibleElements, splitDrawingPlanes,
 } from './drawing.js';
+
+// 帧不是闸门：导出失败无限退避自愈（40ms 起步、2s 封顶），旧完整帧全程可见
+const retryDelayMs = attempt => Math.min(40 * 2 ** Math.max(0, attempt - 1), 2000);
 import { installExportMarkers, markerExportElements } from './container-carry.js';
 
 const EXPORT_PADDING = 8;
@@ -209,24 +212,33 @@ export default function InkWorldLayer({ elements, files, excludedIds = EMPTY_ELE
       .then(([entries, fontCss]) => commitFrame(Object.fromEntries(entries), fontCss))
       .catch(error => {
         if (!current) return;
-        const decision = drawingFrameRetryDecision(attempt);
         onSnapshotError?.(revision, error, {
           attempt,
-          willRetry: decision.retry,
-          final: !decision.retry,
+          willRetry: true,
+          final: false,
           excludedIds,
           generationId,
         });   // 保留上一帧，不用半份新图覆盖
-        if (decision.retry) {
-          retryTimer = setTimeout(() => {
-            if (current) setRetryRequest({ revision, attempt: decision.nextAttempt, token: retryToken });
-          }, decision.delayMs);
-        }
+        retryTimer = setTimeout(() => {
+          if (current) setRetryRequest({ revision, attempt: attempt + 1, token: retryToken });
+        }, retryDelayMs(attempt));
       });
+
+    // 切回前台立即补一枪：后台节流期间失败的导出不等下一个退避周期
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && current && retryTimer) {
+        clearTimeout(retryTimer);
+        retryTimer = setTimeout(() => {
+          if (current) setRetryRequest(prev => ({ revision, attempt: prev.attempt + 1, token: retryToken }));
+        }, 0);
+      }
+    };
+    document.addEventListener('visibilitychange', onVisible);
 
     return () => {
       current = false;
       clearTimeout(retryTimer);
+      document.removeEventListener('visibilitychange', onVisible);
     };
   }, [committedElements, committedFiles, excludedIds, revision, generationId, retryRequest, retryToken, onSnapshotError, exporterProbe]);
 
