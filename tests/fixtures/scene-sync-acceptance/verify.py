@@ -322,6 +322,18 @@ def run(browser, base, data_dir, port, server_process):
         assert saved_large["text"] == large_text
         assert_clean(diag_f)
 
+        # 已追平的 clean 页再关闭时不应制造恢复记录；否则漏过 SSE 的旧 clean 快照会在下次打开倒灌。
+        page_f.close()
+        page_g = context_e.new_page()
+        diag_g = diagnostics(context_e, page_g, base)
+        response_g = page_g.goto(base, wait_until="load", timeout=90_000)
+        assert response_g is not None and response_g.status == 200
+        page_g.wait_for_function("() => window.__SYNC_ACCEPTANCE__?.ready === true", timeout=90_000)
+        clean_reopen = page_snapshot(page_g)
+        assert clean_reopen["recovery"]["applied"] is False, clean_reopen
+        assert clean_reopen["text"] == large_text
+        assert_clean(diag_g)
+
         # 离线阶段只允许同源网络失败；页面错误、外联与刷新对话框始终为零。
         offline_failures = diag_a["requestFailed"] + diag_b["requestFailed"]
         assert offline_failures, "daemon stop should produce observable same-origin request failures"
@@ -364,16 +376,17 @@ def run(browser, base, data_dir, port, server_process):
                     "utf8Bytes": len(large_text.encode("utf-8")),
                     "localRecoveryApplied": reopened_large["recovery"]["applied"],
                     "persistedTextBytes": len(note_text(persisted_large).encode("utf-8")),
+                    "cleanReopenRecoveryApplied": clean_reopen["recovery"]["applied"],
                 },
                 "serverWriteDelayMs": ready["writeDelayMs"],
             },
             "diagnostics": {
                 "preOfflineClean": True,
-                "pageErrors": len(diag_a["pageErrors"]) + len(diag_b["pageErrors"]) + len(diag_e["pageErrors"]) + len(diag_f["pageErrors"]),
-                "externalResources": len(diag_a["externalResources"]) + len(diag_b["externalResources"]) + len(diag_e["externalResources"]) + len(diag_f["externalResources"]),
-                "dialogs": len(diag_a["dialogs"]) + len(diag_b["dialogs"]) + len(diag_e["dialogs"]) + len(diag_f["dialogs"]),
-                "freshReopenConsoleErrors": len(diag_f["consoleErrors"]),
-                "freshReopenConsoleWarnings": len(diag_f["consoleWarnings"]),
+                "pageErrors": len(diag_a["pageErrors"]) + len(diag_b["pageErrors"]) + len(diag_e["pageErrors"]) + len(diag_f["pageErrors"]) + len(diag_g["pageErrors"]),
+                "externalResources": len(diag_a["externalResources"]) + len(diag_b["externalResources"]) + len(diag_e["externalResources"]) + len(diag_f["externalResources"]) + len(diag_g["externalResources"]),
+                "dialogs": len(diag_a["dialogs"]) + len(diag_b["dialogs"]) + len(diag_e["dialogs"]) + len(diag_f["dialogs"]) + len(diag_g["dialogs"]),
+                "freshReopenConsoleErrors": len(diag_g["consoleErrors"]),
+                "freshReopenConsoleWarnings": len(diag_g["consoleWarnings"]),
             },
             "isolatedFiles": files,
         }, server_process

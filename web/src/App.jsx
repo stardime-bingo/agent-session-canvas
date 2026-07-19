@@ -68,6 +68,9 @@ export default function App() {
   const focusRef = useRef(() => {});
   const actionsRef = useRef({});
   const recoveredKeyRef = useRef(null);
+  const recoveredFileIdsRef = useRef([]);
+  const recoveredSavedAtRef = useRef(null);
+  const recoveredClientSeqRef = useRef(null);
 
   // ---- 场景真相源：首次 graph 到达即诞生（随 setGraph 同帧可见），此后一切画布写动作同步进它 ----
   const storeRef = useRef(null);
@@ -84,10 +87,17 @@ export default function App() {
       storeRef.current = createSceneStore(serverDoc, {
         persistScene: async (scene, options) => {
           const receipt = await api.putScene(scene, options);
-          clearSceneRecovery(sceneRecoveryKey(WRITER_ID));
+          clearSceneRecovery(sceneRecoveryKey(WRITER_ID), { clientSeq: scene.clientSeq });
           if (recoveredKeyRef.current) {
-            clearSceneRecovery(recoveredKeyRef.current);
+            const cleared = clearSceneRecovery(recoveredKeyRef.current, {
+              savedAt: recoveredSavedAtRef.current,
+              clientSeq: recoveredClientSeqRef.current,
+            });
+            if (cleared) void clearRecoveryFiles(recoveredFileIdsRef.current);
             recoveredKeyRef.current = null;
+            recoveredFileIdsRef.current = [];
+            recoveredSavedAtRef.current = null;
+            recoveredClientSeqRef.current = null;
           }
           return receipt;
         },
@@ -99,6 +109,9 @@ export default function App() {
       });
       if (recovery) {
         recoveredKeyRef.current = recovery.key;
+        recoveredFileIdsRef.current = recovery.fileIds;
+        recoveredSavedAtRef.current = recovery.savedAt;
+        recoveredClientSeqRef.current = recovery.clientSeq;
         storeRef.current.mutate(() => ({
           ...recovery.scene,
           drawingFiles: { ...serverDoc.drawingFiles, ...recoveryFiles },
@@ -113,7 +126,7 @@ export default function App() {
   const reload = useCallback(async () => {
     const g = await api.graph();
     const recovery = readLatestSceneRecovery(g.sceneUpdatedAt || 0);
-    const recoveryFiles = recovery ? await loadRecoveryFiles() : {};
+    const recoveryFiles = recovery ? await loadRecoveryFiles(recovery.fileIds) : {};
     adoptScene(g, recovery, recoveryFiles);
     setGraph(g);
     setLive(true);
@@ -225,7 +238,8 @@ export default function App() {
     const onHide = () => {
       const current = storeRef.current;
       if (!current) return;
-      saveSceneRecovery(current.get(), WRITER_ID);
+      // saved 文档以服务端为准：若漏过别的标签 SSE，绝不能用较晚关页时间把旧 clean 快照伪装成新恢复。
+      if (current.status().status !== 'saved') saveSceneRecovery(current.get(), WRITER_ID);
       current.flushNow();
     };
     window.addEventListener('pagehide', onHide);

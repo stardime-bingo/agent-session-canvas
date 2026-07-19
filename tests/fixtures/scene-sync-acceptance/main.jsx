@@ -70,7 +70,7 @@ function AcceptanceBody({ store }) {
 
   useEffect(() => {
     const onHide = () => {
-      saveSceneRecovery(store.get(), WRITER_ID);
+      if (store.status().status !== 'saved') saveSceneRecovery(store.get(), WRITER_ID);
       store.flushNow();
     };
     window.addEventListener('pagehide', onHide);
@@ -133,13 +133,16 @@ function App() {
   const [store, setStore] = useState(null);
   const [error, setError] = useState(null);
   const recoveredKeyRef = useRef(null);
+  const recoveredFileIdsRef = useRef([]);
+  const recoveredSavedAtRef = useRef(null);
+  const recoveredClientSeqRef = useRef(null);
   useEffect(() => {
     let alive = true;
     void (async () => {
       const graph = await api.graph();
       const serverDoc = toDoc(graph);
       const recovery = readLatestSceneRecovery(graph.sceneUpdatedAt || 0);
-      const recoveryFiles = recovery ? await loadRecoveryFiles() : {};
+      const recoveryFiles = recovery ? await loadRecoveryFiles(recovery.fileIds) : {};
       window.__SYNC_RECOVERY__ = {
         applied: Boolean(recovery),
         clientSeq: recovery?.clientSeq || null,
@@ -149,10 +152,17 @@ function App() {
       const nextStore = createSceneStore(serverDoc, {
         persistScene: async (scene, options) => {
           const receipt = await api.putScene(scene, options);
-          clearSceneRecovery(sceneRecoveryKey(WRITER_ID));
+          clearSceneRecovery(sceneRecoveryKey(WRITER_ID), { clientSeq: scene.clientSeq });
           if (recoveredKeyRef.current) {
-            clearSceneRecovery(recoveredKeyRef.current);
+            const cleared = clearSceneRecovery(recoveredKeyRef.current, {
+              savedAt: recoveredSavedAtRef.current,
+              clientSeq: recoveredClientSeqRef.current,
+            });
+            if (cleared) void clearRecoveryFiles(recoveredFileIdsRef.current);
             recoveredKeyRef.current = null;
+            recoveredFileIdsRef.current = [];
+            recoveredSavedAtRef.current = null;
+            recoveredClientSeqRef.current = null;
           }
           return receipt;
         },
@@ -164,6 +174,9 @@ function App() {
       });
       if (recovery) {
         recoveredKeyRef.current = recovery.key;
+        recoveredFileIdsRef.current = recovery.fileIds;
+        recoveredSavedAtRef.current = recovery.savedAt;
+        recoveredClientSeqRef.current = recovery.clientSeq;
         nextStore.mutate(() => ({
           ...recovery.scene,
           drawingFiles: { ...serverDoc.drawingFiles, ...recoveryFiles },

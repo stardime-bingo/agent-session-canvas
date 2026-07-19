@@ -56,7 +56,7 @@ npm run scan         # 仅扫描，输出统计
   图片资产内容寻址、同 ID 不可变、资产先行引用后到、孤儿随场景写顺手裁剪；轻校验挡结构性垃圾，
   不做逐字节公证——磁盘格式与 v17 完全兼容（canvas/layout/drawing-files.json），备份与回滚零迁移
 - **关页大载荷恢复律 (web/src/scene-recovery.js)**: pagehide 先把不含图片正文的最终逻辑场景同步写入同源 localStorage，再尽力 keepalive；
-  未确认图片单独暂存在 IndexedDB。重开只回放比服务端 canvas mtime 更新的记录，正常后台冲刷成功后清理，避免 64KB keepalive 上限造成最终编辑丢失
+  未确认图片单独暂存在 IndexedDB。仅 dirty/saving/error 页保存恢复，saved 页服从服务端；重开只回放比服务端 canvas mtime 更新的记录，正常后台冲刷成功后清理，避免 64KB keepalive 上限造成最终编辑丢失
 - **自研墨迹层 (ink.js + InkLayer + InkTools)**: 笔迹/矩形/椭圆/箭头/文字全部自写——落笔即场景文档元素、
   拖画即 coalesce mutate（一笔=一步 undo）、收笔即定稿（意外小形状判废），文字就地 textarea 击键直写；
   渲染=React 直出 SVG（沉层负 z 垫底/浮层高 z 盖顶），与卡片共用唯一 RF 相机——

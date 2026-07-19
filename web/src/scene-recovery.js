@@ -1,6 +1,6 @@
 /**
  * [INPUT]: SceneStore 当前文档、writerId、同源 localStorage/IndexedDB
- * [OUTPUT]: pagehide 大载荷恢复：同步保存无图片正文的场景快照，IndexedDB 暂存尚未确认上传的图片资产
+ * [OUTPUT]: pagehide 大载荷恢复：同步保存无图片正文但含引用 fileIds 的场景快照，IndexedDB 按引用隔离暂存资产
  * [POS]: keepalive 64KB 浏览器上限之外的本地安全网；只在服务端快照更旧时回放，不参与日常渲染主权
  * [PROTOCOL]: 变更时更新此头部，然后检查 App.jsx/InkTools.jsx/web/CLAUDE.md
  */
@@ -10,6 +10,10 @@ const DB_NAME = 'agent-canvas-scene-recovery';
 const DB_STORE = 'drawing-files';
 
 export const sceneRecoveryKey = writerId => `${SCENE_RECOVERY_PREFIX}${writerId}`;
+
+export const sceneRecoveryFileIds = scene => [...new Set((scene?.drawing || [])
+  .filter(element => !element?.isDeleted && element?.type === 'image' && typeof element.fileId === 'string' && element.fileId)
+  .map(element => element.fileId))].sort();
 
 export function sceneRecoverySnapshot(doc) {
   return {
@@ -29,6 +33,7 @@ export function saveSceneRecovery(doc, writerId, storage = globalThis.localStora
     writerId,
     clientSeq: doc.seq,
     savedAt: Date.now(),
+    fileIds: sceneRecoveryFileIds(doc),
     scene: sceneRecoverySnapshot(doc),
   };
   try {
@@ -55,7 +60,10 @@ export function readLatestSceneRecovery(serverUpdatedAt = 0, storage = globalThi
         storage.removeItem(key);
         continue;
       }
-      if (!latest || record.savedAt > latest.savedAt) latest = { key, ...record };
+      const fileIds = Array.isArray(record.fileIds)
+        ? [...new Set(record.fileIds.filter(id => typeof id === 'string' && id))].sort()
+        : sceneRecoveryFileIds(record.scene);
+      if (!latest || record.savedAt > latest.savedAt) latest = { key, ...record, fileIds };
     } catch {
       storage.removeItem(key);
     }
@@ -63,8 +71,17 @@ export function readLatestSceneRecovery(serverUpdatedAt = 0, storage = globalThi
   return latest;
 }
 
-export function clearSceneRecovery(key, storage = globalThis.localStorage) {
-  try { if (key && storage) storage.removeItem(key); } catch { /* 隐私模式下清不掉不影响服务端真相。 */ }
+export function clearSceneRecovery(key, limits = {}, storage = globalThis.localStorage) {
+  try {
+    if (!key || !storage) return false;
+    const record = JSON.parse(storage.getItem(key));
+    if (Number.isFinite(limits.clientSeq) && Number.isFinite(record?.clientSeq)
+      && record.clientSeq > limits.clientSeq) return false;
+    if (Number.isFinite(limits.savedAt) && Number.isFinite(record?.savedAt)
+      && record.savedAt > limits.savedAt) return false;
+    storage.removeItem(key);
+    return true;
+  } catch { return false; /* 隐私模式下清不掉不影响服务端真相。 */ }
 }
 
 const openRecoveryDb = () => new Promise((resolve, reject) => {
@@ -96,9 +113,13 @@ export const stageRecoveryFile = file => file?.id
   ? transactFiles('readwrite', store => store.put(file))
   : Promise.resolve(null);
 
-export async function loadRecoveryFiles() {
+export async function loadRecoveryFiles(fileIds = []) {
+  const wanted = new Set(fileIds);
+  if (!wanted.size) return {};
   const rows = await transactFiles('readonly', store => store.getAll());
-  return Array.isArray(rows) ? Object.fromEntries(rows.filter(file => file?.id).map(file => [file.id, file])) : {};
+  return Array.isArray(rows)
+    ? Object.fromEntries(rows.filter(file => file?.id && wanted.has(file.id)).map(file => [file.id, file]))
+    : {};
 }
 
 export const clearRecoveryFiles = ids => transactFiles('readwrite', store => {

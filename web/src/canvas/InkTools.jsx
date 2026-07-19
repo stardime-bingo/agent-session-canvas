@@ -444,6 +444,7 @@ export function useInkTools({ store, instRef, rootRef, hitAt, wheelModeRef, minZ
       const offset = 24 * pasteCountRef.current++;
       const sourceIds = payload.elements.map(el => el.id).filter(Boolean);
       const copied = duplicateDrawingElements(payload.elements, sourceIds, { dx: offset, dy: offset });
+      for (const file of Object.values(payload.files || {})) void stageRecoveryFile(file);
       store.mutate(doc => ({
         ...doc,
         drawing: [...doc.drawing.filter(el => !el.isDeleted), ...copied.clones],
