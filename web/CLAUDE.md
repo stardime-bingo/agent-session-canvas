@@ -18,6 +18,8 @@ Dify 浅色基因：Dify 蓝 #155eef 锚点，Claude 橙 / Codex 青绿作工具
 （gestures.js 逐事件判定设备；缩放条第四钮三态兜底）；街区/画板仅标题栏可整块搬家。
 对象拖动语义：会话卡固定 → 工作区在容器内自由整理(拖动中目标容器高亮，只改看板归属不动本地文件) → 标题栏搬动街区/画板。
 增量布局铁律：手工位置是优先锚点但不是重叠许可；后方成员/容器必须确定性顺延避让，且只在渲染态消碰撞。
+显式智能整理是用户主动覆盖几何：工作区按活跃度行对齐，街区/画板共同进入目标比例 1.6 的 1–4 条平衡车道；
+持久化街区/画板终点，容器墨迹同曲线随行，便签不动，人工归属不变且整笔可撤销。
 
 **交互五律（v16 立法，v18 仍是宪法）**：
 ① 每一次点击必有可感知回应——选中态/菜单/提示三选一；
@@ -60,8 +62,8 @@ src/canvas/container-carry.js: 承载纯规划与 DOM 桥——planBatchCarry(be
   createInkDragBridge(根变量拖动桥)/createBatchCarryBridge(整理逆向 FLIP 桥)、SVG 锚标 marker 安装
 src/canvas/connections.js: 落空连线与连接点命中区纯内核，尺寸可由 node:test 证伪
 src/canvas/gestures.js: 导航手势纯内核——wheel 设备判定(150ms 连续性)、锚定缩放/平移数学、WHEEL_MODES 三态文案
-src/canvas/layout.js: 纯布局内核——production buildGraph、手工锚点优先打包、增量补位、容器增长避让、
-  tidyLayoutEntries 整理规划、容器缩放子项快照，node:test 合成数据证伪
+src/canvas/layout.js: 纯布局内核——production buildGraph、手工锚点优先打包、活跃度行网格、目标比例平衡车道、
+  固定锚点避让、tidy/arrangedSceneGeometry 整理规划、容器缩放子项快照，node:test 合成数据证伪
 src/canvas/menus.jsx: 七套右键菜单 + 三个删除流程 + 交接三件套入口——菜单、节点按钮、详情面板共用同一条河
 src/canvas/BoardNode.jsx: 用户画板（一等容器），BOARD_COLORS 五色，仅标题栏搬家，InlineEdit 改名/色盘/确认删除
 src/canvas/DistrictNode.jsx: 街区真容器，与画板同皮肤，NodeResizer 拉角，缩放连同成员补偿坐标持久化
@@ -71,7 +73,7 @@ src/canvas/SessionNode.jsx: 会话卡片(memo)，工具色脊柱 + 人话标题 
 src/panels/ContextFrame.jsx: 画布终端窗——拉线落空/右键就地弹出：白岛壳+深色终端体（Tokyo Night），加载失败自动退避重连；
   标题栏可拖、打开停最新、上滑倒序翻页(/api/context-page)至"── 会话开始 ──"、滚动无跳补偿、
   content-visibility 原生虚拟化(万行 60fps)、回到最新浮钮、一键续开/详情/复制
-src/panels/TopBar.jsx: 右上动作岛：saved/dirty/saving/error 静默同步点/有新活动举旗/整理/批量命名(进度轮询)/重扫
+src/panels/TopBar.jsx: 右上动作岛：saved/dirty/saving/error 静默同步点/有新活动举旗/智能整理/批量命名(进度轮询)/重扫
 src/panels/Sidebar.jsx: 左侧导航岛，宽度可拖、可收回，单击定位、双击改名
 src/panels/DetailPanel.jsx: 右侧详情岛（加载失败自动退避重连）——标题(就地改名)→一键续开→CONTEXT 摘要+digest→STOP 停止点→
   HANDOFF 接力(内置轻档生成 + 交接三件套 skill 终端出口 + Claude/Codex 显式双接班入口)→RUNS 实例→DETAIL 元信息→删除收底

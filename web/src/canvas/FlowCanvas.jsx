@@ -4,7 +4,7 @@
  * [OUTPUT]: 对外提供 FlowCanvas 组件：统一容器模型、弹性生长、拖放改归属、三系统边+手动边、
  *           Figma 式框选/平移/触控板手势、滚轮双模、容器缩放定桩、落空连线选择、缩放感知连接点、
  *           自研墨迹（直写文档、框选/多选/复制、缩放/旋转、样式岛、大底板自动沉层）、顶栏可见快捷键，
- *           容器承载=乐观拖动+一次 mutate、整理动效、普通模式绘图命中与删除治理
+ *           容器承载=乐观拖动+一次 mutate、街区/画板/随行墨迹智能整理动效、普通模式绘图命中与删除治理
  * [POS]: canvas 的画布引擎总装。单一世界单一相机：墨迹与卡片同住 RF viewport，
  *        文档变更到像素可见=一次 React commit——没有导出、没有帧、没有交接
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -16,7 +16,7 @@ import SessionNode from './SessionNode.jsx';
 import DistrictNode from './DistrictNode.jsx';
 import BoardNode, { BOARD_COLORS } from './BoardNode.jsx';
 import NoteNode from './NoteNode.jsx';
-import { buildGraph, PAD, resizedContainerChildren } from './layout.js';
+import { arrangedSceneGeometry, buildGraph, PAD, resizedContainerChildren } from './layout.js';
 import { sessionMenu, workspaceMenu, districtMenu, boardMenu, noteMenu, drawingMenu, paneMenu, edgeMenu, deleteBoardFlow, deleteNoteFlow } from './menus.jsx';
 import { connectionDrop, describeEdge, EDGE_META, syncHandleHitArea } from './connections.js';
 import {
@@ -29,7 +29,6 @@ import { createBatchCarryBridge, createInkDragBridge, hitContainer, planBatchCar
 import { applyBatchCarry, applyCarry, computeAnchorIds } from '../../../shared/canvas-carry.mjs';
 import { WHEEL_MODES, nextWheelMode, wheelDevice, zoomViewport } from './gestures.js';
 import { Icon, toast, confirmPop } from '../ui.jsx';
-
 const nodeTypes = { workspace: WorkspaceNode, session: SessionNode, district: DistrictNode, board: BoardNode, note: NoteNode };
 const INK_TOOL_KEYS = Object.freeze({ freedraw: 'P', rectangle: 'R', ellipse: 'O', arrow: 'A', text: 'T', eraser: 'E' });
 
@@ -538,8 +537,9 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   }, []);
   const applyArrange = useCallback(targetLayout => {
     const before = instRef.current?.getNodes() || built.nodes;
-    const after = buildGraph(workspaces, sessionsByKey, targetLayout, canvas.boards, edges, expanded, searching);
+    const after = buildGraph(workspaces, sessionsByKey, targetLayout, canvas.boards, edges, expanded, searching, { reflowBoards: true });
     const moves = planBatchCarry(before, after.nodes, aliveDrawing());
+    const arranged = arrangedSceneGeometry(after.nodes, targetLayout);
     rootRef.current?.classList.add('arranging');
     batchBridgeRef.current ||= createBatchCarryBridge(rootRef.current);
     batchBridgeRef.current.present(moves);
@@ -552,7 +552,8 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     }, 520);
     store.mutate(doc => ({
       ...doc,
-      layout: targetLayout,
+      layout: arranged.layout,
+      boards: doc.boards.map(board => ({ ...board, ...arranged.boards.get(String(board.id)) })),
       drawing: applyBatchCarry(doc.drawing, moves),
     }));
     return true;

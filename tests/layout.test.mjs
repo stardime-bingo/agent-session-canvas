@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildGraph, CARD_GAP, COL_W, GAP_IN, GUTTER, HEADER_H, PAD, packWorkspaces, resizedContainerChildren, resolveContainerOverlaps, tidyLayoutEntries } from '../web/src/canvas/layout.js';
+import { arrangedSceneGeometry, arrangeFlowBlocks, buildGraph, CARD_GAP, COL_W, GAP_IN, GUTTER, HEADER_H, PAD, packWorkspaces, resizedContainerChildren, resolveContainerOverlaps, tidyLayoutEntries } from '../web/src/canvas/layout.js';
 import { createBatchCarryBridge, planBatchCarry } from '../web/src/canvas/container-carry.js';
 
 const ws = (path, count = 1) => ({ path, visibleKeys: Array.from({ length: count }, (_, i) => `${path}:${i}`) });
@@ -47,6 +47,39 @@ test('automatic arrangement is deterministic and has no workspace collisions', (
   }
 });
 
+test('automatic arrangement sorts by activity and aligns workspaces into readable rows', () => {
+  const items = [
+    { ...ws('/old-tall', 8), lastActivity: '2026-07-01T00:00:00.000Z' },
+    { ...ws('/new-short', 1), lastActivity: '2026-07-19T00:00:00.000Z' },
+    { ...ws('/middle', 3), lastActivity: '2026-07-18T00:00:00.000Z' },
+    { ...ws('/older', 2), lastActivity: '2026-07-10T00:00:00.000Z' },
+  ];
+  const placed = packWorkspaces(items, {}, 'district', heightOf);
+
+  assert.deepEqual(placed.slice(0, 2).map(item => item.ws.path), ['/new-short', '/middle']);
+  assert.equal(placed[0].y, PAD.t);
+  assert.equal(placed[1].y, PAD.t);
+  assert.equal(placed[2].y, PAD.t + Math.max(placed[0].h, placed[1].h) + GAP_IN);
+  assert.equal(placed[3].y, placed[2].y);
+});
+
+test('outer automatic districts use balanced lanes instead of tall shelf rows', () => {
+  const blocks = [
+    { key: 'tall', w: 600, h: 1000 },
+    { key: 'short-a', w: 500, h: 220 },
+    { key: 'short-b', w: 500, h: 220 },
+    { key: 'short-c', w: 500, h: 220 },
+  ];
+  arrangeFlowBlocks(blocks);
+
+  assert.deepEqual(blocks.map(block => ({ key: block.key, x: block.x, y: block.y })), [
+    { key: 'tall', x: 0, y: 0 },
+    { key: 'short-a', x: 600 + GUTTER, y: 0 },
+    { key: 'short-b', x: 600 + GUTTER, y: 220 + GUTTER },
+    { key: 'short-c', x: 600 + GUTTER, y: 2 * (220 + GUTTER) },
+  ]);
+});
+
 test('membership-only tidy entries reflow as incoming geometry without producing NaN', () => {
   const items = [ws('/manual-member', 2)];
   const placed = packWorkspaces(items, {
@@ -71,6 +104,18 @@ test('a growing saved district pushes later containers away without changing the
   assert.equal(blocks[1].x, 600);
   assert.equal(blocks[1].y, 700 + GUTTER);
   assert.equal(blocks[2].y, 500);
+});
+
+test('automatic terrain avoids fixed manual containers without moving the manual anchor', () => {
+  const blocks = [
+    { key: 'manual-board', x: 0, y: 0, w: 700, h: 420, fixed: true },
+    { key: 'auto-district', x: 0, y: 0, w: 600, h: 300 },
+  ];
+  resolveContainerOverlaps(blocks);
+
+  assert.deepEqual(blocks[0], { key: 'manual-board', x: 0, y: 0, w: 700, h: 420, fixed: true });
+  assert.equal(blocks[1].x, 0);
+  assert.equal(blocks[1].y, 420 + GUTTER);
 });
 
 test('tidy resets geometry but preserves manual district and board membership', () => {
@@ -100,7 +145,7 @@ test('container resize persists React Flow child compensation so absolute positi
   assert.equal(80 + 40, 120); // resize 前 parent.x=100, child.x=20，绝对 x 同为 120
 });
 
-test('production buildGraph planning includes a board displaced only by collision resolution', () => {
+test('production tidy preserves a manual board and moves automatic terrain around it', () => {
   const workspaces = [{
     path: '/Users/test/A/X',
     visibleKeys: ['session:1'],
@@ -114,16 +159,48 @@ test('production buildGraph planning includes a board displaced only by collisio
   const after = buildGraph(workspaces, sessions, targetLayout, boards, [], new Set(), false);
   const boardBefore = before.nodes.find(node => node.id === 'board:b1');
   const boardAfter = after.nodes.find(node => node.id === 'board:b1');
+  const districtBefore = before.nodes.find(node => node.id === 'district:A / X');
+  const districtAfter = after.nodes.find(node => node.id === 'district:A / X');
   assert.deepEqual(boardBefore.position, { x: 0, y: 0 });
-  assert.ok(boardAfter.position.y > 0);
+  assert.deepEqual(boardAfter.position, { x: 0, y: 0 });
+  assert.deepEqual(districtBefore.position, { x: 2000, y: 0 });
+  assert.ok(districtAfter.position.y > boardAfter.height);
 
   const moves = planBatchCarry(before.nodes, after.nodes,
     [{ id: 'board-ink', x: 20, y: 20, width: 10, height: 10 }]);
-  assert.deepEqual(moves.find(move => move.containerId === 'board:b1'), {
-    containerId: 'board:b1',
-    from: { x: 0, y: 0 },
-    to: { ...boardAfter.position },
-    anchorIds: ['board-ink'],
+  assert.equal(moves.some(move => move.containerId === 'board:b1'), false);
+  assert.deepEqual(moves.find(move => move.containerId === 'district:A / X'), {
+    containerId: 'district:A / X',
+    from: { x: 2000, y: 0 },
+    to: { ...districtAfter.position },
+    anchorIds: [],
+  });
+});
+
+test('explicit intelligent tidy includes boards in balanced lanes and compacts oversized geometry', () => {
+  const workspaces = [{
+    path: '/Users/test/A/X', visibleKeys: ['session:1'],
+    lastActivity: '2026-07-19T00:00:00.000Z',
+  }];
+  const sessions = { 'session:1': { cwd: '/Users/test/A/X' } };
+  const boards = [{ id: 'b1', x: 4000, y: 3000, w: 1600, h: 1200 }];
+  const arranged = buildGraph(
+    workspaces, sessions, {}, boards, [], new Set(), false,
+    { reflowBoards: true },
+  );
+  const district = arranged.nodes.find(node => node.type === 'district');
+  const board = arranged.nodes.find(node => node.id === 'board:b1');
+
+  assert.deepEqual(district.position, { x: 0, y: 0 });
+  assert.equal(board.position.y, 0);
+  assert.ok(board.position.x > district.position.x + district.width);
+  assert.deepEqual({ w: board.width, h: board.height }, { w: 520, h: 360 });
+  const geometry = arrangedSceneGeometry(arranged.nodes, { '/Users/test/A/X': { d: 'A / X' } });
+  assert.deepEqual(geometry.layout['district:A / X'], {
+    x: district.position.x, y: district.position.y, w: district.width, h: district.height,
+  });
+  assert.deepEqual(geometry.boards.get('b1'), {
+    x: board.position.x, y: board.position.y, w: board.width, h: board.height,
   });
 });
 

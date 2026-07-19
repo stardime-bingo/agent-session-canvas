@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 工作区列表、layout 手工位置记忆、工作区实时高度
- * [OUTPUT]: 提供画布布局常量、production buildGraph、成员打包、容器缩放子项快照、街区碰撞修复与可撤销整理所需的归属提取
+ * [OUTPUT]: 提供画布布局常量、production buildGraph、活跃度行网格/街区平衡车道、容器缩放子项快照、固定锚点避让与可撤销整理归属
  * [POS]: FlowCanvas 的纯布局内核；不读写磁盘，不触碰真实会话，可由 node:test 直接证伪
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -10,7 +10,8 @@ export const GAP_IN = 40;
 export const PAD = { t: 62, l: 26, r: 26, b: 26 };
 export const BREATH = { w: 200, h: 120 };
 export const GUTTER = 170;
-export const ROW_MAX_W = 5200;
+export const MAX_FLOW_LANES = 4;
+export const TARGET_FLOW_ASPECT = 1.6;
 export const HEADER_H = 66;
 export const CARD_H = 62;
 export const CARD_GAP = 8;
@@ -21,6 +22,22 @@ export function tidyLayoutEntries(layout) {
   return Object.entries(layout || {}).flatMap(([path, pos]) =>
     typeof pos?.d === 'string' && pos.d ? [{ path, d: pos.d }] : [],
   );
+}
+
+/** 显式整理落盘几何：工作区归属沿用 targetLayout，街区与画板写入本轮确定性终点。 */
+export function arrangedSceneGeometry(nodes, targetLayout) {
+  const layout = { ...targetLayout };
+  const boards = new Map();
+  for (const node of nodes) {
+    if (node.type !== 'district' && node.type !== 'board') continue;
+    const geometry = {
+      x: Math.round(node.position.x), y: Math.round(node.position.y),
+      w: Math.round(node.width ?? node.data._w), h: Math.round(node.height ?? node.data._h),
+    };
+    if (node.type === 'district') layout[node.id] = geometry;
+    else boards.set(String(node.data.board.id), geometry);
+  }
+  return { layout, boards };
 }
 
 /**
@@ -75,6 +92,26 @@ export function packWorkspaces(members, layout, key, heightOf) {
     else incoming.push({ ws, h, order });
   });
 
+  // 没有手工几何就是自动地形（含显式“整理”后的 membership-only layout）：
+  // 活跃者从左上开始，同行共享基线。宁可留一点行内呼吸，也不要瀑布流把阅读顺序打碎。
+  if (!saved.length) {
+    incoming.sort((a, b) =>
+      String(b.ws.lastActivity || '').localeCompare(String(a.ws.lastActivity || '')) ||
+      String(a.ws.path).localeCompare(String(b.ws.path)) || a.order - b.order);
+    const aligned = [];
+    let y = PAD.t;
+    for (let start = 0; start < incoming.length; start += cols) {
+      const row = incoming.slice(start, start + cols);
+      row.forEach((item, column) => aligned.push({
+        ...item,
+        x: PAD.l + column * (COL_W + GAP_IN),
+        y,
+      }));
+      y += Math.max(...row.map(item => item.h), 0) + GAP_IN;
+    }
+    return aligned;
+  }
+
   saved.sort((a, b) => a.y - b.y || a.x - b.x || a.order - b.order);
   const placed = [];
   for (const item of saved) {
@@ -93,12 +130,50 @@ export function packWorkspaces(members, layout, key, heightOf) {
   return placed;
 }
 
+/**
+ * 自动街区按最多四条等宽纵向车道放置：先让最新的街区占据首屏，再把后续街区放进当前最短车道。
+ * 巨型街区只拉长自己的车道，不再像 shelf row 一样把整行小街区下方撑成大片空洞。
+ */
+export function arrangeFlowBlocks(blocks) {
+  if (!blocks.length) return blocks;
+  const laneWidth = Math.max(...blocks.map(block => block.w), 0);
+  const totalHeight = blocks.reduce((sum, block) => sum + block.h, 0)
+    + Math.max(0, blocks.length - 1) * GUTTER;
+  let laneCount = 1;
+  let bestScore = Infinity;
+  for (let candidate = 1; candidate <= Math.min(MAX_FLOW_LANES, blocks.length); candidate++) {
+    const width = candidate * laneWidth + (candidate - 1) * GUTTER;
+    const estimatedHeight = totalHeight / candidate;
+    const score = Math.abs(Math.log((width / estimatedHeight) / TARGET_FLOW_ASPECT));
+    if (score < bestScore) { laneCount = candidate; bestScore = score; }
+  }
+  const heights = Array(laneCount).fill(0);
+
+  blocks.forEach((block, index) => {
+    let lane = index < laneCount ? index : 0;
+    if (index >= laneCount) {
+      for (let candidate = 1; candidate < laneCount; candidate++) {
+        if (heights[candidate] < heights[lane]) lane = candidate;
+      }
+    }
+    block.x = lane * (laneWidth + GUTTER);
+    block.y = heights[lane];
+    heights[lane] += block.h + GUTTER;
+  });
+  return blocks;
+}
+
 /** 街区/画板变大后可能侵入邻居；保留空间顺序，只把后方容器向下顺延。 */
 export function resolveContainerOverlaps(blocks) {
-  const ordered = blocks
+  const fixed = blocks
+    .filter(block => block.fixed)
     .map((block, order) => ({ block, order }))
     .sort((a, b) => a.block.y - b.block.y || a.block.x - b.block.x || a.order - b.order);
-  const placed = [];
+  const ordered = blocks
+    .filter(block => !block.fixed)
+    .map((block, order) => ({ block, order }))
+    .sort((a, b) => a.block.y - b.block.y || a.block.x - b.block.x || a.order - b.order);
+  const placed = fixed.map(item => item.block);
 
   for (const item of ordered) {
     const block = item.block;
@@ -136,7 +211,7 @@ function districtDir(memberPath) {
  * FlowCanvas 的唯一生产图构建器。自动整理规划必须同步调用同一函数，
  * 不能等待 React/DOM 后再反推容器量差。
  */
-export function buildGraph(workspaces, sessionsByKey, layout, boards, relEdges, expanded, searching) {
+export function buildGraph(workspaces, sessionsByKey, layout, boards, relEdges, expanded, searching, options = {}) {
   const boardById = new Map((boards || []).map(b => [`board:${b.id}`, b]));
   const showAllOf = ws => searching || expanded.has(ws.path);
   const heightOf = ws => {
@@ -164,11 +239,15 @@ export function buildGraph(workspaces, sessionsByKey, layout, boards, relEdges, 
     const maxY = Math.max(...placed.map(p => p.y + p.h), PAD.t + 40);
     const board = boardById.get(key);
     const savedD = isBoard ? board : layout?.[`district:${key}`];
+    const fixed = (isBoard && !options.reflowBoards)
+      || (!isBoard && Number.isFinite(savedD?.x) && Number.isFinite(savedD?.y));
+    const savedW = isBoard && options.reflowBoards ? 0 : savedD?.w;
+    const savedH = isBoard && options.reflowBoards ? 0 : savedD?.h;
     const minW = maxX + PAD.r, minH = maxY + PAD.b;
     blocks.push({
-      key, isBoard, board, placed, minW, minH,
-      w: Math.max(minW + (isBoard || savedD?.w ? 0 : BREATH.w), savedD?.w || 0),
-      h: Math.max(minH + (isBoard || savedD?.h ? 0 : BREATH.h), savedD?.h || 0),
+      key, isBoard, board, placed, minW, minH, fixed,
+      w: Math.max(minW + (isBoard || savedW ? 0 : BREATH.w), savedW || 0, isBoard ? 520 : 0),
+      h: Math.max(minH + (isBoard || savedH ? 0 : BREATH.h), savedH || 0, isBoard ? 360 : 0),
       count: members.length,
       activity: members[0]?.lastActivity || '0',
     });
@@ -186,7 +265,7 @@ export function buildGraph(workspaces, sessionsByKey, layout, boards, relEdges, 
   }
 
   const clusterAct = new Map();
-  const flowBlocks = blocks.filter(b => !b.isBoard && !layout?.[`district:${b.key}`]);
+  const flowBlocks = blocks.filter(b => !b.fixed);
   for (const b of flowBlocks) {
     const r = find(b.key);
     if (!clusterAct.has(r) || b.activity > clusterAct.get(r)) clusterAct.set(r, b.activity);
@@ -196,16 +275,10 @@ export function buildGraph(workspaces, sessionsByKey, layout, boards, relEdges, 
     if (ra !== rb) return clusterAct.get(rb).localeCompare(clusterAct.get(ra));
     return b.activity.localeCompare(a.activity);
   });
-  let cx = 0, cy = 0, rowH = 0;
-  for (const b of flowBlocks) {
-    if (cx > 0 && cx + b.w > ROW_MAX_W) { cx = 0; cy += rowH + GUTTER; rowH = 0; }
-    b.x = cx; b.y = cy;
-    cx += b.w + GUTTER;
-    rowH = Math.max(rowH, b.h);
-  }
+  arrangeFlowBlocks(flowBlocks);
   for (const b of blocks) {
-    if (b.isBoard) { b.x = b.board.x; b.y = b.board.y; }
-    else if (layout?.[`district:${b.key}`]) {
+    if (b.isBoard && b.fixed) { b.x = b.board.x; b.y = b.board.y; }
+    else if (b.fixed) {
       b.x = layout[`district:${b.key}`].x;
       b.y = layout[`district:${b.key}`].y;
     }

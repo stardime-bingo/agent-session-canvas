@@ -168,7 +168,7 @@ export default function App() {
     const applied = actionsRef.current.applyArrange?.(targetLayout);
     if (!applied) return toast('整理失败：画布尚未就绪', 'error');
     focusRef.current(null);
-    toast('已整理位置，人工归属保持不变', 'ok', { label: '撤销', onClick: () => storeRef.current.undo() });
+    toast('已按活跃度整理街区与画板，归属保持不变', 'ok', { label: '撤销', onClick: () => storeRef.current.undo() });
   }, []);
 
   // ---- 对象动作分发：全部同步 mutate，磁盘由 store 后台冲刷 ----

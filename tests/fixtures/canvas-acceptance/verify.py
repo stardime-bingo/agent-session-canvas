@@ -292,6 +292,73 @@ def verify_handoff_choice(browser):
     }
 
 
+def verify_layout_quality(browser):
+    context = browser.new_context(viewport={"width": 1440, "height": 960})
+    page = context.new_page()
+    diagnostics = diagnostics_for(context, page)
+    response = page.goto(f"{BASE}/?mode=layout-quality", wait_until="networkidle", timeout=90_000)
+    assert response is not None and response.status == 200
+    page.wait_for_function("() => window.__LAYOUT_ACCEPTANCE__?.ready === true", timeout=90_000)
+    before = page.evaluate("() => window.__LAYOUT_ACCEPTANCE__.snapshot()")
+    arrange = page.get_by_role("button", name="智能整理", exact=True)
+    assert arrange.count() == 1 and arrange.is_enabled()
+    arrange.click()
+    page.wait_for_function(
+        "() => ['complete', 'fail'].includes(window.__LAYOUT_ACCEPTANCE__?.status)",
+        timeout=90_000,
+    )
+    result = page.evaluate("() => window.__LAYOUT_ACCEPTANCE__")
+    report = result["report"]
+    assert result["status"] == "complete" and report["pass"] is True, json.dumps(result, ensure_ascii=False)
+    assert report["collisions"] == [], report
+    assert report["rowsAligned"] is True, report
+    assert report["membershipsPreserved"] is True, report
+    assert report["districtGeometryPersisted"] is True, report
+    assert report["boardMoved"] is True and report["boardCompacted"] is True, report
+    assert report["noteUnchanged"] is True and report["inkCarried"] is True, report
+    assert 2 <= report["laneCount"] <= 4, report
+    assert 1.2 <= report["bounds"]["aspect"] <= 2.2, report
+    assert report["performance"]["syncMs"] <= 50, report
+    assert report["performance"]["firstPaintMs"] <= 100, report
+    assert report["performance"]["longTaskSupported"] is True, report
+    assert not [value for value in report["performance"]["longTasks"] if value >= 50], report
+    assert page.get_by_role("button", name="智能整理", exact=True).count() == 1
+    undo = page.get_by_role("button", name="撤销", exact=True)
+    assert undo.count() == 1 and undo.is_enabled()
+    undo.click()
+    page.wait_for_function(
+        "before => JSON.stringify(window.__LAYOUT_ACCEPTANCE__.snapshot().layout) === JSON.stringify(before.layout)",
+        arg=before,
+        timeout=10_000,
+    )
+    undone = page.evaluate("() => window.__LAYOUT_ACCEPTANCE__.snapshot()")
+    assert undone["boards"] == before["boards"], undone
+    assert undone["notes"] == before["notes"], undone
+    assert undone["drawing"] == before["drawing"], undone
+    assert_clean(diagnostics)
+    context.close()
+    return {
+        "status": "pass",
+        "laneCount": report["laneCount"],
+        "bounds": report["bounds"],
+        "containerCount": report["containerCount"],
+        "rowsAligned": True,
+        "membershipsPreserved": True,
+        "districtGeometryPersisted": True,
+        "boardMoved": True,
+        "boardCompacted": True,
+        "noteUnchanged": True,
+        "inkCarried": True,
+        "undoRestored": True,
+        "performance": report["performance"],
+        "consoleErrors": 0,
+        "consoleWarnings": 0,
+        "pageErrors": 0,
+        "externalResources": 0,
+        "apiResources": 0,
+    }
+
+
 def verify_size(browser, size):
     context = browser.new_context(viewport={"width": 1440, "height": 960})
     page = context.new_page()
@@ -525,6 +592,7 @@ with sync_playwright() as playwright:
                 "production": verify_production(browser),
                 "interaction": verify_interaction(browser),
                 "handoffChoice": verify_handoff_choice(browser),
+                "layoutQuality": verify_layout_quality(browser),
             }
         elif args.suite == "perf352":
             output = {

@@ -1,7 +1,7 @@
 /**
  * [INPUT]: 依赖 react、api 的 backfill 接口、ui 的 Icon
- * [OUTPUT]: 对外提供 TopBar 组件——右上动作岛：静默同步状态点/有新活动举旗/可撤销整理/批量命名/重扫
- * [POS]: panels 的动作岛（历史名 TopBar）；整理只重置几何且保留人工归属，回执可直接撤销
+ * [OUTPUT]: 对外提供 TopBar 组件——右上动作岛：静默同步状态点/有新活动举旗/可撤销智能整理/批量命名/重扫
+ * [POS]: panels 的动作岛（历史名 TopBar）；智能整理按活跃度重排街区与画板、保留人工归属，回执可直接撤销
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
 import React, { useEffect, useState } from 'react';
@@ -36,8 +36,8 @@ export default function TopBar({ onRescan, pending, onRefresh, onArrange, syncSt
           ● 有新活动
         </button>
       )}
-      <button className="btn ghost" title="整理位置并全景归位；保留人工街区/画板归属，可立即撤销" onClick={onArrange}>
-        <Icon name="tidy" /> 整理
+      <button className="btn ghost" title="按活跃度整理街区与画板；容器内墨迹随行，便签保持手工位置，保留归属，可立即撤销" onClick={onArrange}>
+        <Icon name="tidy" /> 智能整理
       </button>
       <button className="btn ghost" disabled={bf?.running}
         title="把近 30 天机器味标题批量翻译成人话（Codex 优先，额度尽自动切 Claude）"
