@@ -175,12 +175,12 @@ async function main() {
     server = http.createServer((request, response) => {
       const route = classifyAcceptanceRequest(request.method, request.url);
       const requestUrl = new URL(request.url, 'http://127.0.0.1:4518');
-      const interactionDocument = fixtureName === 'prod'
+      const canvasFixtureDocument = fixtureName === 'prod'
         && route.relative === 'index.html'
-        && requestUrl.searchParams.get('mode') === 'interaction';
+        && ['interaction', 'performance-352'].includes(requestUrl.searchParams.get('mode'));
       response.setHeader(
         'Content-Security-Policy',
-        interactionDocument
+        canvasFixtureDocument
           ? DOCUMENT_CSP
           : (fixtureName === 'prod' && route.relative === 'index.html'
             ? prodCsp
@@ -208,7 +208,7 @@ async function main() {
       }
       response.writeHead(200, { 'Content-Type': mime[path.extname(file)] || 'application/octet-stream' });
       if (request.method === 'HEAD') response.end();
-      else if (interactionDocument) response.end(interactionIndex);
+      else if (canvasFixtureDocument) response.end(interactionIndex);
       else fs.createReadStream(file).pipe(response);
     });
 

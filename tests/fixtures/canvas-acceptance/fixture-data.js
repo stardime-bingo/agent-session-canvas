@@ -1,12 +1,44 @@
 /**
- * [INPUT]: 元素数量 300/800 与确定性序号
- * [OUTPUT]: 确定性双平面自研墨迹元素与验收数据
+ * [INPUT]: 元素数量 300/800、352 节点 FlowCanvas 规模与确定性序号
+ * [OUTPUT]: 确定性双平面自研墨迹元素，以及 1 街区 + 1 工作区 + 350 会话的性能验收数据
  * [POS]: 4518 无持久化验收数据真相；不读真实 canvas/layout
  * [PROTOCOL]: 变更时更新此头部，然后检查 README/web/CLAUDE.md
  */
 
 
 const COLORS = ['#dbeafe', '#dcfce7', '#fef3c7', '#fce7f3'];
+
+export const FLOW_PERFORMANCE_NODE_COUNT = 352;
+export const FLOW_PERFORMANCE_WORKSPACE = '/Users/fixture/Perf352';
+
+export function createFlowPerformanceFixture() {
+  const sessionCount = FLOW_PERFORMANCE_NODE_COUNT - 2;
+  const keys = Array.from({ length: sessionCount }, (_, index) => `codex:perf-352-${index}`);
+  const sessionsByKey = Object.fromEntries(keys.map((key, index) => [key, {
+    key,
+    tool: index % 2 ? 'claude' : 'codex',
+    status: index % 11 === 0 ? 'active' : 'done',
+    title: `匿名性能会话 ${String(index + 1).padStart(3, '0')}`,
+    cwd: FLOW_PERFORMANCE_WORKSPACE,
+    updatedAt: '2026-07-19T00:00:00.000Z',
+    kind: 'session',
+    subagents: 0,
+    runs: 1,
+    summary: '',
+    hasHandoff: false,
+    gitBranch: index % 9 === 0 ? 'feat/anonymous-fixture' : 'main',
+  }]));
+  const workspaces = [{
+    path: FLOW_PERFORMANCE_WORKSPACE,
+    name: '352 节点性能场景',
+    parent: null,
+    tools: { codex: Math.ceil(sessionCount / 2), claude: Math.floor(sessionCount / 2) },
+    lastActivity: '2026-07-19T00:00:00.000Z',
+    sessionKeys: keys,
+    visibleKeys: keys,
+  }];
+  return { keys, sessionsByKey, workspaces };
+}
 
 const baseElement = (id, index, below) => ({
   id,

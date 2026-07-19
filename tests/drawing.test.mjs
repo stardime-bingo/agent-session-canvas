@@ -1,7 +1,7 @@
 /**
  * [INPUT]: web/src/canvas/drawing.js 墨迹纯几何内核
  * [OUTPUT]: 命中检测双模（描边带/选择热区/旋转/折线段/后画者优先/墓碑锁定）、包围盒、
- *           平移/删除/沉浮不可变变换、大实心底板判定、4518 新合同夹具契约回归
+ *           平移/删除/沉浮不可变变换、大实心底板判定、4518 交互与 352 节点性能夹具契约回归
  * [POS]: tests 的墨迹几何证伪层——命中区严格贴墨迹，隐形玻璃一块都不许有
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -13,6 +13,10 @@ import {
   committedDrawingElements, deleteDrawingElement, drawingBounds, hitDrawingElement,
   isBelow, isLargeFilledDrawingElement, setDrawingElementPlane, translateDrawingElements,
 } from '../web/src/canvas/drawing.js';
+import { buildGraph } from '../web/src/canvas/layout.js';
+import {
+  createFlowPerformanceFixture, FLOW_PERFORMANCE_NODE_COUNT, FLOW_PERFORMANCE_WORKSPACE,
+} from './fixtures/canvas-acceptance/fixture-data.js';
 
 const rect = (id, x, y, w, h, extra = {}) => ({
   id, type: 'rectangle', x, y, width: w, height: h,
@@ -104,6 +108,31 @@ test('300/800 直渲性能红线写死进 4518 合同', () => {
   const fixture = fs.readFileSync(path.resolve('tests/fixtures/canvas-acceptance/main.jsx'), 'utf8');
   assert.match(fixture, /MOUNT_BUDGET_MS\s*=.*300:\s*900.*800:\s*1600/s);
   assert.match(fixture, /mountMs\s*<=\s*budgetMs/);
+});
+
+test('352 节点性能场景使用 production buildGraph，并要求真实 pointer + CDP trace', () => {
+  const fixture = createFlowPerformanceFixture();
+  const built = buildGraph(
+    fixture.workspaces,
+    fixture.sessionsByKey,
+    {},
+    [],
+    [],
+    new Set([FLOW_PERFORMANCE_WORKSPACE]),
+    false,
+  );
+  assert.equal(built.nodes.length, FLOW_PERFORMANCE_NODE_COUNT);
+  assert.deepEqual(
+    built.nodes.reduce((counts, node) => ({ ...counts, [node.type]: (counts[node.type] || 0) + 1 }), {}),
+    { district: 1, workspace: 1, session: 350 },
+  );
+  const page = fs.readFileSync(path.resolve('tests/fixtures/canvas-acceptance/performance-352-data.js'), 'utf8');
+  const verifier = fs.readFileSync(path.resolve('tests/fixtures/canvas-acceptance/verify.py'), 'utf8');
+  assert.match(page, /FlowCanvas/);
+  assert.match(page, /PerformanceObserver/);
+  assert.match(verifier, /page\.mouse\.down\(\)/);
+  assert.match(verifier, /Tracing\.start/);
+  assert.match(verifier, /frameP95MaxMs.*20/);
 });
 
 test('4518 静态服务只暴露 allowlist fixture 并拒绝写请求', () => {

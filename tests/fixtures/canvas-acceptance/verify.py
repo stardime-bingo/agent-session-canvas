@@ -1,6 +1,12 @@
 import argparse
+import base64
+import gzip
+import hashlib
 import json
+import math
 import os
+import time
+from pathlib import Path
 from urllib.parse import urlparse
 
 from playwright.sync_api import sync_playwright
@@ -14,6 +20,18 @@ CHROME = os.environ.get(
 TERMINAL = ("complete", "fail", "error")
 FORBIDDEN_RESOURCE_ROOTS = ("/api", "/data", "/@fs", "/.git")
 MOUNT_BUDGET_MS = {300: 900, 800: 1600}
+PERFORMANCE_352 = {
+    "nodeCount": 352,
+    "minFrameSamples": 90,
+    "minPointerMoves": 100,
+    "minDistinctPositions": 80,
+    "minDisplacementPx": 150,
+    "frameP95MaxMs": 20,
+    "frameMaxMs": 50,
+    "slowFrameRatioMax": 0.05,
+    "longTaskMaxCount": 0,
+}
+RUN_ID = f"{time.strftime('%Y%m%dT%H%M%S')}-{os.getpid()}"
 PROD_GRAPH = {
     "sessions": [],
     "workspaces": {},
@@ -85,6 +103,35 @@ def diagnostics_for(context, page):
 def assert_clean(diagnostics):
     for key in diagnostics:
         assert not diagnostics[key], f"{key}: {json.dumps(diagnostics[key], ensure_ascii=False)}"
+
+
+def percentile(values, fraction):
+    ordered = sorted(values)
+    if not ordered:
+        return 0
+    index = min(len(ordered) - 1, max(0, math.ceil(len(ordered) * fraction) - 1))
+    return ordered[index]
+
+
+def finish_cdp_trace(cdp, page):
+    completed = []
+    cdp.on("Tracing.tracingComplete", lambda params: completed.append(params))
+    cdp.send("Tracing.end")
+    for _ in range(500):
+        if completed:
+            break
+        page.wait_for_timeout(10)
+    assert completed and completed[0].get("stream"), "CDP trace stream did not complete"
+    handle = completed[0]["stream"]
+    chunks = []
+    while True:
+        part = cdp.send("IO.read", {"handle": handle})
+        data = part.get("data", "")
+        chunks.append(base64.b64decode(data) if part.get("base64Encoded") else data.encode())
+        if part.get("eof"):
+            break
+    cdp.send("IO.close", {"handle": handle})
+    return b"".join(chunks)
 
 
 def production_init_script():
@@ -208,8 +255,153 @@ def verify_size(browser, size):
     }
 
 
+def verify_performance_352(browser, artifacts_dir):
+    context = browser.new_context(viewport={"width": 1440, "height": 960})
+    page = context.new_page()
+    diagnostics = diagnostics_for(context, page)
+    trace_started = False
+    cdp = None
+    try:
+        response = page.goto(f"{BASE}/?mode=performance-352", wait_until="networkidle", timeout=90_000)
+        assert response is not None and response.status == 200
+        report = wait_for_probe(page)
+        assert report["status"] == "complete", json.dumps(report, ensure_ascii=False)
+        detail = report["report"]
+        assert detail["nodeCount"] == PERFORMANCE_352["nodeCount"], detail
+        assert detail["targetCount"] == 1, detail
+
+        target = page.locator(".react-flow__node-district .container-drag-handle")
+        assert target.count() == 1, "performance drag target must be unique"
+        target_box = target.bounding_box()
+        district = page.locator(".react-flow__node-district")
+        before = district.bounding_box()
+        assert target_box and before, "performance drag geometry unavailable"
+        start_x = target_box["x"] + min(180, target_box["width"] * 0.65)
+        start_y = target_box["y"] + target_box["height"] / 2
+        drag_x, drag_y = 180, 100
+        page.mouse.move(start_x, start_y)
+
+        cdp = context.new_cdp_session(page)
+        cdp.send("Tracing.start", {
+            "categories": ",".join([
+                "devtools.timeline",
+                "disabled-by-default-devtools.timeline.frame",
+                "blink.user_timing",
+                "toplevel",
+            ]),
+            "options": "sampling-frequency=10000",
+            "transferMode": "ReturnAsStream",
+        })
+        trace_started = True
+        page.evaluate("selector => window.__FLOW_PERF_352__.start(selector)", ".react-flow__node-district")
+        page.mouse.down()
+        for step in range(1, 121):
+            page.mouse.move(
+                start_x + drag_x * step / 120,
+                start_y + drag_y * step / 120,
+            )
+            page.wait_for_timeout(16)
+        page.mouse.up()
+        page.wait_for_timeout(80)
+        perf = page.evaluate("() => window.__FLOW_PERF_352__.stop()")
+        after = district.bounding_box()
+        assert after, "performance drag final geometry unavailable"
+        trace_bytes = finish_cdp_trace(cdp, page)
+        trace_started = False
+
+        frame_intervals = perf["frameIntervals"]
+        frame_p95 = percentile(frame_intervals, 0.95)
+        frame_max = max(frame_intervals, default=0)
+        slow_frames = [value for value in frame_intervals if value > PERFORMANCE_352["frameP95MaxMs"]]
+        slow_ratio = len(slow_frames) / len(frame_intervals) if frame_intervals else 1
+        effective_fps = 1000 / (sum(frame_intervals) / len(frame_intervals)) if frame_intervals else 0
+        distinct_positions = len({
+            (round(position["x"], 1), round(position["y"], 1))
+            for position in perf["positions"]
+        })
+        displacement = math.hypot(after["x"] - before["x"], after["y"] - before["y"])
+        page_long_tasks = [duration for duration in perf["longTasks"] if duration >= 50]
+
+        trace = json.loads(trace_bytes)
+        trace_events = trace.get("traceEvents", [])
+        cdp_long_tasks = [
+            event.get("dur", 0) / 1000
+            for event in trace_events
+            if event.get("name") == "RunTask"
+            and event.get("ph") == "X"
+            and event.get("dur", 0) >= 50_000
+        ]
+
+        thresholds = PERFORMANCE_352
+        checks = {
+            "nodeCount": detail["nodeCount"] == thresholds["nodeCount"],
+            "frameSamples": len(frame_intervals) >= thresholds["minFrameSamples"],
+            "pointerMoves": perf["pointerMoves"] >= thresholds["minPointerMoves"],
+            "distinctPositions": distinct_positions >= thresholds["minDistinctPositions"],
+            "displacement": displacement >= thresholds["minDisplacementPx"],
+            "frameP95": frame_p95 <= thresholds["frameP95MaxMs"],
+            "frameMax": frame_max <= thresholds["frameMaxMs"],
+            "slowFrameRatio": slow_ratio <= thresholds["slowFrameRatioMax"],
+            "longTaskSupport": perf["longTaskSupported"] is True,
+            "pageLongTasks": len(page_long_tasks) <= thresholds["longTaskMaxCount"],
+            "cdpLongTasks": len(cdp_long_tasks) <= thresholds["longTaskMaxCount"],
+        }
+        assert all(checks.values()), json.dumps({
+            "checks": checks,
+            "frameP95Ms": frame_p95,
+            "frameMaxMs": frame_max,
+            "slowFrameRatio": slow_ratio,
+            "pageLongTasks": page_long_tasks,
+            "cdpLongTasks": cdp_long_tasks,
+        }, ensure_ascii=False)
+        assert_clean(diagnostics)
+
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        trace_path = artifacts_dir / f"canvas-352-performance-{RUN_ID}.trace.json.gz"
+        compressed_trace = gzip.compress(trace_bytes, compresslevel=9)
+        trace_path.write_bytes(compressed_trace)
+        return {
+            "status": "pass",
+            "browserVersion": browser.version,
+            "target": "district container",
+            "nodeCount": detail["nodeCount"],
+            "durationMs": round(perf["durationMs"], 2),
+            "frameSamples": len(frame_intervals),
+            "effectiveFps": round(effective_fps, 2),
+            "frameP95Ms": round(frame_p95, 3),
+            "frameMaxMs": round(frame_max, 3),
+            "slowFrameCount": len(slow_frames),
+            "slowFrameRatio": round(slow_ratio, 5),
+            "pointerMoves": perf["pointerMoves"],
+            "distinctPositions": distinct_positions,
+            "displacementPx": round(displacement, 2),
+            "pageLongTaskCount": len(page_long_tasks),
+            "pageMaxLongTaskMs": round(max(page_long_tasks, default=0), 3),
+            "cdpLongTaskCount": len(cdp_long_tasks),
+            "cdpMaxLongTaskMs": round(max(cdp_long_tasks, default=0), 3),
+            "traceEventCount": len(trace_events),
+            "thresholds": thresholds,
+            "checks": checks,
+            "diagnostics": {key: len(value) for key, value in diagnostics.items()},
+            "trace": {
+                "path": str(trace_path.resolve()),
+                "sha256": hashlib.sha256(compressed_trace).hexdigest(),
+                "byteLength": len(compressed_trace),
+                "encoding": "gzip",
+            },
+        }
+    finally:
+        if trace_started and cdp is not None:
+            try:
+                finish_cdp_trace(cdp, page)
+            except Exception:
+                pass
+        context.close()
+
+
 parser = argparse.ArgumentParser()
-parser.add_argument("--suite", choices=("canvas", "prod"), default="canvas")
+parser.add_argument("--suite", choices=("canvas", "prod", "perf352"), default="canvas")
+parser.add_argument("--artifacts-dir", default="output/acceptance")
 args = parser.parse_args()
 
 with sync_playwright() as playwright:
@@ -222,6 +414,15 @@ with sync_playwright() as playwright:
                 "production": verify_production(browser),
                 "interaction": verify_interaction(browser),
             }
+        elif args.suite == "perf352":
+            output = {
+                "ok": True,
+                "suite": "perf352",
+                "performance": verify_performance_352(browser, Path(args.artifacts_dir)),
+            }
+            report_path = Path(args.artifacts_dir) / f"canvas-352-performance-{RUN_ID}.report.json"
+            output["reportPath"] = str(report_path.resolve())
+            report_path.write_text(json.dumps(output, ensure_ascii=False, indent=2) + "\n")
         else:
             output = {"ok": True, "suite": "canvas", "sizes": [verify_size(browser, size) for size in (300, 800)]}
     finally:

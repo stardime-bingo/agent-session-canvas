@@ -9,7 +9,7 @@ server/ - 零依赖 Node 后端 daemon（扫描/拉起/模型路由/AI/回填/HT
 web/ - React Flow 前端（总装 + UI 原子库 + 画布引擎/手势/菜单 + 四面板）
 hooks/ - Claude Code SessionEnd 接力钩子
 data/ - 运行时产物；scan-cache 可重建，enrich/canvas/layout/drawing-files 是珍贵资产
-tests/ - node:test 回归；fixtures/canvas-acceptance 是 4518 性能与交互夹具；archive/ 保存 v17 历史合同
+tests/ - node:test 回归；fixtures/canvas-acceptance 是 4518 的 300/800 挂载、352 节点拖动与交互夹具；archive/ 保存 v17 历史合同
 scripts/ - 安装、只读诊断、快捷启停与 4518 验收服务
 plugins/ - Claude Code / Codex 共用的薄插件
 docs/ + PRIVACY.md + TERMS.md - 文档、市场文案、隐私披露与公开使用条款
