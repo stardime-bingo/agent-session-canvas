@@ -8,6 +8,7 @@ Node.js 24 (零依赖后端) + React 18 + @xyflow/react 12 + Vite 8
 <directory>
 server/ - 零依赖 Node 后端 daemon (9文件 + adapters/: 扫描/拉起/模型路由/AI/回填/HTTP/场景快照仓与图片仓)
 web/ - React Flow 画布前端 (src/: 总装 + ui 原子库(toast/确认/就地改名/图标) + canvas/ 画布引擎/手势内核/菜单 + panels/ 四面板含终端框)
+mac-controller/ - SwiftPM + AppKit 原生控制器 (Dock/菜单栏状态、启停/重启/诊断、双隐藏后从 Applications 恢复)
 hooks/ - Claude Code SessionEnd 接力钩子 (自动生成接力提示词)
 data/ - 运行时产物: scan-cache.json(可丢弃) enrich/canvas/layout/drawing-files.json(珍贵) launch/(临时脚本)
 tests/ - 零依赖 node:test 回归：场景仓 LWW/资产先行、scene-store(合并 undo/防抖冲刷/退避/LWW 采纳)、增量布局/容器缩放、

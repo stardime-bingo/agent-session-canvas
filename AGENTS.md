@@ -7,6 +7,7 @@ Node.js 24（零依赖后端）+ React 18 + @xyflow/react 12 + Vite 8
 <directory>
 server/ - 零依赖 Node 后端 daemon（扫描/拉起/模型路由/AI/回填/HTTP/场景快照仓与图片仓）
 web/ - React Flow 前端（总装 + UI 原子库 + 画布引擎/手势/菜单 + 四面板）
+mac-controller/ - SwiftPM + AppKit 原生控制器（Dock/菜单栏状态、启停/诊断、双隐藏恢复）
 hooks/ - Claude Code SessionEnd 接力钩子
 data/ - 运行时产物；scan-cache 可重建，enrich/canvas/layout/drawing-files 是珍贵资产
 tests/ - node:test 回归；fixtures/canvas-acceptance 覆盖 4518 挂载、真实拓扑空闲/拖动、交互与匿名 hero，scene-sync-acceptance 用临时 daemon 验双标签与 pagehide；archive/ 保存 v17 历史合同

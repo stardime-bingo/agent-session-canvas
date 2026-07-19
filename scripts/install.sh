@@ -41,13 +41,24 @@ launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
 launchctl bootstrap "$DOMAIN" "$PLIST"
 launchctl kickstart -k "$DOMAIN/$LABEL"
 
+API_READY=false
 for _ in {1..20}; do
   if curl -fsS http://localhost:4517/api/graph >/dev/null 2>&1; then
-    echo "安装完成：http://localhost:4517"
-    exit 0
+    API_READY=true
+    break
   fi
   sleep 0.25
 done
 
-echo "服务已安装但尚未响应；请运行 $ROOT/scripts/doctor.sh。" >&2
-exit 1
+if [[ "$API_READY" != "true" ]]; then
+  echo "服务已安装但尚未响应；请运行 $ROOT/scripts/doctor.sh。" >&2
+  exit 1
+fi
+
+if xcrun --find swift >/dev/null 2>&1; then
+  "$ROOT/scripts/install-controller.sh" --no-open
+else
+  echo "提示：未找到 Swift 工具链，已跳过可选的原生控制器；Finder 与命令行入口仍可使用。" >&2
+fi
+
+echo "安装完成：http://localhost:4517"

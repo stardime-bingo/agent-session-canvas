@@ -15,7 +15,9 @@
     "acceptance:prod": "node scripts/serve-canvas-acceptance.mjs --fixture=prod",
     "acceptance:sync": "node scripts/serve-scene-sync-acceptance.mjs",
     "test": "node --test --test-concurrency=1 tests/*.test.mjs",
-    "verify:global": "npm run build && node --test --test-concurrency=1 tests/*.test.mjs",
+    "test:controller": "swift test --package-path mac-controller",
+    "build:controller": "./script/build_and_run.sh --build-only",
+    "verify:global": "npm run build && node --test --test-concurrency=1 tests/*.test.mjs && npm run test:controller",
     "serve": "node server/index.mjs",
     "scan": "node server/scanner.mjs",
     "start": "npm run build && npm run serve"
