@@ -1,7 +1,7 @@
 /**
  * [INPUT]: 场景文档的 drawing/drawingFiles、选中 ids、ink.js/ink-selection.js 纯函数；@xyflow/react 的 ViewportPortal
  * [OUTPUT]: 对外提供 InkLayer——把元素直接渲染成 SVG（沉/浮两平面），与卡片共用唯一 RF 相机；
- *           每个元素带 data-ink-element-id（承载桥/命中共用），选中元素画选择环
+ *           每个元素带 data-ink-element-id（承载桥/命中共用），手绘点按元素 x/y 平移，选中元素画选择环
  * [POS]: canvas 的自研墨迹渲染层。没有导出、没有帧、没有交接——React 渲染就是全部管线，
  *        文档变更到像素可见 = 一次 React commit
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -25,7 +25,11 @@ function InkElement({ el, files }) {
   };
   let shape = null;
   if (el.type === 'freedraw') {
-    shape = <path d={freedrawPath(el.points)} {...common} fill="none" />;
+    shape = (
+      <g transform={`translate(${el.x} ${el.y})`}>
+        <path d={freedrawPath(el.points)} {...common} fill="none" />
+      </g>
+    );
   } else if (el.type === 'line' || el.type === 'arrow') {
     const abs = el.points.map(([px, py]) => [el.x + px, el.y + py]);
     shape = <path d={el.type === 'arrow' ? arrowPath(abs) : abs.map(([x, y], i) => `${i ? 'L' : 'M'} ${x} ${y}`).join(' ')} {...common} fill="none" />;
@@ -88,7 +92,8 @@ function SelectionRing({ elements, selectedIds }) {
   const box = { minX: b.minX - pad, minY: b.minY - pad, maxX: b.maxX + pad, maxY: b.maxY + pad };
   const handles = selectionHandlePoints(b);
   return (
-    <svg style={{ position: 'absolute', left: 0, top: 0, overflow: 'visible', pointerEvents: 'none' }}
+    <svg data-ink-selection-ring="true"
+      style={{ position: 'absolute', left: 0, top: 0, overflow: 'visible', pointerEvents: 'none' }}
       width="1" height="1" aria-hidden="true">
       <rect x={box.minX} y={box.minY} width={box.maxX - box.minX} height={box.maxY - box.minY}
         fill="none" stroke="#155eef" strokeWidth={1.5} rx={4} vectorEffect="non-scaling-stroke" />

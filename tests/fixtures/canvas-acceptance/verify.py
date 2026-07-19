@@ -217,6 +217,24 @@ def verify_interaction(browser):
     assert len(checks) >= 15, checks
     assert all(checks.values()), json.dumps(checks, ensure_ascii=False)
     assert page.get_attribute("html", "data-interaction-status") == "pass"
+
+    # 信任级真实输入：合成 dispatchEvent 不会执行默认焦点动作，无法替代真鼠标验文字编辑器。
+    shortcut_keys = page.locator(".tool-island .tool-key").all_text_contents()
+    assert shortcut_keys == ["N", "B", "V", "P", "R", "O", "A", "T", "E", "F"], shortcut_keys
+    canvas_box = page.locator(".canvas-root").bounding_box()
+    assert canvas_box, canvas_box
+    page.keyboard.press("t")
+    page.mouse.click(canvas_box["x"] + canvas_box["width"] * 0.72, canvas_box["y"] + canvas_box["height"] * 0.78)
+    editor = page.locator(".ink-text-editor")
+    editor.wait_for(state="visible", timeout=10_000)
+    assert editor.evaluate("node => document.activeElement === node")
+    editor.fill("真实鼠标文字可见")
+    page.get_by_title("选择绘图（V）：框选/Shift 多选/拖动/缩放/旋转/Cmd+C/V/Alt 拖").click()
+    rendered_text = page.locator(".ink-world text", has_text="真实鼠标文字可见").last
+    rendered_box = rendered_text.bounding_box()
+    assert rendered_box and rendered_box["width"] > 40 and rendered_box["height"] > 10, rendered_box
+    checks["trustedPointerTextInput"] = True
+    checks["visibleShortcutLabels"] = True
     assert_clean(diagnostics)
     context.close()
     return {

@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖真实 FlowCanvas/scene-store/UIHost 与 4518 synthetic 数据；自研墨迹直渲，无故障注入
- * [OUTPUT]: 无 fetch 全内存交互画布 + 原生墨迹全链自动验收：冷渲/连发即时/P-R-O-A-T-E 实画/文字双击与字号/
+ * [OUTPUT]: 无 fetch 全内存交互画布 + 原生墨迹全链自动验收：冷渲/连发即时/P-R-O-A-T-E 实画/笔迹与文字可见位置/文字双击与字号/
  *           框选与 Shift 多选/批量样式移动缩放旋转删除/复制粘贴/Alt 拖/图片粘贴与 drop/文字图片变换/
  *           橡皮撤销/Esc 收工具/后台冲刷；报告挂 window
  * [POS]: 仅由 ?mode=interaction 动态加载；证伪"文档变更到像素可见=一次 React commit"的宪法
@@ -196,6 +196,33 @@ function InteractionCanvas() {
       checks.toolShortcuts = penTool === 'freedraw'
         && ['freedraw', 'rectangle', 'ellipse', 'arrow', 'text'].every(type => shortcutElements.some(el => el.type === type));
 
+      // 3b) 不只证明对象存在：手绘路径必须落在元素 x/y，文字必须有非透明像素包围盒。
+      const createdPen = shortcutElements.find(el => el.type === 'freedraw');
+      const penPath = shellRef.current?.querySelector(`.ink-world [data-ink-element-id="${createdPen.id}"] path`);
+      const penBox = penPath?.getBoundingClientRect();
+      const penOrigin = probe().flowToScreen({ x: createdPen.x, y: createdPen.y });
+      details.visualPlacement = {
+        penOrigin,
+        penBox: penBox && { left: penBox.left, top: penBox.top, width: penBox.width, height: penBox.height },
+      };
+      checks.inkVisualPlacement = !!penBox
+        && Math.abs(penBox.left - penOrigin.x) < 5
+        && Math.abs(penBox.top - penOrigin.y) < 5
+        && penBox.width > 20 && penBox.height > 10
+        && getComputedStyle(penPath).stroke !== 'none';
+      const textNode = shellRef.current?.querySelector(`.ink-world [data-ink-element-id="${createdText.id}"] text`);
+      const textDomBox = textNode?.getBoundingClientRect();
+      const textOrigin = probe().flowToScreen({ x: createdText.x, y: createdText.y });
+      details.visualPlacement.textOrigin = textOrigin;
+      details.visualPlacement.textBox = textDomBox && {
+        left: textDomBox.left, top: textDomBox.top, width: textDomBox.width, height: textDomBox.height,
+      };
+      checks.textVisualPlacement = !!textDomBox
+        && Math.abs(textDomBox.left - textOrigin.x) < 5
+        && Math.abs(textDomBox.top - textOrigin.y) < 8
+        && textDomBox.width > 40 && textDomBox.height > 10
+        && !['none', 'transparent', 'rgba(0, 0, 0, 0)'].includes(getComputedStyle(textNode).fill);
+
       // 4) 已有文字双击就地编辑，字号岛真实改成 28；随后单元素缩放/旋转都写回同一文档
       doubleClick({ x: createdText.x + 4, y: createdText.y + 4 });
       const reopenedText = await waitFor(() => shellRef.current?.querySelector('.ink-text-editor'), 'double click text editor');
@@ -204,6 +231,14 @@ function InteractionCanvas() {
       reopenedText.blur();
       probe().setSelectedId(createdText.id);
       await waitFor(() => probe().snapshot().selectedId === createdText.id, 'select edited text');
+      const selectionRing = await waitFor(
+        () => shellRef.current?.querySelector('[data-ink-selection-ring="true"]'),
+        'visible selection ring',
+      );
+      const selectionOutline = selectionRing.querySelector('rect');
+      checks.selectionRingVisible = !!selectionOutline
+        && getComputedStyle(selectionOutline).stroke !== 'none'
+        && selectionOutline.getBoundingClientRect().width > 20;
       const size28 = await waitFor(() => shellRef.current?.querySelector('button[title="字号 28"]'), 'font size 28');
       size28.click();
       await waitFor(() => store.get().drawing.find(el => el.id === createdText.id)?.fontSize === 28, 'font size update');

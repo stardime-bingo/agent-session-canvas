@@ -1,7 +1,7 @@
 /**
  * [INPUT]: scene-store、ink.js 元素工厂、ink-selection.js 选择内核、drawing.js 命中、gestures.js 相机数学、RF instance
  * [OUTPUT]: useInkTools——笔/形状/文字直写文档；单选/框选/多选、批量移动/缩放/旋转/删除/改样式、复制粘贴与 Alt 拖；
- *           V/P/R/O/A/T/E 快捷键、橡皮、就地文字编辑和单相机滚轮
+ *           V/P/R/O/A/T/E 快捷键、橡皮、真实指针落点不丢焦的就地文字编辑和单相机滚轮
  * [POS]: canvas 的自研墨迹交互层。每一帧手势只做同步内存 mutate；持久化永远在 scene-store 后台
  * [PROTOCOL]: 变更时更新此头部，然后检查 web/CLAUDE.md
  */
@@ -278,6 +278,9 @@ export function useInkTools({ store, instRef, rootRef, hitAt, wheelModeRef, minZ
       return;
     }
     if (active === 'text') {
+      // textarea 在 pointerdown 中挂载并 autoFocus；阻止浏览器随后把焦点还给落点 div，
+      // 否则真实鼠标会立刻 blur 空编辑器并删掉刚建的文字（合成 PointerEvent 不会暴露它）。
+      e.preventDefault();
       const element = createInkElement('text', p.x, p.y, { ...style, fontSize: 20 });
       mutateDrawing(els => upsertInkElement(els, element), { coalesce: `ink:${element.id}` });
       openTextEditor(element);

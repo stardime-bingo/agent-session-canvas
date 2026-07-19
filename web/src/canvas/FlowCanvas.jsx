@@ -3,7 +3,7 @@
  *          layout 纯布局内核、五种自定义节点、menus 菜单构建器、connections 连接点内核、container-carry 承载规划与 DOM 桥
  * [OUTPUT]: 对外提供 FlowCanvas 组件：统一容器模型、弹性生长、拖放改归属、三系统边+手动边、
  *           Figma 式框选/平移/触控板手势、滚轮双模、容器缩放定桩、落空连线选择、缩放感知连接点、
- *           自研墨迹（直写文档、框选/多选/复制、缩放/旋转、样式岛、大底板自动沉层）、
+ *           自研墨迹（直写文档、框选/多选/复制、缩放/旋转、样式岛、大底板自动沉层）、顶栏可见快捷键，
  *           容器承载=乐观拖动+一次 mutate、整理动效、普通模式绘图命中与删除治理
  * [POS]: canvas 的画布引擎总装。单一世界单一相机：墨迹与卡片同住 RF viewport，
  *        文档变更到像素可见=一次 React commit——没有导出、没有帧、没有交接
@@ -31,6 +31,7 @@ import { WHEEL_MODES, nextWheelMode, wheelDevice, zoomViewport } from './gesture
 import { Icon, toast, confirmPop } from '../ui.jsx';
 
 const nodeTypes = { workspace: WorkspaceNode, session: SessionNode, district: DistrictNode, board: BoardNode, note: NoteNode };
+const INK_TOOL_KEYS = Object.freeze({ freedraw: 'P', rectangle: 'R', ellipse: 'O', arrow: 'A', text: 'T', eraser: 'E' });
 
 const MIN_ZOOM = 0.1, MAX_ZOOM = 1.8;   // 缩放界限唯一真相：RF props 与滚轮内核共用
 const containerKey = id => id.startsWith('district:') ? id.slice(9) : id;
@@ -774,24 +775,24 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     )}
     {/* 画布工具岛：顶部正中——必须是墨迹层的兄弟(z:7)：RF 根自成层叠上下文 */}
     <div className="island tool-island">
-      <button className="btn ghost" onClick={addNote} title="贴一张便签到视野中央（快捷键 N）"><Icon name="note" /> 便签</button>
-      <button className="btn ghost" onClick={addBoard} title="创建自定义画板：拉角调大小、双击改名、工作区拖进来就归它管（快捷键 B）"><Icon name="board" /> 画板</button>
+      <button className="btn ghost" onClick={addNote} title="贴一张便签到视野中央（快捷键 N）"><Icon name="note" /> 便签 <kbd className="tool-key">N</kbd></button>
+      <button className="btn ghost" onClick={addBoard} title="创建自定义画板：拉角调大小、双击改名、工作区拖进来就归它管（快捷键 B）"><Icon name="board" /> 画板 <kbd className="tool-key">B</kbd></button>
       <span className="topbar-sep" />
       <button className={`btn ${ink.tool === 'select' ? 'primary' : 'ghost'}`}
         onClick={() => ink.setTool(ink.tool === 'select' ? 'none' : 'select')}
         title="选择绘图（V）：框选/Shift 多选/拖动/缩放/旋转/Cmd+C/V/Alt 拖">
-        <Icon name="cursor" /> 选择
+        <Icon name="cursor" /> 选择 <kbd className="tool-key">V</kbd>
       </button>
       {ink.toolButtons.map(([t, icon, label]) => (
         <button key={t} className={`btn ${ink.tool === t ? 'primary' : 'ghost'}`}
           onClick={() => ink.setTool(ink.tool === t ? 'none' : t)}
-          title={`${label}（${({ freedraw: 'P', rectangle: 'R', ellipse: 'O', arrow: 'A', text: 'T', eraser: 'E' })[t]}，Esc 收起）`}>
-          <Icon name={icon} /> {label}
+          title={`${label}（${INK_TOOL_KEYS[t]}，Esc 收起）`}>
+          <Icon name={icon} /> {label} <kbd className="tool-key">{INK_TOOL_KEYS[t]}</kbd>
         </button>
       ))}
       <span className="topbar-sep" />
       <button className="btn ghost" onClick={() => focusRef.current(null)}
-        title="全景归位（F）· 空白左拖框选 · 双指/空格/中键平移 · 捏合或鼠标滚轮缩放"><Icon name="fit" /> 全景</button>
+        title="全景归位（F）· 空白左拖框选 · 双指/空格/中键平移 · 捏合或鼠标滚轮缩放"><Icon name="fit" /> 全景 <kbd className="tool-key">F</kbd></button>
     </div>
     </div>
   );
