@@ -1,6 +1,6 @@
 /**
- * [INPUT]: 352 节点确定性匿名数据、真实 FlowCanvas/SceneStore、浏览器 held pointer
- * [OUTPUT]: production FlowCanvas 性能页；为街区/工作区/便签暴露 rAF 帧间隔、Long Task、拖动位移与诊断探针
+ * [INPUT]: 含状态点/关系线/画板/墨迹的 352 节点确定性匿名数据、真实 FlowCanvas/SceneStore、浏览器 held pointer
+ * [OUTPUT]: production FlowCanvas 性能页；为街区/工作区/便签暴露 rAF 帧间隔、Long Task、拖动位移、真实拓扑与空闲渲染诊断探针
  * [POS]: 仅由 4518 ?mode=performance-352 加载；不请求 API、不读写真实 data、不复制生产画布
  * [PROTOCOL]: 变更时更新此头部，然后检查 main.jsx/verify.py/README/web/CLAUDE.md
  */
@@ -13,20 +13,22 @@ import { createSceneStore } from '../../../web/src/scene-store.js';
 import { UIHost } from '../../../web/src/ui.jsx';
 import {
   createFlowPerformanceFixture,
+  FLOW_PERFORMANCE_ACTIVE_SESSION_COUNT,
+  FLOW_PERFORMANCE_BOARD_COUNT,
+  FLOW_PERFORMANCE_DISTRICT,
   FLOW_PERFORMANCE_NODE_COUNT,
   FLOW_PERFORMANCE_NOTE_ID,
-  FLOW_PERFORMANCE_WORKSPACE,
+  FLOW_PERFORMANCE_WORKSPACE_COUNT,
 } from './fixture-data.js';
 
 const h = React.createElement;
 const FIXTURE = createFlowPerformanceFixture();
-const DISTRICT_KEY = 'fixture / Perf352';
 const INITIAL_DOC = {
-  layout: {
-    [FLOW_PERFORMANCE_WORKSPACE]: { d: DISTRICT_KEY, x: 26, y: 62 },
-    [`district:${DISTRICT_KEY}`]: { x: 0, y: 0 },
-  },
-  edges: [],
+  layout: Object.fromEntries([
+    ...FIXTURE.workspacePaths.map(path => [path, { d: FLOW_PERFORMANCE_DISTRICT }]),
+    [`district:${FLOW_PERFORMANCE_DISTRICT}`, { x: 0, y: 0 }],
+  ]),
+  edges: FIXTURE.manualEdges,
   notes: [{
     id: FLOW_PERFORMANCE_NOTE_ID,
     x: 980,
@@ -36,8 +38,8 @@ const INITIAL_DOC = {
     text: '352 节点便签拖动目标',
     color: 'yellow',
   }],
-  boards: [],
-  drawing: [],
+  boards: FIXTURE.boards,
+  drawing: FIXTURE.drawing,
   drawingFiles: {},
 };
 const probe = { status: 'booting', report: null };
@@ -130,7 +132,7 @@ function Performance352Canvas() {
   const focusRef = useRef(() => {});
   const actionsRef = useRef({});
   const shellRef = useRef(null);
-  const expanded = useMemo(() => new Set([FLOW_PERFORMANCE_WORKSPACE]), []);
+  const expanded = useMemo(() => new Set(FIXTURE.workspacePaths), []);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -139,10 +141,24 @@ function Performance352Canvas() {
         district: shellRef.current?.querySelectorAll('.react-flow__node-district .container-drag-handle').length || 0,
         workspace: shellRef.current?.querySelectorAll('.react-flow__node-workspace').length || 0,
         note: shellRef.current?.querySelectorAll('.react-flow__node-note').length || 0,
+        board: shellRef.current?.querySelectorAll('.react-flow__node-board').length || 0,
+        edge: shellRef.current?.querySelectorAll('.react-flow__edge').length || 0,
+        ink: shellRef.current?.querySelectorAll('[data-ink-element-id]').length || 0,
+        activeDots: shellRef.current?.querySelectorAll('.dot.active').length || 0,
       };
-      const pass = nodeCount === FLOW_PERFORMANCE_NODE_COUNT && Object.values(targets).every(count => count === 1);
+      const expectedTargets = {
+        district: 1,
+        workspace: FLOW_PERFORMANCE_WORKSPACE_COUNT,
+        note: 1,
+        board: FLOW_PERFORMANCE_BOARD_COUNT,
+        edge: FIXTURE.edges.length + FIXTURE.manualEdges.length,
+        ink: FIXTURE.drawing.length * 2,
+        activeDots: FLOW_PERFORMANCE_ACTIVE_SESSION_COUNT,
+      };
+      const pass = nodeCount === FLOW_PERFORMANCE_NODE_COUNT
+        && Object.entries(expectedTargets).every(([key, count]) => targets[key] === count);
       probe.status = pass ? 'complete' : 'fail';
-      probe.report = { nodeCount, expectedNodeCount: FLOW_PERFORMANCE_NODE_COUNT, targets, pass };
+      probe.report = { nodeCount, expectedNodeCount: FLOW_PERFORMANCE_NODE_COUNT, targets, expectedTargets, pass };
       document.documentElement.dataset.performance352Status = pass ? 'pass' : 'fail';
     }, 250);
     return () => clearTimeout(timer);
@@ -167,7 +183,7 @@ function Performance352Canvas() {
     h(FlowCanvas, {
       workspaces: FIXTURE.workspaces,
       sessionsByKey: FIXTURE.sessionsByKey,
-      edges: [],
+      edges: FIXTURE.edges,
       layout: doc.layout,
       canvas: doc,
       store,
@@ -194,6 +210,7 @@ function Performance352Canvas() {
       h('b', null, '352-node production FlowCanvas'),
       h('div', { 'data-performance-352-status': probe.status }, `status: ${probe.status}`),
       h('div', null, 'targets: district / workspace / note'),
+      h('div', null, 'topology: 12 workspaces / 22 edges / 3 boards / 3 inks'),
     ),
   );
 }

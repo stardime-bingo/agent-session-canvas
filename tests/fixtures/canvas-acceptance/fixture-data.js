@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 元素数量 300/800、352 节点 FlowCanvas 规模与确定性序号
- * [OUTPUT]: 确定性双平面自研墨迹元素，以及 1 街区 + 1 工作区 + 1 便签 + 349 会话的性能验收数据
+ * [OUTPUT]: 确定性双平面自研墨迹元素，以及含真实密度状态点/关系线/画板/墨迹的 352 节点性能验收数据
  * [POS]: 4518 无持久化验收数据真相；不读真实 canvas/layout
  * [PROTOCOL]: 变更时更新此头部，然后检查 README/web/CLAUDE.md
  */
@@ -9,18 +9,27 @@
 const COLORS = ['#dbeafe', '#dcfce7', '#fef3c7', '#fce7f3'];
 
 export const FLOW_PERFORMANCE_NODE_COUNT = 352;
-export const FLOW_PERFORMANCE_WORKSPACE = '/Users/fixture/Perf352';
+export const FLOW_PERFORMANCE_WORKSPACE_COUNT = 12;
+export const FLOW_PERFORMANCE_BOARD_COUNT = 3;
+export const FLOW_PERFORMANCE_ACTIVE_SESSION_COUNT = 171;
+export const FLOW_PERFORMANCE_DISTRICT = '/fixture';
+export const FLOW_PERFORMANCE_WORKSPACE = '/fixture/perf-352/workspace-01';
 export const FLOW_PERFORMANCE_NOTE_ID = 'note:perf-352';
 
 export function createFlowPerformanceFixture() {
-  const sessionCount = FLOW_PERFORMANCE_NODE_COUNT - 3;
+  const sessionCount = FLOW_PERFORMANCE_NODE_COUNT
+    - 1 - FLOW_PERFORMANCE_WORKSPACE_COUNT - FLOW_PERFORMANCE_BOARD_COUNT - 1;
   const keys = Array.from({ length: sessionCount }, (_, index) => `codex:perf-352-${index}`);
+  const workspacePaths = Array.from(
+    { length: FLOW_PERFORMANCE_WORKSPACE_COUNT },
+    (_, index) => `/fixture/perf-352/workspace-${String(index + 1).padStart(2, '0')}`,
+  );
   const sessionsByKey = Object.fromEntries(keys.map((key, index) => [key, {
     key,
     tool: index % 2 ? 'claude' : 'codex',
-    status: index % 11 === 0 ? 'active' : 'done',
+    status: index < FLOW_PERFORMANCE_ACTIVE_SESSION_COUNT ? 'active' : 'done',
     title: `匿名性能会话 ${String(index + 1).padStart(3, '0')}`,
-    cwd: FLOW_PERFORMANCE_WORKSPACE,
+    cwd: workspacePaths[index % workspacePaths.length],
     updatedAt: '2026-07-19T00:00:00.000Z',
     kind: 'session',
     subagents: 0,
@@ -29,16 +38,58 @@ export function createFlowPerformanceFixture() {
     hasHandoff: false,
     gitBranch: index % 9 === 0 ? 'feat/anonymous-fixture' : 'main',
   }]));
-  const workspaces = [{
-    path: FLOW_PERFORMANCE_WORKSPACE,
-    name: '352 节点性能场景',
-    parent: null,
-    tools: { codex: Math.ceil(sessionCount / 2), claude: Math.floor(sessionCount / 2) },
-    lastActivity: '2026-07-19T00:00:00.000Z',
-    sessionKeys: keys,
-    visibleKeys: keys,
-  }];
-  return { keys, sessionsByKey, workspaces };
+  const workspaces = workspacePaths.map((workspacePath, index) => {
+    const workspaceKeys = keys.filter(key => sessionsByKey[key].cwd === workspacePath);
+    return {
+      path: workspacePath,
+      name: `匿名工作区 ${String(index + 1).padStart(2, '0')}`,
+      parent: null,
+      tools: {
+        codex: workspaceKeys.filter(key => sessionsByKey[key].tool === 'codex').length,
+        claude: workspaceKeys.filter(key => sessionsByKey[key].tool === 'claude').length,
+      },
+      lastActivity: `2026-07-19T${String(23 - index).padStart(2, '0')}:00:00.000Z`,
+      sessionKeys: workspaceKeys,
+      visibleKeys: workspaceKeys,
+    };
+  });
+  const edges = Array.from({ length: 12 }, (_, index) => ({
+    type: ['worktree', 'family', 'handoff'][index % 3],
+    from: keys[index],
+    to: keys[index + 24],
+  }));
+  const manualEdges = Array.from({ length: 10 }, (_, index) => ({
+    id: `manual:perf-352-${index}`,
+    from: keys[index + 48],
+    to: keys[index + 72],
+  }));
+  const boards = Array.from({ length: FLOW_PERFORMANCE_BOARD_COUNT }, (_, index) => ({
+    id: `perf-board-${index + 1}`,
+    title: `匿名画板 ${index + 1}`,
+    x: 1720,
+    y: index * 460,
+    w: 520,
+    h: 360,
+    color: ['blue', 'green', 'yellow'][index],
+  }));
+  const drawing = [
+    {
+      id: 'perf-ink-below', type: 'rectangle', x: 1740, y: 30, width: 450, height: 290,
+      angle: 0, strokeColor: '#155eef', backgroundColor: '#e9f0fd', strokeWidth: 2,
+      opacity: 72, isDeleted: false, customData: { below: true },
+    },
+    {
+      id: 'perf-ink-arrow', type: 'arrow', x: 1820, y: 560, width: 260, height: 110,
+      angle: 0, points: [[0, 0], [260, 110]], strokeColor: '#12b76a',
+      backgroundColor: 'transparent', strokeWidth: 3, opacity: 100, isDeleted: false,
+    },
+    {
+      id: 'perf-ink-text', type: 'text', x: 1790, y: 1010, width: 240, height: 32,
+      angle: 0, text: '真实拓扑性能闸门', fontSize: 24, strokeColor: '#101828',
+      backgroundColor: 'transparent', strokeWidth: 1, opacity: 100, isDeleted: false,
+    },
+  ];
+  return { keys, sessionsByKey, workspaces, workspacePaths, edges, manualEdges, boards, drawing };
 }
 
 const baseElement = (id, index, below) => ({

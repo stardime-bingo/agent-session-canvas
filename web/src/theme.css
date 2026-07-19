@@ -1,7 +1,7 @@
 /**
  * [INPUT]: 独立样式文件，依赖系统 Inter/PingFang 字体栈
  * [OUTPUT]: 对外提供全局 CSS 变量、基础排版/面板/按钮、绘图 armed/opening/hole 帧交接与 cold/retrying/stale 视觉、缩放感知连接点与终端框/可聚焦 toast/4518 fixture 皮肤
- * [POS]: web 的视觉唯一真相源——浅灰画布 + 纯白卡片 + Dify 蓝锚点 + 柔和阴影，动画只走合成器
+ * [POS]: web 的视觉唯一真相源——浅灰画布 + 纯白卡片 + Dify 蓝锚点 + 柔和阴影；短动效走合成器，空闲画布无永久动画
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
 
@@ -76,9 +76,9 @@ body {
 .badge.claude { color: var(--claude); background: var(--claude-dim); }
 .badge.codex { color: var(--codex); background: var(--codex-dim); }
 
-/* 状态灯：只动 opacity，合成器友好 */
+/* 状态灯常态静止：密集卡片不为装饰性呼吸持续占用样式帧。 */
 .dot { width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; }
-.dot.active { background: var(--ok); animation: pulse 2.6s ease-in-out infinite; }
+.dot.active { background: var(--ok); }
 .dot.dead { background: var(--danger); }
 .dot.stale { background: var(--mute); }
 .dot.tiny, .dot.archived { background: var(--mute); opacity: 0.4; }
@@ -128,10 +128,6 @@ body {
   border-radius: 14px;
   box-shadow: var(--shadow);
 }
-
-/* 平移/缩放进行中：流动动画集体屏息，把每一帧都还给合成器 */
-.canvas-moving .react-flow__edge-path { animation-play-state: paused !important; }
-.canvas-moving .dot.active { animation-play-state: paused; }
 
 /* ============================================================
  *  绘图编辑态指示：全画布内描边一圈蓝——一眼知道自己在改画不在看板
@@ -263,27 +259,25 @@ input.search:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--ac
 .react-flow__edge-path { stroke: var(--line-strong); stroke-width: 2.5; }
 
 /* ============================================================
- *  关系线四重奏：粗线 + 箭头(FlowCanvas 注入) + 各自的流动节奏
- *  流动全靠 stroke-dashoffset——纯合成器无重绘
+ *  关系线四重奏：粗线 + 箭头(FlowCanvas 注入) + 各自的静态线型
+ *  SVG stroke-dashoffset 动画会持续触发 Paint，关系语义只用颜色/虚实表达。
  * ============================================================ */
-@keyframes edge-flow { to { stroke-dashoffset: -28; } }
-
-/* worktree 分支：橙色破折线，稳步向前 */
+/* worktree 分支：橙色破折线 */
 .react-flow__edge.worktree .react-flow__edge-path {
   stroke: var(--claude); stroke-width: 2.5; stroke-dasharray: 9 6;
-  opacity: 0.8; animation: edge-flow 1.1s linear infinite;
+  opacity: 0.8;
 }
 
-/* 同族项目：蓝色圆点脉络，慢速呼吸（无方向，亲缘不分先后） */
+/* 同族项目：蓝色圆点脉络（无方向，亲缘不分先后） */
 .react-flow__edge.family .react-flow__edge-path {
   stroke: var(--accent); stroke-width: 2.5; stroke-dasharray: 1 9;
-  stroke-linecap: round; opacity: 0.6; animation: edge-flow 2.6s linear infinite;
+  stroke-linecap: round; opacity: 0.6;
 }
 
-/* 接力血缘：绿色能量流，最快节奏（不用 filter 微光——那是主线程重绘税） */
+/* 接力血缘：绿色粗虚线（不用 filter 微光，避免主线程重绘税） */
 .react-flow__edge.handoff .react-flow__edge-path {
   stroke: var(--ok); stroke-width: 3; stroke-dasharray: 13 7;
-  opacity: 0.9; animation: edge-flow 0.8s linear infinite;
+  opacity: 0.9;
 }
 
 /* 手动连线：紫色实线人笔——你画的线庄重稳定，不流动 */

@@ -1,7 +1,7 @@
 /**
  * [INPUT]: web/src/canvas/drawing.js 墨迹纯几何内核
  * [OUTPUT]: 命中检测双模（描边带/选择热区/旋转/折线段/后画者优先/墓碑锁定）、包围盒、
- *           平移/删除/沉浮不可变变换、大实心底板判定、4518 交互/布局与 352 节点性能夹具契约回归
+ *           平移/删除/沉浮不可变变换、大实心底板判定、4518 交互/布局与真实拓扑 352 节点性能夹具契约回归
  * [POS]: tests 的墨迹几何证伪层——命中区严格贴墨迹，隐形玻璃一块都不许有
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -15,7 +15,8 @@ import {
 } from '../web/src/canvas/drawing.js';
 import { buildGraph } from '../web/src/canvas/layout.js';
 import {
-  createFlowPerformanceFixture, FLOW_PERFORMANCE_NODE_COUNT, FLOW_PERFORMANCE_WORKSPACE,
+  createFlowPerformanceFixture, FLOW_PERFORMANCE_ACTIVE_SESSION_COUNT,
+  FLOW_PERFORMANCE_DISTRICT, FLOW_PERFORMANCE_NODE_COUNT,
 } from './fixtures/canvas-acceptance/fixture-data.js';
 
 const rect = (id, x, y, w, h, extra = {}) => ({
@@ -115,20 +116,28 @@ test('300/800 直渲性能红线写死进 4518 合同', () => {
 
 test('352 节点性能场景使用 production buildGraph，并要求真实 pointer + CDP trace', () => {
   const fixture = createFlowPerformanceFixture();
+  const layout = Object.fromEntries([
+    ...fixture.workspacePaths.map(workspace => [workspace, { d: FLOW_PERFORMANCE_DISTRICT }]),
+    [`district:${FLOW_PERFORMANCE_DISTRICT}`, { x: 0, y: 0 }],
+  ]);
   const built = buildGraph(
     fixture.workspaces,
     fixture.sessionsByKey,
-    {},
-    [],
-    [],
-    new Set([FLOW_PERFORMANCE_WORKSPACE]),
+    layout,
+    fixture.boards,
+    fixture.edges,
+    new Set(fixture.workspacePaths),
     false,
   );
   assert.equal(built.nodes.length, FLOW_PERFORMANCE_NODE_COUNT - 1);   // production 页再加 1 张真实 NoteNode = 352
   assert.deepEqual(
     built.nodes.reduce((counts, node) => ({ ...counts, [node.type]: (counts[node.type] || 0) + 1 }), {}),
-    { district: 1, workspace: 1, session: 349 },
+    { district: 1, workspace: 12, session: 335, board: 3 },
   );
+  assert.equal(fixture.edges.length + fixture.manualEdges.length, 22);
+  assert.equal(fixture.drawing.length, 3);
+  assert.equal(Object.values(fixture.sessionsByKey).filter(session => session.status === 'active').length,
+    FLOW_PERFORMANCE_ACTIVE_SESSION_COUNT);
   const page = fs.readFileSync(path.resolve('tests/fixtures/canvas-acceptance/performance-352-data.js'), 'utf8');
   const verifier = fs.readFileSync(path.resolve('tests/fixtures/canvas-acceptance/verify.py'), 'utf8');
   assert.match(page, /FlowCanvas/);
@@ -137,6 +146,19 @@ test('352 节点性能场景使用 production buildGraph，并要求真实 point
   assert.match(verifier, /district container[\s\S]*workspace[\s\S]*note/);
   assert.match(verifier, /Tracing\.start/);
   assert.match(verifier, /frameP95MaxMs.*20/);
+  assert.match(verifier, /idlePaintMaxCount.*0/);
+});
+
+test('正式画布空闲时没有状态点或关系线永久动画抢帧', () => {
+  const theme = fs.readFileSync(path.resolve('web/src/theme.css'), 'utf8');
+  const activeDotRule = theme.match(/\.dot\.active\s*{[^}]*}/)?.[0] || '';
+  assert.ok(activeDotRule, 'active status dot rule must exist');
+  assert.doesNotMatch(activeDotRule, /animation\s*:/);
+  for (const type of ['worktree', 'family', 'handoff']) {
+    const rule = theme.match(new RegExp(`\\.react-flow__edge\\.${type} \\.react-flow__edge-path\\s*{[^}]*}`))?.[0] || '';
+    assert.ok(rule, `${type} edge rule must exist`);
+    assert.doesNotMatch(rule, /animation\s*:/);
+  }
 });
 
 test('布局质量夹具覆盖增长投影后的真实容器缩放与墨迹稳定性', () => {

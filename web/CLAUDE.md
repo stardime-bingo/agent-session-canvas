@@ -13,7 +13,7 @@ Dify 浅色基因：Dify 蓝 #155eef 锚点，Claude 橙 / Codex 青绿作工具
 全画布 undo/redo（Cmd/Ctrl+Z / Shift+Cmd+Z）出自单一文档的历史栈，画笔流/打字流 coalesce 为一步。
 
 丝滑四律：节点状态交还 React Flow、全量渲染不做视口裁剪(平移=纯 GPU 变换)、
-动画只走合成器且平移中暂停(.canvas-moving)、已提交绘图与节点同在 React Flow viewport 内共用唯一 transform。
+空闲不运行关系线/卡片状态点永久动画且短动效只走合成器、已提交绘图与节点同在 React Flow viewport 内共用唯一 transform。
 画布手势：空白左拖=框选，空格+左拖/中键=平移，触控板双指=平移、捏合=缩放，鼠标滚轮=光标锚定缩放
 （gestures.js 逐事件判定设备；缩放条第四钮三态兜底）；街区/画板仅标题栏可整块搬家。
 对象拖动语义：会话卡固定 → 工作区在容器内自由整理(拖动中目标容器高亮，只改看板归属不动本地文件) → 标题栏搬动街区/画板。
@@ -45,13 +45,13 @@ src/api.js: 数据访问唯一通道——graph/session/contextPage/AI/launch + 
 src/util.js: 展示工具箱——relTime/shortPath/fmtSize/classifyDigestLine + handoffSkillPrompt(交接三件套自包含提示词) + TOOL_META/STATUS_META
 src/ui.jsx: UI 原子库——Icon 单色 SVG 集、toast polite status（动作按钮可键盘触发）/confirmPop() 单例 + <UIHost/>、<InlineEdit/> 就地改名
 src/theme.css: 视觉唯一真相源(Dify tokens)；节点皮肤类化 + toast/confirm/空态/边tooltip/drop-target 样式；
-  tool-island 三组岛、cold/retrying/stale 帧状态 chip、over-drawing 悬停提示、ink-carry-anchor 承载桥位移——全部合成器动画
+  tool-island 三组岛、cold/retrying/stale 帧状态 chip、over-drawing 悬停提示、ink-carry-anchor 承载桥位移——短时交互动效走合成器，密集常态视觉静止
 src/canvas/FlowCanvas.jsx: 画布引擎总装（≤800 行）——统一容器模型、归属律 layout.d>路径推断、容器弹性生长、
   边半受控(手动边可选可删系统边只观察)、onBeforeDelete 删除治理、折叠展开、就地改名信号、视口 localStorage 记忆、
   容器承载=乐观拖动+DOM 桥跟随+松手一次 mutate+帧追上撤桥（Escape 取消弹回）、applyArrange 同步规划一次 mutate、
   普通模式绘图命中（pane/一切节点同一条河、HIT_BLOCK 功能件排除、节点上只认浮层/pane 先浮后沉、
   待选态封闭形状内部热区）、右键沉浮/删除（可 undo）、落空连线选择菜单、连接点缩放感知、
-  世界装配 doc.drawing/drawingFiles 交 InkLayer、顶栏 N/B/V/P/R/O/A/T/E/F 可见键帽、4518 只读动作探针 seam；352 节点夹具仍挂真实 FlowCanvas 并由浏览器 held pointer 取 trace，匿名 hero 也只做 production FlowCanvas 的数据与构图层
+  世界装配 doc.drawing/drawingFiles 交 InkLayer、顶栏 N/B/V/P/R/O/A/T/E/F 可见键帽、4518 只读动作探针 seam；352 节点夹具以状态点/22 条关系线/画板/墨迹挂真实 FlowCanvas，由浏览器同时取空闲零 Paint 与 held-pointer trace，匿名 hero 也只做 production FlowCanvas 的数据与构图层
 src/canvas/ink.js: 自研墨迹模型纯函数——freedraw 中点贝塞尔路径/箭头端头/形状路径/元素工厂/拖画更新(反向拖归一化+亚像素节流)/收笔定稿判废/文字度量/样式常量，node:test 证伪
 src/canvas/ink-selection.js: 选择纯内核——绑定闭包/框选/批量平移删除/八向缩放/旋转/复制 id 重映射，node:test 直接证伪
 src/canvas/image-import.js: 图片导入边界——同步占位、后台 FileReader/解码/SHA-256 内容 id、有界等比尺寸；迟到读取不能复活已 undo 元素

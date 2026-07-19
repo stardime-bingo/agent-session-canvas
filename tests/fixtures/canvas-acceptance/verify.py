@@ -26,6 +26,10 @@ UPDATE_BUDGET_MS = {
 }
 PERFORMANCE_352 = {
     "nodeCount": 352,
+    "expectedTargets": {
+        "district": 1, "workspace": 12, "note": 1, "board": 3,
+        "edge": 22, "ink": 6, "activeDots": 171,
+    },
     "minFrameSamples": 90,
     "minPointerMoves": 100,
     "minDistinctPositions": 80,
@@ -34,7 +38,15 @@ PERFORMANCE_352 = {
     "frameMaxMs": 50,
     "slowFrameRatioMax": 0.05,
     "longTaskMaxCount": 0,
+    "idleDurationMs": 1500,
+    "idlePaintMaxCount": 0,
+    "idlePrePaintMaxCount": 0,
+    "idleUpdateLayoutTreeMaxCount": 0,
+    "idleContinuousAnimationsMaxCount": 0,
 }
+PERFORMANCE_DISTRICT_ID = "district:/fixture"
+PERFORMANCE_WORKSPACE_ID = "/fixture/perf-352/workspace-01"
+PERFORMANCE_NOTE_ID = "note:perf-352"
 RUN_ID = f"{time.strftime('%Y%m%dT%H%M%S')}-{os.getpid()}"
 PROD_GRAPH = {
     "sessions": [],
@@ -467,33 +479,65 @@ def verify_performance_352(browser, artifacts_dir):
         assert report["status"] == "complete", json.dumps(report, ensure_ascii=False)
         detail = report["report"]
         assert detail["nodeCount"] == PERFORMANCE_352["nodeCount"], detail
-        assert detail["targets"] == {"district": 1, "workspace": 1, "note": 1}, detail
+        assert detail["targets"] == PERFORMANCE_352["expectedTargets"], detail
 
         target_specs = [
             {
                 "name": "district container",
-                "node": ".react-flow__node-district",
-                "handle": ".react-flow__node-district .container-drag-handle",
+                "node": f'.react-flow__node-district[data-id="{PERFORMANCE_DISTRICT_ID}"]',
+                "handle": f'.react-flow__node-district[data-id="{PERFORMANCE_DISTRICT_ID}"] .container-drag-handle',
                 "xFraction": 0.65,
                 "yFraction": 0.5,
             },
             {
                 "name": "workspace",
-                "node": ".react-flow__node-workspace",
-                "handle": ".react-flow__node-workspace",
+                "node": f'.react-flow__node-workspace[data-id="{PERFORMANCE_WORKSPACE_ID}"]',
+                "handle": f'.react-flow__node-workspace[data-id="{PERFORMANCE_WORKSPACE_ID}"]',
                 "xFraction": 0.5,
                 "yPx": 20,
             },
             {
                 "name": "note",
-                "node": ".react-flow__node-note",
-                "handle": ".react-flow__node-note",
+                "node": f'.react-flow__node-note[data-id="{PERFORMANCE_NOTE_ID}"]',
+                "handle": f'.react-flow__node-note[data-id="{PERFORMANCE_NOTE_ID}"]',
                 "xFraction": 0.65,
                 "yFraction": 0.18,
             },
         ]
 
         cdp = context.new_cdp_session(page)
+        page.wait_for_timeout(500)
+        continuous_animations = page.evaluate("""() => document.getAnimations()
+          .filter(animation => animation.playState === 'running')
+          .map(animation => animation.animationName || 'unnamed')""")
+        cdp.send("Tracing.start", {
+            "categories": "devtools.timeline,toplevel",
+            "options": "sampling-frequency=10000",
+            "transferMode": "ReturnAsStream",
+        })
+        trace_started = True
+        page.wait_for_timeout(PERFORMANCE_352["idleDurationMs"])
+        idle_trace_bytes = finish_cdp_trace(cdp, page)
+        trace_started = False
+        idle_trace_events = json.loads(idle_trace_bytes).get("traceEvents", [])
+        idle_event_counts = {
+            name: sum(1 for event in idle_trace_events if event.get("name") == name)
+            for name in ("UpdateLayoutTree", "PrePaint", "Paint")
+        }
+        idle_checks = {
+            "continuousAnimations": len(continuous_animations)
+            <= PERFORMANCE_352["idleContinuousAnimationsMaxCount"],
+            "updateLayoutTree": idle_event_counts["UpdateLayoutTree"]
+            <= PERFORMANCE_352["idleUpdateLayoutTreeMaxCount"],
+            "prePaint": idle_event_counts["PrePaint"] <= PERFORMANCE_352["idlePrePaintMaxCount"],
+            "paint": idle_event_counts["Paint"] <= PERFORMANCE_352["idlePaintMaxCount"],
+        }
+        assert all(idle_checks.values()), json.dumps({
+            "idleChecks": idle_checks,
+            "idleEventCounts": idle_event_counts,
+            "continuousAnimations": continuous_animations,
+        }, ensure_ascii=False)
+
         cdp.send("Tracing.start", {
             "categories": ",".join([
                 "devtools.timeline",
@@ -602,6 +646,9 @@ def verify_performance_352(browser, artifacts_dir):
         assert_clean(diagnostics)
 
         artifacts_dir.mkdir(parents=True, exist_ok=True)
+        idle_trace_path = artifacts_dir / f"canvas-352-idle-{RUN_ID}.trace.json.gz"
+        compressed_idle_trace = gzip.compress(idle_trace_bytes, compresslevel=9)
+        idle_trace_path.write_bytes(compressed_idle_trace)
         trace_path = artifacts_dir / f"canvas-352-performance-{RUN_ID}.trace.json.gz"
         compressed_trace = gzip.compress(trace_bytes, compresslevel=9)
         trace_path.write_bytes(compressed_trace)
@@ -609,6 +656,19 @@ def verify_performance_352(browser, artifacts_dir):
             "status": "pass",
             "browserVersion": browser.version,
             "nodeCount": detail["nodeCount"],
+            "topology": detail["targets"],
+            "idle": {
+                "durationMs": PERFORMANCE_352["idleDurationMs"],
+                "continuousAnimations": continuous_animations,
+                "eventCounts": idle_event_counts,
+                "checks": idle_checks,
+                "trace": {
+                    "path": str(idle_trace_path.resolve()),
+                    "sha256": hashlib.sha256(compressed_idle_trace).hexdigest(),
+                    "byteLength": len(compressed_idle_trace),
+                    "encoding": "gzip",
+                },
+            },
             "targets": target_metrics,
             "cdpLongTaskCount": len(cdp_long_tasks),
             "cdpMaxLongTaskMs": round(max(cdp_long_tasks, default=0), 3),
