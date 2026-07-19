@@ -124,8 +124,11 @@ const routes = {
 
   // ---- 场景快照：LWW 全量落盘，唯一写入口。writerId 随 SSE 回播供发起端忽略自己的回声 ----
   'POST /api/scene': async body => {
-    const result = scene.write({ layout: body.layout, canvas: body.canvas });
-    broadcast({ type: 'scene-updated', rev: result.rev, writerId: body.writerId || null });
+    const result = scene.write({
+      layout: body.layout, canvas: body.canvas,
+      writerId: body.writerId, clientSeq: body.clientSeq,
+    });
+    if (!result.stale) broadcast({ type: 'scene-updated', rev: result.rev, writerId: body.writerId || null });
     return result;
   },
 

@@ -83,6 +83,12 @@ def read_graph(base):
         return json.load(response)
 
 
+def read_health(base):
+    with urlopen(f"{base}/health", timeout=2) as response:
+        assert response.status == 200
+        return json.load(response)
+
+
 def wait_until(read, predicate, label, timeout=15):
     deadline = time.monotonic() + timeout
     last = None
@@ -264,6 +270,34 @@ def run(browser, base, data_dir, port, server_process):
         assert page_d.locator('[data-testid="sync-note"]').input_value() == "pagehide-final"
         assert_clean(diag_d)
 
+        # 普通 flush 已在飞，随后再输入最终内容并关页；最新 keepalive 必须胜过旧请求。
+        idle_health = wait_until(
+            lambda: read_health(base),
+            lambda health: health["pendingSceneWrites"] == 0,
+            "scene writes idle before in-flight pagehide",
+        )
+        page_d.locator('[data-testid="sync-note"]').fill("pagehide-inflight-first")
+        in_flight = wait_until(
+            lambda: read_health(base),
+            lambda health: health["startedSceneWrites"] > idle_health["startedSceneWrites"]
+            and health["pendingSceneWrites"] >= 1,
+            "ordinary flush enters server before pagehide",
+        )
+        page_d.locator('[data-testid="sync-note"]').fill("pagehide-inflight-final")
+        page_d.close()
+        persisted_inflight = wait_until(
+            lambda: read_graph(base),
+            lambda graph: note_text(graph) == "pagehide-inflight-final",
+            "in-flight pagehide final edit persistence",
+            timeout=8,
+        )
+        context_e, page_e, diag_e = open_fixture(browser, base)
+        contexts.append(context_e)
+        reopened_inflight = page_snapshot(page_e)
+        assert reopened_inflight["text"] == "pagehide-inflight-final"
+        assert page_e.locator('[data-testid="sync-note"]').input_value() == "pagehide-inflight-final"
+        assert_clean(diag_e)
+
         # 离线阶段只允许同源网络失败；页面错误、外联与刷新对话框始终为零。
         offline_failures = diag_a["requestFailed"] + diag_b["requestFailed"]
         assert offline_failures, "daemon stop should produce observable same-origin request failures"
@@ -297,15 +331,20 @@ def run(browser, base, data_dir, port, server_process):
             "pagehide": {
                 "persistedText": note_text(persisted_pagehide),
                 "reopenedText": reopened["text"],
+                "inFlight": {
+                    "pendingWritesObserved": in_flight["pendingSceneWrites"],
+                    "persistedText": note_text(persisted_inflight),
+                    "reopenedText": reopened_inflight["text"],
+                },
                 "serverWriteDelayMs": ready["writeDelayMs"],
             },
             "diagnostics": {
                 "preOfflineClean": True,
-                "pageErrors": len(diag_a["pageErrors"]) + len(diag_b["pageErrors"]) + len(diag_d["pageErrors"]),
-                "externalResources": len(diag_a["externalResources"]) + len(diag_b["externalResources"]) + len(diag_d["externalResources"]),
-                "dialogs": len(diag_a["dialogs"]) + len(diag_b["dialogs"]) + len(diag_d["dialogs"]),
-                "freshReopenConsoleErrors": len(diag_d["consoleErrors"]),
-                "freshReopenConsoleWarnings": len(diag_d["consoleWarnings"]),
+                "pageErrors": len(diag_a["pageErrors"]) + len(diag_b["pageErrors"]) + len(diag_e["pageErrors"]),
+                "externalResources": len(diag_a["externalResources"]) + len(diag_b["externalResources"]) + len(diag_e["externalResources"]),
+                "dialogs": len(diag_a["dialogs"]) + len(diag_b["dialogs"]) + len(diag_e["dialogs"]),
+                "freshReopenConsoleErrors": len(diag_e["consoleErrors"]),
+                "freshReopenConsoleWarnings": len(diag_e["consoleWarnings"]),
             },
             "isolatedFiles": files,
         }, server_process

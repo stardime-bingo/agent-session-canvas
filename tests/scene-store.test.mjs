@@ -159,6 +159,30 @@ test('flushNow 为 pagehide 冲刷显式请求 keepalive', async () => {
   assert.deepEqual(fileCalls[0].options, { keepalive: true });
 });
 
+test('flushNow 在普通冲刷进行中并发发送最终快照，旧回执不得回退已保存基线', async () => {
+  const calls = [];
+  const { store } = makeStore({
+    persistScene: (scene, options) => new Promise(resolve => calls.push({ scene, options, resolve })),
+  });
+  store.mutate(doc => ({ ...doc, notes: [{ id: 'pagehide', text: 'first' }] }));
+  await sleep(350);
+  assert.equal(calls.length, 1);
+  store.mutate(doc => ({ ...doc, notes: [{ id: 'pagehide', text: 'final' }] }));
+  const finalFlush = store.flushNow();
+  assert.equal(calls.length, 2);
+  assert.deepEqual(calls[1].options, { keepalive: true });
+  assert.equal(calls[1].scene.canvas.notes[0].text, 'final');
+  assert.ok(calls[1].scene.clientSeq > calls[0].scene.clientSeq);
+
+  calls[1].resolve({ rev: 2 });
+  await finalFlush;
+  assert.equal(store.status().status, 'saved');
+  calls[0].resolve({ rev: 2, stale: true });
+  await sleep(30);
+  assert.equal(calls.length, 2);
+  assert.equal(store.status().status, 'saved');
+});
+
 test('sceneFilesDelta 只挑基线没有的新 ID', () => {
   assert.deepEqual(
     Object.keys(sceneFilesDelta({ a: 1 }, { a: 1, b: 2, c: 3 })),

@@ -41,7 +41,7 @@ plugins/agent-session-canvas/scripts/agent-canvas {start|stop|status}
   300ms 后台冲刷失败时无限退避，但不阻塞输入
 - **SceneStore 单一真相源**：`web/src/scene-store.js` 持有 `{ layout, edges, notes, boards, drawing, drawingFiles, seq }`；
   `mutate` 同步写入并支持 coalesce undo/redo；SSE 回声按 writerId 去重，本地干净时才 LWW 采纳
-- **场景快照仓**：`server/scene.mjs` 全量 LWW + tmp/rename 原子写；图片内容寻址、同 ID 不可变、资产先行引用后到，
+- **场景快照仓**：`server/scene.mjs` 全量 LWW + tmp/rename 原子写；同 writer 的 clientSeq 单调门拒绝 pagehide 新快照之后才落地的旧在飞请求；图片内容寻址、同 ID 不可变、资产先行引用后到，
   磁盘格式兼容旧版，升级不迁移真实资产
 - **自研墨迹层**：`ink.js + InkLayer + InkTools` 直写/直出 SVG；支持笔迹、形状、箭头、文字、图片、
   框选/Shift 多选、移动、八向缩放、旋转、改样式、复制粘贴、Alt 拖复制与单笔可撤销橡皮；V/P/R/O/A/T/E 对齐常用肌肉记忆
@@ -49,7 +49,7 @@ plugins/agent-session-canvas/scripts/agent-canvas {start|stop|status}
 - **容器承载**：墨迹中心落入街区/画板就随容器移动；拖动与整理都同步规划、一次 mutate，DOM 桥只负责视觉无缝衔接
 - **绘图双平面**：`customData.below` 区分沉/浮层，存储仍只有一份 `canvas.drawing`；选择、命中、小地图读同一文档
 - **绘图删除不藏模式**：普通模式点击描边带即可选中，Delete 删除，Esc 返回；右键支持选择、沉浮与确认删除；全部可 undo
-- **交接三件套**：会话卡右键和详情面板可注入自包含 bridge-rescue 提示词并拉起终端，恢复血缘自动连边
+- **交接三件套**：会话卡右键和详情面板可注入自包含 bridge-rescue 提示词并拉起终端；已生成的接力提示词明确提供 Claude Code / Codex 两个无默认接班入口，恢复血缘自动连边
 
 ## 其余不变量
 

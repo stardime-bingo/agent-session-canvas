@@ -48,6 +48,35 @@ export function createSceneStore(initial, { persistScene, persistFiles } = {}) {
     flushTimer = setTimeout(() => { flushTimer = null; void flush(); }, delay);
   };
 
+  const persistSnapshot = async (snapshot, persistOptions) => {
+    const delta = sceneFilesDelta(lastFlushed.drawingFiles, snapshot.drawingFiles);
+    if (Object.keys(delta).length) await persistFiles(delta, persistOptions);
+    return persistScene({
+      clientSeq: snapshot.seq,
+      layout: snapshot.layout,
+      canvas: {
+        edges: snapshot.edges, notes: snapshot.notes,
+        boards: snapshot.boards, drawing: snapshot.drawing,
+      },
+    }, persistOptions);
+  };
+
+  const acceptReceipt = (snapshot, receipt) => {
+    if (Number.isFinite(receipt?.rev)) serverRev = Math.max(serverRev, receipt.rev);
+    if (snapshot.seq >= lastFlushed.seq) lastFlushed = snapshot;
+    retryAttempt = 0;
+    lastError = null;
+  };
+
+  const failFlush = error => {
+    lastError = error;
+    setStatus('error');
+    clearTimeout(retryTimer);
+    const delay = Math.min(RETRY_BASE_MS * 2 ** retryAttempt, RETRY_CAP_MS);
+    retryAttempt++;
+    retryTimer = setTimeout(() => { retryTimer = null; void flush(); }, delay);
+  };
+
   async function flush(persistOptions = {}) {
     if (flushing) return;                 // 在飞快照落定后会自查追赶，无需并发
     if (doc === lastFlushed) { setStatus('saved'); return; }
@@ -56,29 +85,14 @@ export function createSceneStore(initial, { persistScene, persistFiles } = {}) {
     setStatus('saving');
     const snapshot = doc;
     try {
-      const delta = sceneFilesDelta(lastFlushed.drawingFiles, snapshot.drawingFiles);
-      if (Object.keys(delta).length) await persistFiles(delta, persistOptions);
-      const receipt = await persistScene({
-        layout: snapshot.layout,
-        canvas: {
-          edges: snapshot.edges, notes: snapshot.notes,
-          boards: snapshot.boards, drawing: snapshot.drawing,
-        },
-      }, persistOptions);
-      if (Number.isFinite(receipt?.rev)) serverRev = Math.max(serverRev, receipt.rev);
-      lastFlushed = snapshot;
-      retryAttempt = 0;
-      lastError = null;
+      const receipt = await persistSnapshot(snapshot, persistOptions);
+      acceptReceipt(snapshot, receipt);
       flushing = false;
-      if (doc !== snapshot) scheduleFlush(0);   // 冲刷期间又有新改动：立即追赶
+      if (doc !== lastFlushed) scheduleFlush(0);   // 冲刷期间又有新改动：立即追赶
       else setStatus('saved');
     } catch (error) {
       flushing = false;
-      lastError = error;
-      setStatus('error');
-      const delay = Math.min(RETRY_BASE_MS * 2 ** retryAttempt, RETRY_CAP_MS);
-      retryAttempt++;
-      retryTimer = setTimeout(() => { retryTimer = null; void flush(); }, delay);
+      failFlush(error);
     }
   }
 
@@ -155,11 +169,22 @@ export function createSceneStore(initial, { persistScene, persistFiles } = {}) {
       return true;
     },
 
-    // pagehide 兜底：立即发起一次冲刷（fetch keepalive 由注入的 persist 自选）
+    // pagehide 兜底：普通冲刷在飞时并发发送最新快照；服务端按 writer/clientSeq 拒绝旧请求倒灌。
     flushNow() {
       clearTimeout(flushTimer);
       flushTimer = null;
-      return flush({ keepalive: true });
+      if (!flushing) return flush({ keepalive: true });
+      if (doc === lastFlushed) { setStatus('saved'); return Promise.resolve(); }
+      const snapshot = doc;
+      setStatus('saving');
+      return persistSnapshot(snapshot, { keepalive: true })
+        .then(receipt => {
+          acceptReceipt(snapshot, receipt);
+          if (doc !== lastFlushed) scheduleFlush(0);
+          else setStatus('saved');
+          return receipt;
+        })
+        .catch(error => { failFlush(error); });
     },
   };
 }

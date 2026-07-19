@@ -75,3 +75,13 @@ test('场景仓：结构性垃圾被拒且磁盘零字节变化', () => {
   }), /唯一字符串 id/);
   assert.equal(fs.readFileSync(path.join(dir, 'canvas.json'), 'utf8'), before);
 });
+
+test('场景仓：同 writer 的旧在飞快照不能倒灌覆盖较新的 clientSeq', () => {
+  const scene = createScene(tmpDir());
+  const canvas = text => ({ ...emptyCanvas, notes: [{ id: 'n', text }] });
+  const newer = scene.write({ layout: {}, canvas: canvas('final'), writerId: 'writer-a', clientSeq: 3 });
+  const stale = scene.write({ layout: {}, canvas: canvas('old'), writerId: 'writer-a', clientSeq: 2 });
+  assert.equal(newer.rev, 2);
+  assert.deepEqual(stale, { rev: 2, stale: true });
+  assert.equal(scene.read().canvas.notes[0].text, 'final');
+});

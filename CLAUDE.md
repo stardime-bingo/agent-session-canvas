@@ -52,7 +52,7 @@ npm run scan         # 仅扫描，输出统计
 - **SceneStore 单一真相源 (web/src/scene-store.js)**: 场景文档 { layout, edges, notes, boards, drawing, drawingFiles, seq }
   唯一写入口 mutate（同步、可 coalesce 进全画布 undo/redo，容量 100）；后台防抖 300ms 全量快照冲刷，
   失败无限退避（1s→15s 封顶）永不阻塞输入，角落只亮"未同步"点；SSE 回声按 writerId 去重，本地干净才采纳（LWW）
-- **场景快照律 (server/scene.mjs ~110 行)**: POST /api/scene 全量快照 + tmp/rename 原子写 + 内存 rev + SSE 广播；
+- **场景快照律 (server/scene.mjs)**: POST /api/scene 全量快照 + tmp/rename 原子写 + 内存 rev + SSE 广播；同 writer 的 clientSeq 单调门拒绝 pagehide 新快照之后才落地的旧在飞请求；
   图片资产内容寻址、同 ID 不可变、资产先行引用后到、孤儿随场景写顺手裁剪；轻校验挡结构性垃圾，
   不做逐字节公证——磁盘格式与 v17 完全兼容（canvas/layout/drawing-files.json），备份与回滚零迁移
 - **自研墨迹层 (ink.js + InkLayer + InkTools)**: 笔迹/矩形/椭圆/箭头/文字全部自写——落笔即场景文档元素、
@@ -75,7 +75,7 @@ npm run scan         # 仅扫描，输出统计
 - **首尾局部读取**: 只读 JSONL 首 64KB + 尾 8KB，3700 文件冷扫 1.5s，mtime 缓存命中 53ms
 - **三层噪音过滤**: 子智能体(claude isSidechain / codex thread_source=subagent)、空壳、headless 自噪
   全部源头滤除——40% 的文件是机器噪音，不配占卡片；automation 会话保留并打 ⚙ 标
-- **模型路由 (llm.mjs)**: Codex(gpt-5.6-sol) 优先 → Claude(sonnet-5) 兜底 → DeepSeek(v4-flash) 可选，
+- **模型路由 (llm.mjs)**: Codex(gpt-5.6-sol，兼容 -o/stdout 最终文本) 优先 → Claude(sonnet 稳定别名) 兜底 → DeepSeek(v4-flash) 可选，
   额度耗尽自动降级；单次精工 xhigh、批量回填 high（Max 微降一档，data/config.json 可改）
 - **人话铁律**: 标题动词开头 8-16 字说人话；批量回填(backfill.mjs)只管近 30 天，历史不管
 - **双仓分离**: 扫描缓存可丢弃可重建；AI 增强数据(enrich)与场景文档独立存放永不清扫

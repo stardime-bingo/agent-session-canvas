@@ -226,6 +226,50 @@ def verify_interaction(browser):
     }
 
 
+def verify_handoff_choice(browser):
+    context = browser.new_context(viewport={"width": 900, "height": 600})
+    page = context.new_page()
+    diagnostics = diagnostics_for(context, page)
+    response = page.goto(f"{BASE}/?mode=handoff-choice", wait_until="networkidle", timeout=90_000)
+    assert response is not None and response.status == 200
+    page.wait_for_function("() => window.__HANDOFF_CHOICE__?.ready === true", timeout=90_000)
+
+    claude = page.get_by_test_id("handoff-launch-claude")
+    codex = page.get_by_test_id("handoff-launch-codex")
+    assert claude.count() == 1 and codex.count() == 1
+    assert claude.is_enabled() and codex.is_enabled()
+    assert page.evaluate("() => window.__HANDOFF_CHOICE__.calls.length") == 0
+
+    claude.focus()
+    page.keyboard.press("Enter")
+    codex.click()
+    result = page.evaluate("() => window.__HANDOFF_CHOICE__")
+    contract = result["contract"]
+    assert [call["tool"] for call in result["calls"]] == ["claude", "codex"], result
+    for call in result["calls"]:
+        assert call["payload"] == {
+            "tool": call["tool"],
+            "cwd": contract["cwd"],
+            "mode": "prompt",
+            "prompt": contract["handoff"],
+            "sourceKey": contract["sourceKey"],
+        }, call
+    assert_clean(diagnostics)
+    context.close()
+    return {
+        "status": "pass",
+        "choices": [call["tool"] for call in result["calls"]],
+        "samePrompt": result["calls"][0]["payload"]["prompt"] == result["calls"][1]["payload"]["prompt"],
+        "noDefaultLaunch": True,
+        "keyboardAndPointer": True,
+        "consoleErrors": 0,
+        "consoleWarnings": 0,
+        "pageErrors": 0,
+        "externalResources": 0,
+        "apiResources": 0,
+    }
+
+
 def verify_size(browser, size):
     context = browser.new_context(viewport={"width": 1440, "height": 960})
     page = context.new_page()
@@ -413,6 +457,7 @@ with sync_playwright() as playwright:
                 "suite": "prod",
                 "production": verify_production(browser),
                 "interaction": verify_interaction(browser),
+                "handoffChoice": verify_handoff_choice(browser),
             }
         elif args.suite == "perf352":
             output = {

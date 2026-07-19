@@ -6,7 +6,7 @@
 
 - 两个独立 browser context：干净标签静默采纳远端 LWW；脏本地拒绝远端覆盖，随后自己的后台冲刷成为最后写并让双方收敛。
 - daemon 暂停/恢复：浏览器输入继续同步可见，状态点进入 `dirty/error`；同一临时 data dir 重启后无限退避自动追平并回到 `saved`。
-- pagehide：在 300ms 防抖前立即关闭标签，`flushNow` 以 fetch keepalive 发送；重开后最终文字仍在。
+- pagehide：既测 300ms 防抖前立即关闭，也测普通 flush 已在飞后再次输入最终文字并关闭；`flushNow` 以 fetch keepalive 发送最新 clientSeq，旧请求不得倒灌，重开后最终文字仍在。
 
 运行：
 

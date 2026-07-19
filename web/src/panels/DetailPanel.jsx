@@ -1,5 +1,5 @@
 /**
- * [INPUT]: 依赖 react、api 的会话详情/动作接口、util 的展示函数、ui 的 Icon/toast/InlineEdit、menus 的 deleteSessionFlow
+ * [INPUT]: 依赖 react、api 的会话详情/动作接口、util 的展示函数、ui 的 Icon/toast/InlineEdit、menus 的 deleteSessionFlow、HandoffLaunchChoices 的双工具接班入口
  * [OUTPUT]: 对外提供 DetailPanel 组件：首屏=标题+一键续开+聊了什么+最后停在哪里（尾部独立摘录），
  *           次级=接力/运行实例/元信息，删除收底；错误态可重试
  * [POS]: panels 的右侧行动面板——画布是地图，这里是扳机。信息层次铁律：内容先于按钮，按钮先于元数据
@@ -10,6 +10,7 @@ import { api } from '../api.js';
 import { TOOL_META, STATUS_META, relTime, fmtSize, classifyDigestLine, handoffSkillPrompt } from '../util.js';
 import { Icon, toast, InlineEdit } from '../ui.jsx';
 import { deleteSessionFlow } from '../canvas/menus.jsx';
+import HandoffLaunchChoices from './HandoffLaunchChoices.jsx';
 
 const Row = ({ label, children }) => (
   <div style={{ display: 'flex', gap: 10, fontSize: 12, lineHeight: 1.8 }}>
@@ -252,10 +253,17 @@ export default function DetailPanel({ width = 400, sessionKey, onClose, onCollap
                   <button className="btn" onClick={() => { navigator.clipboard.writeText(s.handoff); toast('已复制接力提示词', 'ok'); }}>
                     <Icon name="copy" /> 复制
                   </button>
-                  <button className="btn primary" disabled={busy}
-                    onClick={() => run('launch-handoff', () => api.launch({ tool: s.tool, cwd: s.cwd, mode: 'prompt', prompt: s.handoff, sourceKey: s.key }), '已拉起：接力新会话（血缘已记）')}>
-                    <Icon name="play" /> 带接力开新会话
-                  </button>
+                  <HandoffLaunchChoices
+                    handoff={s.handoff}
+                    cwd={s.cwd}
+                    sourceKey={s.key}
+                    busy={busy}
+                    onLaunch={(tool, payload) => run(
+                      `launch-handoff-${tool}`,
+                      () => api.launch(payload),
+                      `已拉起 ${TOOL_META[tool].label}：接力新会话（血缘已记）`,
+                    )}
+                  />
                 </>
               )}
             </div>

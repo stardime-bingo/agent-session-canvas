@@ -16,10 +16,10 @@ scanner.mjs: 扫描编排核心，三层噪音过滤(自噪/子智能体/空壳)
 store.mjs: 持久层，DATA_DIR(可由 AGENT_CANVAS_DATA_DIR 覆盖供隔离测试) + 原子 JSON 读写；扫描缓存进程内常驻，AI 增强(enrich.json)
   以跨进程文件锁包住“读最新值→改→原子写”，避免 daemon 与 backfill CLI 旧快照互相覆盖；JSONL 追加后读尾校验
 scene.mjs: 场景快照仓（LWW）——read/write/addFiles；全量快照 + tmp/rename 原子写 + 内存 rev；
-  资产先行引用后到、同 ID 不可变、孤儿随场景写裁剪；轻校验挡结构性垃圾；磁盘格式与旧版全兼容零迁移
+  同 writer 的 clientSeq 单调门防 pagehide 新快照被旧在飞请求倒灌；资产先行引用后到、同 ID 不可变、孤儿随场景写裁剪；轻校验挡结构性垃圾；磁盘格式与旧版全兼容零迁移
 drawing-files.mjs: 旧格式图片资产兼容层——规范化、引用收集纯函数与独立原子落盘原语
 launcher.mjs: 终端拉起，COMMANDS 查表构造命令，prompt 走临时文件注入避开引号地狱，Ghostty 优先 Terminal.app 兜底
-llm.mjs: 模型路由层，codex(gpt-5.6-sol)→claude(sonnet-5)→deepseek(v4-flash) 按序降级；codex exec 用 --ephemeral 防自噪；档位 xhigh/high
+llm.mjs: 模型路由层，codex(gpt-5.6-sol)→claude(sonnet 稳定别名)→deepseek(v4-flash) 按序降级；codex exec 用 --ephemeral 防自噪并兼容 -o 文件/stdout 两种最终文本出口；档位 xhigh/high
 ai.mjs: 认知层。extractDigest 三流事件抽取(对白+工具轨迹+报错现场，含 Codex function/custom_tool_call)，轻档(命名/摘要)读首尾、深档(接力)加中段切片共 ~900KB 窗口；
   extractContextPage 终端框倒序分页——从 before 字节向前读一窗、行对齐半行丢给更早页、prevOffset 严格递减、atStart 到头旗；
   extractEndingDigest 从文件尾独立保住最后16个事件，供详情的停止点显示，不受总 digest 前向截断；

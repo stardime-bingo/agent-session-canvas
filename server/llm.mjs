@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 node:child_process 调用 codex/claude/deepseek 三家 CLI，依赖 store 的 DATA_DIR 与 config.json
- * [OUTPUT]: 对外提供 runLLM(prompt, {effort}) → 按序尝试后端直到成功，返回 {text, backend}
+ * [OUTPUT]: 对外提供 runLLM(prompt, {effort}) → 按序尝试后端直到成功，兼容 Codex -o 文件/stdout 最终文本，返回 {text, backend}
  * [POS]: server 的模型路由层——ai.mjs 只管说什么，这里管找谁说；额度用尽自动降级
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -46,11 +46,12 @@ const BACKENDS = {
   async codex(prompt, effort) {
     const out = path.join(DATA_DIR, `codex-out-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.txt`);
     try {
-      await exec('codex', [
+      const stdout = await exec('codex', [
         'exec', '-m', 'gpt-5.6-sol', '-c', `model_reasoning_effort="${effort === 'max' ? 'xhigh' : effort}"`,
         '-s', 'read-only', '--skip-git-repo-check', '--ephemeral', '-o', out, '-',
       ], { input: prompt, timeoutMs: 300000 });
-      const text = fs.readFileSync(out, 'utf8').trim();
+      // 部分 Codex CLI 成功退出但不生成 -o 文件；stdout 同样是官方最终消息出口，必须兜住。
+      const text = (fs.existsSync(out) ? fs.readFileSync(out, 'utf8') : stdout).trim();
       if (!text) throw new Error('codex 返回空');
       return text;
     } finally {
@@ -61,7 +62,7 @@ const BACKENDS = {
   async claude(prompt, effort) {
     try {
       const text = await exec('claude',
-        ['-p', '--model', 'claude-sonnet-5', '--effort', effort],
+        ['-p', '--model', 'sonnet', '--effort', effort],
         { input: prompt, timeoutMs: 300000 });
       if (!text.trim()) throw new Error('claude 返回空');
       return text.trim();

@@ -26,6 +26,8 @@ process.env.AGENT_CANVAS_DATA_DIR = dataDir;
 const { createScene } = await import('../server/scene.mjs');
 const scene = createScene(dataDir);
 const clients = new Set();
+let pendingSceneWrites = 0;
+let startedSceneWrites = 0;
 
 await build({
   root: fixture,
@@ -95,7 +97,7 @@ const server = http.createServer(async (request, response) => {
 
   if (request.method === 'GET' && url.pathname === '/health') {
     response.writeHead(200, { 'Content-Type': 'application/json' });
-    response.end(JSON.stringify({ ok: true, port, dataDir, rev: scene.rev }));
+    response.end(JSON.stringify({ ok: true, port, dataDir, rev: scene.rev, pendingSceneWrites, startedSceneWrites }));
     return;
   }
   if (request.method === 'GET' && url.pathname === '/favicon.ico') {
@@ -116,16 +118,23 @@ const server = http.createServer(async (request, response) => {
     return;
   }
   if (request.method === 'POST' && url.pathname === '/api/scene') {
+    pendingSceneWrites++;
+    startedSceneWrites++;
     try {
       const body = await readBody(request);
       await new Promise(resolve => setTimeout(resolve, WRITE_DELAY_MS));
-      const result = scene.write({ layout: body.layout, canvas: body.canvas });
-      broadcast({ type: 'scene-updated', rev: result.rev, writerId: body.writerId || null });
+      const result = scene.write({
+        layout: body.layout, canvas: body.canvas,
+        writerId: body.writerId, clientSeq: body.clientSeq,
+      });
+      if (!result.stale) broadcast({ type: 'scene-updated', rev: result.rev, writerId: body.writerId || null });
       response.writeHead(200, { 'Content-Type': 'application/json' });
       response.end(JSON.stringify(result));
     } catch (error) {
       response.writeHead(500, { 'Content-Type': 'application/json' });
       response.end(JSON.stringify({ error: error.message }));
+    } finally {
+      pendingSceneWrites--;
     }
     return;
   }

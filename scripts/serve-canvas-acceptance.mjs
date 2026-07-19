@@ -177,7 +177,7 @@ async function main() {
       const requestUrl = new URL(request.url, 'http://127.0.0.1:4518');
       const canvasFixtureDocument = fixtureName === 'prod'
         && route.relative === 'index.html'
-        && ['interaction', 'performance-352', 'hero'].includes(requestUrl.searchParams.get('mode'));
+        && ['interaction', 'performance-352', 'hero', 'handoff-choice'].includes(requestUrl.searchParams.get('mode'));
       response.setHeader(
         'Content-Security-Policy',
         canvasFixtureDocument

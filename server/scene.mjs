@@ -50,6 +50,7 @@ export function createScene(dataDir) {
 
   // rev 只活在进程内存：它是 SSE 回声去重的序号，不是持久化真相的一部分
   let rev = 1;
+  const writerSeq = new Map();
 
   const readCanvas = () => ({ ...structuredClone(EMPTY_CANVAS), ...readJson(canvasFile, {}) });
   const readFiles = () => normalizeDrawingFiles(readJson(filesFile, {}));
@@ -66,8 +67,11 @@ export function createScene(dataDir) {
       };
     },
 
-    // LWW 全量快照：后写者胜。绘图引用的图片必须已在仓内（资产先行，引用后到）。
-    write({ layout, canvas }) {
+    // LWW 全量快照：后写者胜；同 writer 带 clientSeq 时，旧的在飞请求不得倒灌覆盖新快照。
+    write({ layout, canvas, writerId, clientSeq }) {
+      const ordered = typeof writerId === 'string' && writerId
+        && Number.isSafeInteger(clientSeq) && clientSeq >= 0;
+      if (ordered && clientSeq <= (writerSeq.get(writerId) ?? -1)) return { rev, stale: true };
       checkCanvas(canvas);
       checkLayout(layout);
       const files = readFiles();
@@ -81,6 +85,7 @@ export function createScene(dataDir) {
       if (Object.keys(pruned).length !== Object.keys(files).length) {
         try { writeJson(filesFile, pruned); } catch { /* 孤儿资产无害，下次再裁 */ }
       }
+      if (ordered) writerSeq.set(writerId, clientSeq);
       return { rev: ++rev };
     },
 
