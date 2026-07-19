@@ -12,7 +12,7 @@ hooks/ - Claude Code SessionEnd 接力钩子 (自动生成接力提示词)
 data/ - 运行时产物: scan-cache.json(可丢弃) enrich/canvas/layout/drawing-files.json(珍贵) launch/(临时脚本)
 tests/ - 零依赖 node:test 回归：场景仓 LWW/资产先行、scene-store(合并 undo/防抖冲刷/退避/LWW 采纳)、增量布局/容器缩放、
   滚轮设备判定与缩放数学、绘图命中与选择(框选/闭包/缩放/旋转/复制)、上下文倒序分页；fixtures/canvas-acceptance 是
-  4518 无数据性能(300/800 挂载红线 + 352 节点真实拖动 trace)/交互验收夹具(十五链)；archive/ 存放 v17 事务机器的陪葬测试与旧夹具（归档不删除）
+  4518 无数据性能(300/800 挂载红线 + 352 节点真实拖动 trace)/交互验收夹具(十五链)；scene-sync-acceptance 以临时 data dir/端口验双标签 LWW、daemon 重启与 pagehide；archive/ 存放 v17 事务机器的陪葬测试与旧夹具（归档不删除）
 scripts/ - 开源安装、只读诊断、Finder 双击启停薄入口与验收服务；安装脚本按当前 checkout 生成 launchd plist，不写死个人路径；
   serve-canvas-acceptance 只绑 4518、只暴露 allowlist production/fixture dist，拒绝 /api、/data、/@fs、/.git
 plugins/ - Claude Code / Codex 共用的薄插件；统一控制脚本负责安装、诊断、启停、单行 JSON 状态与打开本地实机，stop 保留 plist/data，start 可从保留 plist 恢复注册

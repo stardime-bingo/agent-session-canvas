@@ -1,0 +1,352 @@
+import hashlib
+import json
+import os
+import selectors
+import socket
+import subprocess
+import tempfile
+import time
+from pathlib import Path
+from urllib.request import urlopen
+
+from playwright.sync_api import sync_playwright
+
+
+REPO = Path(__file__).resolve().parents[3]
+SERVER = REPO / "scripts/serve-scene-sync-acceptance.mjs"
+CHROME = os.environ.get(
+    "AGENT_CANVAS_CHROME",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+)
+RUN_ID = f"{time.strftime('%Y%m%dT%H%M%S')}-{os.getpid()}"
+
+
+def free_port():
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def start_server(data_dir, port):
+    env = os.environ.copy()
+    env["AGENT_CANVAS_SYNC_DATA_DIR"] = str(data_dir)
+    env["AGENT_CANVAS_SYNC_PORT"] = str(port)
+    process = subprocess.Popen(
+        ["node", str(SERVER)],
+        cwd=REPO,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ)
+    deadline = time.monotonic() + 45
+    transcript = []
+    try:
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise AssertionError(f"sync daemon exited: {''.join(transcript)}")
+            events = selector.select(timeout=0.25)
+            if not events:
+                continue
+            line = process.stdout.readline()
+            transcript.append(line)
+            try:
+                ready = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if ready.get("ready"):
+                assert ready["port"] == port
+                assert Path(ready["dataDir"]).resolve() == Path(data_dir).resolve()
+                return process, ready, transcript
+        raise AssertionError(f"sync daemon start timed out: {''.join(transcript)}")
+    finally:
+        selector.close()
+
+
+def stop_server(process):
+    if process.poll() is not None:
+        return process.returncode
+    process.terminate()
+    try:
+        return process.wait(timeout=8)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        return process.wait(timeout=3)
+
+
+def read_graph(base):
+    with urlopen(f"{base}/api/graph", timeout=2) as response:
+        assert response.status == 200
+        return json.load(response)
+
+
+def wait_until(read, predicate, label, timeout=15):
+    deadline = time.monotonic() + timeout
+    last = None
+    while time.monotonic() < deadline:
+        try:
+            last = read()
+            if predicate(last):
+                return last
+        except Exception as error:
+            last = str(error)
+        time.sleep(0.05)
+    raise AssertionError(f"timed out waiting for {label}: {last}")
+
+
+def page_snapshot(page):
+    return page.evaluate("() => window.__SYNC_ACCEPTANCE__.snapshot()")
+
+
+def wait_page(page, predicate, label, timeout=15):
+    return wait_until(lambda: page_snapshot(page), predicate, label, timeout)
+
+
+def note_text(graph):
+    notes = graph.get("canvas", {}).get("notes", [])
+    note = next((item for item in notes if item.get("id") == "sync-acceptance-note"), None)
+    return note.get("text", "") if note else ""
+
+
+def diagnostics(context, page, base):
+    result = {
+        "consoleErrors": [],
+        "consoleWarnings": [],
+        "pageErrors": [],
+        "requestFailed": [],
+        "externalResources": [],
+        "dialogs": [],
+    }
+
+    def console(message):
+        if message.type == "error":
+            result["consoleErrors"].append(message.text)
+        elif message.type == "warning":
+            result["consoleWarnings"].append(message.text)
+
+    def request(request):
+        if not request.url.startswith(base) and not request.url.startswith(("data:", "blob:")):
+            result["externalResources"].append(request.url)
+
+    def dialog(value):
+        result["dialogs"].append({"type": value.type, "message": value.message})
+        value.dismiss()
+
+    page.on("console", console)
+    page.on("pageerror", lambda error: result["pageErrors"].append(str(error)))
+    page.on("requestfailed", lambda request: result["requestFailed"].append({
+        "url": request.url,
+        "failure": str(request.failure or "request failed"),
+    }))
+    page.on("request", request)
+    page.on("dialog", dialog)
+    return result
+
+
+def open_fixture(browser, base):
+    context = browser.new_context(viewport={"width": 1100, "height": 760})
+    page = context.new_page()
+    diag = diagnostics(context, page, base)
+    response = page.goto(base, wait_until="load", timeout=90_000)
+    assert response is not None and response.status == 200
+    page.wait_for_function("() => window.__SYNC_ACCEPTANCE__?.ready === true", timeout=90_000)
+    page.locator('[data-testid="sync-note"]').wait_for(state="visible")
+    return context, page, diag
+
+
+def assert_clean(diag):
+    for key in ("consoleErrors", "consoleWarnings", "pageErrors", "requestFailed", "externalResources", "dialogs"):
+        assert not diag[key], f"{key}: {json.dumps(diag[key], ensure_ascii=False)}"
+
+
+def run(browser, base, data_dir, port, server_process):
+    contexts = []
+    restarts = [{"pid": server_process.pid, "phase": "initial"}]
+    try:
+        context_a, page_a, diag_a = open_fixture(browser, base)
+        context_b, page_b, diag_b = open_fixture(browser, base)
+        contexts.extend([context_a, context_b])
+        writer_a = page_snapshot(page_a)["writerId"]
+        writer_b = page_snapshot(page_b)["writerId"]
+        assert writer_a != writer_b
+
+        # 干净标签静默采纳远端；没有刷新提示、对话框或诊断噪音。
+        page_a.locator('[data-testid="sync-note"]').fill("tab-a-clean")
+        page_a.evaluate("() => window.__SYNC_ACCEPTANCE__.flushNow()")
+        adopted_clean = wait_page(
+            page_b,
+            lambda value: value["text"] == "tab-a-clean" and value["adoptions"][-1]["accepted"] is True,
+            "clean tab remote adoption",
+        )
+        assert adopted_clean["sync"] == "saved"
+        assert page_b.locator("text=请刷新").count() == 0
+        assert_clean(diag_a)
+        assert_clean(diag_b)
+
+        # B 先脏、A 后写；B 必须记录拒绝采纳，且本地文字不被静默覆盖。随后 B 自己成为 LWW。
+        prior_adoptions = len(adopted_clean["adoptions"])
+        page_b.locator('[data-testid="sync-note"]').fill("tab-b-dirty")
+        page_a.locator('[data-testid="sync-note"]').fill("tab-a-remote")
+        page_a.evaluate("() => window.__SYNC_ACCEPTANCE__.flushNow()")
+        dirty_guard = wait_page(
+            page_b,
+            lambda value: len(value["adoptions"]) > prior_adoptions,
+            "dirty tab rejects remote",
+        )["adoptions"][-1]
+        assert dirty_guard["accepted"] is False, dirty_guard
+        assert dirty_guard["localText"] == "tab-b-dirty", dirty_guard
+        converged_a = wait_page(
+            page_a,
+            lambda value: value["text"] == "tab-b-dirty" and value["sync"] == "saved",
+            "tab A converges to dirty tab LWW",
+        )
+        converged_b = wait_page(
+            page_b,
+            lambda value: value["text"] == "tab-b-dirty" and value["sync"] == "saved",
+            "tab B saved",
+        )
+        assert converged_a["text"] == converged_b["text"]
+        assert_clean(diag_a)
+        assert_clean(diag_b)
+
+        # daemon 真停：防抖请求失败后状态进入 error；第二次输入仍同步写本地文档。
+        page_a.locator('[data-testid="sync-note"]').fill("offline-before-stop")
+        assert page_snapshot(page_a)["sync"] == "dirty"
+        stopped_code = stop_server(server_process)
+        offline = wait_page(
+            page_a,
+            lambda value: value["sync"] == "error" and value["live"] is False,
+            "offline error status",
+            timeout=8,
+        )
+        page_a.locator('[data-testid="sync-note"]').fill("offline-continued")
+        offline_after_input = page_snapshot(page_a)
+        assert offline_after_input["text"] == "offline-continued"
+        assert offline_after_input["sync"] == "error"
+        assert page_a.locator(".sync-state.error").count() == 1
+
+        # 同一临时 data dir 重启；SceneStore 无限退避自动追平，不要求刷新。
+        restarted, ready, _ = start_server(data_dir, port)
+        server_process = restarted
+        restarts.append({"pid": restarted.pid, "phase": "resumed"})
+        recovered = wait_page(
+            page_a,
+            lambda value: value["sync"] == "saved" and value["live"] is True,
+            "automatic retry after daemon restart",
+            timeout=15,
+        )
+        persisted_offline = wait_until(
+            lambda: read_graph(base),
+            lambda graph: note_text(graph) == "offline-continued",
+            "offline final edit persisted",
+        )
+        assert recovered["text"] == "offline-continued"
+
+        # pagehide：在 300ms debounce 前立即关页；150ms 服务端延迟要求 keepalive 真正续送。
+        context_c, page_c, diag_c = open_fixture(browser, base)
+        contexts.append(context_c)
+        page_c.locator('[data-testid="sync-note"]').fill("pagehide-final")
+        page_c.close()
+        persisted_pagehide = wait_until(
+            lambda: read_graph(base),
+            lambda graph: note_text(graph) == "pagehide-final",
+            "pagehide keepalive persistence",
+            timeout=8,
+        )
+        assert_clean(diag_c)
+        context_d, page_d, diag_d = open_fixture(browser, base)
+        contexts.append(context_d)
+        reopened = page_snapshot(page_d)
+        assert reopened["text"] == "pagehide-final"
+        assert page_d.locator('[data-testid="sync-note"]').input_value() == "pagehide-final"
+        assert_clean(diag_d)
+
+        # 离线阶段只允许同源网络失败；页面错误、外联与刷新对话框始终为零。
+        offline_failures = diag_a["requestFailed"] + diag_b["requestFailed"]
+        assert offline_failures, "daemon stop should produce observable same-origin request failures"
+        assert all(item["url"].startswith(base) for item in offline_failures)
+        assert not diag_a["pageErrors"] and not diag_b["pageErrors"]
+        assert not diag_a["externalResources"] and not diag_b["externalResources"]
+        assert not diag_a["dialogs"] and not diag_b["dialogs"]
+
+        files = {}
+        for file in sorted(Path(data_dir).glob("*.json")):
+            raw = file.read_bytes()
+            files[file.name] = {"byteLength": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
+        return {
+            "status": "pass",
+            "browserVersion": browser.version,
+            "port": port,
+            "isolatedDataDir": str(Path(data_dir).resolve()),
+            "serverRestarts": restarts,
+            "initialStopExitCode": stopped_code,
+            "writersDistinct": True,
+            "cleanRemoteAdoption": adopted_clean["adoptions"][-1],
+            "dirtyRemoteGuard": dirty_guard,
+            "lwwConvergedText": converged_a["text"],
+            "offline": {
+                "error": offline,
+                "continuedInput": offline_after_input,
+                "recovered": recovered,
+                "persistedText": note_text(persisted_offline),
+                "sameOriginRequestFailures": len(offline_failures),
+            },
+            "pagehide": {
+                "persistedText": note_text(persisted_pagehide),
+                "reopenedText": reopened["text"],
+                "serverWriteDelayMs": ready["writeDelayMs"],
+            },
+            "diagnostics": {
+                "preOfflineClean": True,
+                "pageErrors": len(diag_a["pageErrors"]) + len(diag_b["pageErrors"]) + len(diag_d["pageErrors"]),
+                "externalResources": len(diag_a["externalResources"]) + len(diag_b["externalResources"]) + len(diag_d["externalResources"]),
+                "dialogs": len(diag_a["dialogs"]) + len(diag_b["dialogs"]) + len(diag_d["dialogs"]),
+                "freshReopenConsoleErrors": len(diag_d["consoleErrors"]),
+                "freshReopenConsoleWarnings": len(diag_d["consoleWarnings"]),
+            },
+            "isolatedFiles": files,
+        }, server_process
+    except Exception:
+        stop_server(server_process)
+        raise
+    finally:
+        for context in contexts:
+            try:
+                context.close()
+            except Exception:
+                pass
+
+
+def main():
+    port = free_port()
+    base = f"http://127.0.0.1:{port}"
+    temporary = tempfile.TemporaryDirectory(prefix="agent-scene-sync-acceptance-")
+    data_dir = Path(temporary.name)
+    server_process = None
+    try:
+        server_process, _, _ = start_server(data_dir, port)
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch(executable_path=CHROME, headless=True)
+            try:
+                result, server_process = run(browser, base, data_dir, port, server_process)
+            finally:
+                browser.close()
+        output = {"ok": True, "suite": "scene-sync", "result": result}
+    finally:
+        if server_process is not None:
+            stop_server(server_process)
+        temporary.cleanup()
+    output["result"]["isolatedDataDirRemoved"] = not data_dir.exists()
+    artifacts = REPO / "output/acceptance"
+    artifacts.mkdir(parents=True, exist_ok=True)
+    report_path = artifacts / f"scene-sync-{RUN_ID}.report.json"
+    output["reportPath"] = str(report_path.resolve())
+    report_path.write_text(json.dumps(output, ensure_ascii=False, indent=2) + "\n")
+    print(json.dumps(output, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()

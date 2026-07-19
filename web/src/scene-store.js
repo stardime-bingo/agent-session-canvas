@@ -48,7 +48,7 @@ export function createSceneStore(initial, { persistScene, persistFiles } = {}) {
     flushTimer = setTimeout(() => { flushTimer = null; void flush(); }, delay);
   };
 
-  async function flush() {
+  async function flush(persistOptions = {}) {
     if (flushing) return;                 // 在飞快照落定后会自查追赶，无需并发
     if (doc === lastFlushed) { setStatus('saved'); return; }
     flushing = true;
@@ -57,14 +57,14 @@ export function createSceneStore(initial, { persistScene, persistFiles } = {}) {
     const snapshot = doc;
     try {
       const delta = sceneFilesDelta(lastFlushed.drawingFiles, snapshot.drawingFiles);
-      if (Object.keys(delta).length) await persistFiles(delta);
+      if (Object.keys(delta).length) await persistFiles(delta, persistOptions);
       const receipt = await persistScene({
         layout: snapshot.layout,
         canvas: {
           edges: snapshot.edges, notes: snapshot.notes,
           boards: snapshot.boards, drawing: snapshot.drawing,
         },
-      });
+      }, persistOptions);
       if (Number.isFinite(receipt?.rev)) serverRev = Math.max(serverRev, receipt.rev);
       lastFlushed = snapshot;
       retryAttempt = 0;
@@ -159,7 +159,7 @@ export function createSceneStore(initial, { persistScene, persistFiles } = {}) {
     flushNow() {
       clearTimeout(flushTimer);
       flushTimer = null;
-      return flush();
+      return flush({ keepalive: true });
     },
   };
 }

@@ -73,8 +73,8 @@ export default function App() {
     };
     if (!storeRef.current) {
       storeRef.current = createSceneStore(sceneDoc, {
-        persistScene: scene => api.putScene(scene),
-        persistFiles: files => api.putDrawingFiles(files),
+        persistScene: (scene, options) => api.putScene(scene, options),
+        persistFiles: (files, options) => api.putDrawingFiles(files, options),
       });
     } else {
       storeRef.current.adoptRemote(sceneDoc, g.rev);   // 本地脏改动本地胜；旧代际读值拒绝倒灌

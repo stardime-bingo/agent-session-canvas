@@ -13,6 +13,7 @@
     "build": "vite build",
     "acceptance:canvas": "node scripts/serve-canvas-acceptance.mjs --fixture=canvas",
     "acceptance:prod": "node scripts/serve-canvas-acceptance.mjs --fixture=prod",
+    "acceptance:sync": "node scripts/serve-scene-sync-acceptance.mjs",
     "test": "node --test --test-concurrency=1 tests/*.test.mjs",
     "verify:global": "npm run build && node --test --test-concurrency=1 tests/*.test.mjs",
     "serve": "node server/index.mjs",

@@ -44,7 +44,8 @@ export const api = {
   // 场景快照唯一写入口；keepalive 供 pagehide 兜底（body 超 keepalive 限额时浏览器自动降级为普通请求失败，由重试兜住）
   putScene: (scene, { keepalive = false } = {}) =>
     post('/api/scene', { writerId: WRITER_ID, ...scene }, keepalive ? { keepalive: true } : {}),
-  putDrawingFiles: files => post('/api/drawing-files', { files }),
+  putDrawingFiles: (files, { keepalive = false } = {}) =>
+    post('/api/drawing-files', { files }, keepalive ? { keepalive: true } : {}),
   del: (key, force) => post('/api/delete', { key, force }),
   backfill: () => post('/api/backfill', {}),
   backfillStatus: () => call('/api/backfill-status'),

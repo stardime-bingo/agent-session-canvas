@@ -1,11 +1,13 @@
 /**
  * [INPUT]: web/src/scene-store.js 客户端场景真相源（persist 由测试注入）
- * [OUTPUT]: 同步 mutate/订阅、coalesce undo、redo、防抖冲刷与失败退避、LWW 采纳、files delta 回归
+ * [OUTPUT]: 同步 mutate/订阅、coalesce undo、redo、防抖冲刷与失败退避、LWW 采纳、pagehide keepalive、files delta 回归
  * [POS]: tests 的场景心脏证伪层——交互路径零等待、磁盘失败永不阻塞输入是本仓的宪法
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import { createSceneStore, sceneFilesDelta, emptySceneDoc } from '../web/src/scene-store.js';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -132,10 +134,51 @@ test('adoptRemote：本地干净即采纳，本地有脏改动则本地胜（LWW
   await store.flushNow();
 });
 
+test('flushNow 为 pagehide 冲刷显式请求 keepalive', async () => {
+  const calls = [];
+  const fileCalls = [];
+  const { store } = makeStore({
+    persistScene: async (scene, options) => {
+      calls.push({ scene, options });
+      return { rev: 1 };
+    },
+    persistFiles: async (files, options) => {
+      fileCalls.push({ files, options });
+      return { added: Object.keys(files).length };
+    },
+  });
+  store.mutate(doc => ({
+    ...doc,
+    notes: [{ id: 'pagehide', text: '最终编辑' }],
+    drawingFiles: { fixture: { id: 'fixture', dataURL: 'data:image/png;base64,AA==' } },
+  }));
+  await store.flushNow();
+  assert.equal(calls.length, 1);
+  assert.deepEqual(calls[0].options, { keepalive: true });
+  assert.equal(fileCalls.length, 1);
+  assert.deepEqual(fileCalls[0].options, { keepalive: true });
+});
+
 test('sceneFilesDelta 只挑基线没有的新 ID', () => {
   assert.deepEqual(
     Object.keys(sceneFilesDelta({ a: 1 }, { a: 1, b: 2, c: 3 })),
     ['b', 'c'],
   );
   assert.deepEqual(sceneFilesDelta({ a: 1 }, { a: 1 }), {});
+});
+
+test('同步浏览器夹具只用临时 scene daemon，并真实关闭页面与重启进程', () => {
+  const server = fs.readFileSync(path.resolve('scripts/serve-scene-sync-acceptance.mjs'), 'utf8');
+  const page = fs.readFileSync(path.resolve('tests/fixtures/scene-sync-acceptance/main.jsx'), 'utf8');
+  const verifier = fs.readFileSync(path.resolve('tests/fixtures/scene-sync-acceptance/verify.py'), 'utf8');
+  assert.match(server, /AGENT_CANVAS_SYNC_DATA_DIR/);
+  assert.match(server, /createScene/);
+  assert.doesNotMatch(server, /scanAll|listen\(4517|AGENT_CANVAS_PORT|\.claude|\.codex/);
+  assert.match(page, /createSceneStore/);
+  assert.match(page, /subscribeEvents/);
+  assert.match(page, /TopBar/);
+  assert.match(verifier, /browser\.new_context/);
+  assert.match(verifier, /page_c\.close\(\)/);
+  assert.match(verifier, /stop_server\(server_process\)/);
+  assert.match(verifier, /start_server\(data_dir, port\)/);
 });

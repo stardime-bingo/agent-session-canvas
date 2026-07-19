@@ -34,8 +34,8 @@ src/App.jsx: 总装线——graph 地形状态 + SceneStore 创建/采纳（SSE 
   整理（tidy 规划交 FlowCanvas.applyArrange 一次 mutate，撤销走全局 undo）+ 全局快捷键（含 Cmd+Z/Shift+Cmd+Z）+
   画布终端框(ContextFrame)开合 + pagehide 冲刷兜底 + 空态指路牌
 src/scene-store.js: 场景真相源——createSceneStore：同步 mutate/订阅/undo/redo(coalesce, 容量100)、稳定 sync status 快照、
-  防抖 300ms 后台冲刷（files delta 先行、失败 1s→15s 无限退避、在飞期追加自动追赶）、adoptRemote LWW、flushNow
-src/api.js: 数据访问唯一通道——graph/session/contextPage/AI/launch + putScene 场景快照/putDrawingFiles 资产 + WRITER_ID + subscribeEvents
+  防抖 300ms 后台冲刷（files delta 先行、失败 1s→15s 无限退避、在飞期追加自动追赶）、adoptRemote LWW、pagehide flushNow keepalive
+src/api.js: 数据访问唯一通道——graph/session/contextPage/AI/launch + putScene 场景快照/putDrawingFiles 资产（均可 pagehide keepalive）+ WRITER_ID + subscribeEvents
 src/util.js: 展示工具箱——relTime/shortPath/fmtSize/classifyDigestLine + handoffSkillPrompt(交接三件套自包含提示词) + TOOL_META/STATUS_META
 src/ui.jsx: UI 原子库——Icon 单色 SVG 集、toast polite status（动作按钮可键盘触发）/confirmPop() 单例 + <UIHost/>、<InlineEdit/> 就地改名
 src/theme.css: 视觉唯一真相源(Dify tokens)；节点皮肤类化 + toast/confirm/空态/边tooltip/drop-target 样式；
