@@ -121,26 +121,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func updateStatusItem() {
         guard let button = statusItem?.button else { return }
         let symbol: String
-        let color: NSColor
         if busyLabel != nil || !statusKnown {
             symbol = "square.grid.2x2"
-            color = .systemOrange
         } else if status.isHealthy {
             symbol = "square.grid.2x2.fill"
-            color = .systemGreen
         } else if status.running {
             symbol = "exclamationmark.triangle.fill"
-            color = .systemOrange
         } else {
             symbol = "square.grid.2x2"
-            color = .secondaryLabelColor
         }
-        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: statusSummary)
-        button.contentTintColor = color
+        button.image = makeStatusImage(symbol: symbol)
+        button.contentTintColor = nil
         button.toolTip = "会话指挥塔 · \(statusSummary)"
         if !isMenuTracking {
             statusItem?.menu = makeControlMenu(includeQuit: true)
         }
+    }
+
+    private func makeStatusImage(symbol: String) -> NSImage? {
+        guard let source = NSImage(systemSymbolName: symbol, accessibilityDescription: statusSummary) else {
+            return nil
+        }
+        let image = NSImage(size: source.size, flipped: false) { bounds in
+            source.draw(in: bounds)
+            NSGraphicsContext.saveGraphicsState()
+            NSGraphicsContext.current?.compositingOperation = .sourceIn
+            NSColor.white.setFill()
+            bounds.fill()
+            NSGraphicsContext.restoreGraphicsState()
+            return true
+        }
+        image.isTemplate = false
+        image.accessibilityDescription = statusSummary
+        return image
     }
 
     private var statusSummary: String {
