@@ -1,7 +1,8 @@
 /**
- * [INPUT]: 4518 query(mode=performance|interaction|performance-352, size=300|800) 与真实画布组件
+ * [INPUT]: 4518 query(mode=performance|interaction|performance-352|hero, size=300|800) 与真实画布组件
  * [OUTPUT]: performance=InkLayer 直渲 N 元素的挂载耗时与 DOM 完整性报告；
  *           interaction=动态加载真实 FlowCanvas 全内存验收页；performance-352=真实 FlowCanvas 拖动取证页；
+ *           hero=production FlowCanvas 匿名产品截图页；
  *           共享 console/page error 原始 transcript
  * [POS]: 4518 验收夹具入口。自研墨迹后没有导出管线可测——渲染完整性与挂载耗时就是全部性能合同
  * [PROTOCOL]: 变更时更新此头部，然后检查 interaction-data/README/web/CLAUDE.md
@@ -15,7 +16,7 @@ import InkLayer from '../../../web/src/canvas/InkLayer.jsx';
 import { createCanvasAcceptanceElements } from './fixture-data.js';
 
 const params = new URLSearchParams(location.search);
-const MODE = ['interaction', 'performance-352'].includes(params.get('mode'))
+const MODE = ['interaction', 'performance-352', 'hero'].includes(params.get('mode'))
   ? params.get('mode')
   : 'performance';
 const SIZE = Number(params.get('size')) === 800 ? 800 : 300;
@@ -102,6 +103,14 @@ if (MODE === 'interaction') {
       PAGE_ERRORS.push(error.message);
       document.documentElement.dataset.performance352Status = 'error';
       document.getElementById('root').textContent = `performance fixture failed: ${error.message}`;
+    });
+} else if (MODE === 'hero') {
+  import('./hero-data.js')
+    .then(module => module.mountHeroFixture(document.getElementById('root')))
+    .catch(error => {
+      PAGE_ERRORS.push(error.message);
+      document.documentElement.dataset.heroStatus = 'error';
+      document.getElementById('root').textContent = `hero fixture failed: ${error.message}`;
     });
 } else {
   createRoot(document.getElementById('root')).render(

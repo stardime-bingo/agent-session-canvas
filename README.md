@@ -4,6 +4,10 @@
 
 这不是在线演示站，也没有第二套页面。产品就是安装后运行在 `http://localhost:4517` 的本地实机；GitHub 仓库和插件只负责分发、安装、启动与打开它。
 
+![AGENT 会话指挥塔匿名产品画布：会话卡、画板、便签与自研墨迹](./docs/assets/agent-session-canvas-hero.png)
+
+> 上图由隔离在 4518 的 production `FlowCanvas` 匿名场景生成，不含真实会话、本机路径或用户资产。
+
 ## 它解决什么
 
 - 扫描 `~/.claude/projects` 与 `~/.codex/sessions`，统一成同一种会话卡片。
@@ -137,7 +141,7 @@ launchctl kickstart -k gui/$(id -u)/com.bingo.agent-canvas
 - `hooks/`：可选 Claude Code SessionEnd 接力钩子
 - `scripts/`：安装、只读诊断与 Finder 双击启停入口
 - `plugins/`：Claude Code / Codex 共用薄插件与统一 launchd 控制脚本
-- `tests/`：Node 原生回归与隔离在 `4518` 的 300/800 性能、十五链 production 浏览器验收
+- `tests/`：Node 原生回归、隔离在 `4518` 的 300/800 挂载与 352 节点拖动取证、十五链 production 浏览器验收、双标签/pagehide 临时 daemon 验收
 - `docs/`：公开提交文案、文档索引与已完成工程记录
 
 ## License

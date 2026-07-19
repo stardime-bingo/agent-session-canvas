@@ -135,6 +135,18 @@ test('352 节点性能场景使用 production buildGraph，并要求真实 point
   assert.match(verifier, /frameP95MaxMs.*20/);
 });
 
+test('README hero 使用 production FlowCanvas，且匿名夹具禁止真实路径与验收 HUD', () => {
+  const hero = fs.readFileSync(path.resolve('tests/fixtures/canvas-acceptance/hero-data.js'), 'utf8');
+  const capture = fs.readFileSync(path.resolve('tests/fixtures/canvas-acceptance/capture-hero.py'), 'utf8');
+  assert.match(hero, /FlowCanvas/);
+  assert.match(hero, /TopBar/);
+  assert.match(hero, /data-hero-canvas/);
+  assert.doesNotMatch(hero, /fixture-hud|performance-352-status/);
+  assert.doesNotMatch(hero, /\/Users\/|bingowu|\.claude|\.codex|r2:\/\//i);
+  assert.match(capture, /agent-session-canvas-hero\.png/);
+  assert.match(capture, /FORBIDDEN_TEXT/);
+});
+
 test('4518 静态服务只暴露 allowlist fixture 并拒绝写请求', () => {
   const server = fs.readFileSync(path.resolve('scripts/serve-canvas-acceptance.mjs'), 'utf8');
   assert.match(server, /4518/);
