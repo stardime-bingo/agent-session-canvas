@@ -1,7 +1,7 @@
 /**
  * [INPUT]: production buildGraph 节点、SceneStore 当前场景、容器承载纯函数
- * [OUTPUT]: 内容增长导致的避碰投影，以及可在下一次用户输入前 history:false 原子提交的场景结果
- * [POS]: 布局增长的纯投影桥；页面加载只算不写，FlowCanvas 在下一次用户动作前提交终点与对应墨迹
+ * [OUTPUT]: 内容增长导致的避碰投影，以及可在下一次几何/绘图输入前 history:false 原子提交的场景结果
+ * [POS]: 布局增长的纯投影桥；页面加载只算不写，FlowCanvas 在下一次几何/绘图动作前提交终点与对应墨迹
  * [PROTOCOL]: 变更时更新 web/CLAUDE.md/CLAUDE.md/AGENTS.md
  */
 import { applyBatchCarry } from '../../../shared/canvas-carry.mjs';

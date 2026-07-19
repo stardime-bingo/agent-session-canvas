@@ -4,7 +4,7 @@
  * [OUTPUT]: 对外提供 FlowCanvas 组件：统一容器模型、弹性生长、拖放改归属、三系统边+手动边、
  *           Figma 式框选/平移/触控板手势、滚轮双模、容器缩放定桩、落空连线选择、缩放感知连接点、
  *           自研墨迹（直写文档、框选/多选/复制、缩放/旋转、样式岛、大底板自动沉层）、顶栏可见快捷键，
- *           容器承载=乐观拖动+一次 mutate、增长避碰在下一次输入前携墨迹落定、街区/画板/随行墨迹智能整理动效、普通模式绘图命中与删除治理
+ *           容器承载=乐观拖动+一次 mutate、增长避碰在下一次几何/绘图输入前携墨迹落定、街区/画板/随行墨迹智能整理动效、普通模式绘图命中与删除治理
  * [POS]: canvas 的画布引擎总装。单一世界单一相机：墨迹与卡片同住 RF viewport，
  *        文档变更到像素可见=一次 React commit——没有导出、没有帧、没有交接
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -164,7 +164,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
           editSignal: renaming.id === n.id ? renaming.n : 0,
           onSetBoard: b => onCanvasAction('setBoard', b),
           onDelBoard: (board, pos) => deleteBoardFlow(board, pos, onCanvasAction),
-          onResize: p => {
+          onResize: p => { commitLayoutProjection();
             const current = instRef.current?.getNodes() || [];
             const childEntries = resizedContainerChildren(current, n.id);
             if (childEntries.length) onMoveNode(childEntries);
@@ -179,7 +179,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
         ...n,
         data: {
           ...n.data,
-          onResize: p => {
+          onResize: p => { commitLayoutProjection();
             const current = instRef.current?.getNodes() || [];
             onMoveNode([{
               path: n.id, x: Math.round(p.x), y: Math.round(p.y),
@@ -217,7 +217,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       },
       draggable: true, selectable: true, deletable: true, zIndex: 10,
     })),
-  ], [built, canvas.notes, onCanvasAction, onRenameSession, onRenameWs, onToggleExpand, renaming, onMoveNode]);
+  ], [built, canvas.notes, onCanvasAction, onRenameSession, onRenameWs, onToggleExpand, renaming, onMoveNode, commitLayoutProjection]);
 
   const [nodes, setNodes, onNodesChange] = useNodesState(allNodes);
   // 渲染主权分层：图数据重建在绘制前接管，但拖动中的节点几何主权归 React Flow

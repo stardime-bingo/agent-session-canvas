@@ -1,7 +1,7 @@
 /**
  * [INPUT]: web/src/canvas/drawing.js 墨迹纯几何内核
  * [OUTPUT]: 命中检测双模（描边带/选择热区/旋转/折线段/后画者优先/墓碑锁定）、包围盒、
- *           平移/删除/沉浮不可变变换、大实心底板判定、4518 交互与 352 节点性能夹具契约回归
+ *           平移/删除/沉浮不可变变换、大实心底板判定、4518 交互/布局与 352 节点性能夹具契约回归
  * [POS]: tests 的墨迹几何证伪层——命中区严格贴墨迹，隐形玻璃一块都不许有
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -137,6 +137,16 @@ test('352 节点性能场景使用 production buildGraph，并要求真实 point
   assert.match(verifier, /district container[\s\S]*workspace[\s\S]*note/);
   assert.match(verifier, /Tracing\.start/);
   assert.match(verifier, /frameP95MaxMs.*20/);
+});
+
+test('布局质量夹具覆盖增长投影后的真实容器缩放与墨迹稳定性', () => {
+  const fixture = fs.readFileSync(path.resolve('tests/fixtures/canvas-acceptance/layout-quality-data.js'), 'utf8');
+  const verifier = fs.readFileSync(path.resolve('tests/fixtures/canvas-acceptance/verify.py'), 'utf8');
+  assert.match(fixture, /followerInkCarried/);
+  assert.match(fixture, /probe\.geometry/);
+  assert.match(verifier, /react-flow__resize-control\.handle\.bottom\.right/);
+  assert.match(verifier, /resizeProjectionCommitted/);
+  assert.match(verifier, /resizeInkStable/);
 });
 
 test('README hero 使用 production FlowCanvas，且匿名夹具禁止真实路径与验收 HUD', () => {

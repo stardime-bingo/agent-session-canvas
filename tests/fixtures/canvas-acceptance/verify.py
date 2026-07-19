@@ -354,6 +354,40 @@ def verify_layout_quality(browser):
     assert growth["targetGrew"] is True and growth["followerMoved"] is True, growth
     assert growth["followerInkCarried"] is True, growth
     assert growth["collisions"] == [], growth
+    resize_before = page.evaluate(
+        "growth => window.__LAYOUT_ACCEPTANCE__.geometry(growth.followerId, growth.followerInkId)",
+        growth,
+    )
+    follower = page.locator(f'.react-flow__node[data-id="{growth["followerId"]}"]')
+    resize_handle = follower.locator(".react-flow__resize-control.handle.bottom.right")
+    assert resize_handle.count() == 1
+    handle_box = resize_handle.bounding_box()
+    assert handle_box is not None
+    page.mouse.move(handle_box["x"] + handle_box["width"] / 2, handle_box["y"] + handle_box["height"] / 2)
+    page.mouse.down()
+    page.mouse.move(handle_box["x"] + handle_box["width"] / 2 + 48,
+                    handle_box["y"] + handle_box["height"] / 2 + 36, steps=8)
+    page.mouse.up()
+    page.wait_for_function(
+        """growth => {
+          const doc = window.__LAYOUT_ACCEPTANCE__.snapshot();
+          const geometry = window.__LAYOUT_ACCEPTANCE__.geometry(growth.followerId, growth.followerInkId);
+          const saved = doc.layout[growth.followerId];
+          return saved && geometry.container
+            && Math.abs(saved.x - geometry.container.x) <= 2
+            && Math.abs(saved.y - geometry.container.y) <= 2;
+        }""",
+        arg=growth,
+        timeout=10_000,
+    )
+    resize_after = page.evaluate(
+        "growth => window.__LAYOUT_ACCEPTANCE__.geometry(growth.followerId, growth.followerInkId)",
+        growth,
+    )
+    assert abs(resize_after["ink"]["x"] - resize_before["ink"]["x"]) <= 4, (resize_before, resize_after)
+    assert abs(resize_after["ink"]["y"] - resize_before["ink"]["y"]) <= 4, (resize_before, resize_after)
+    growth["resizeProjectionCommitted"] = True
+    growth["resizeInkStable"] = True
     assert_clean(diagnostics)
     context.close()
     return {

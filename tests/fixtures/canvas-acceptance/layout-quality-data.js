@@ -219,6 +219,7 @@ function LayoutQualityCanvas() {
   }
   const store = storeRef.current;
   probe.snapshot = () => store.get();
+  probe.geometry = (nodeId, inkId) => ({ container: nodeRect(nodeId), ink: inkRect(inkId) });
   const doc = useSyncExternalStore(
     useCallback(listener => store.subscribe(listener), [store]),
     useCallback(() => store.get(), [store]),
@@ -344,6 +345,8 @@ function LayoutQualityCanvas() {
       }
       probe.growthReport = {
         targetId: before.targetId,
+        followerId: before.followerId,
+        followerInkId: before.followerInkId,
         targetGrew: targetAfter.h > targetBefore.h + 2,
         followerMoved,
         followerInkCarried: close(followerInkAfter.x - before.followerInk.x, followerAfter.x - followerBefore.x, 4)
