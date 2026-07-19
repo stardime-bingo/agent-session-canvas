@@ -147,6 +147,8 @@ test('352 节点性能场景使用 production buildGraph，并要求真实 point
   assert.match(verifier, /Tracing\.start/);
   assert.match(verifier, /frameP95MaxMs.*20/);
   assert.match(verifier, /idlePaintMaxCount.*0/);
+  assert.match(verifier, /releaseJumpMaxPx.*8/);
+  assert.match(verifier, /ThreadControllerImpl::RunTask/);
 });
 
 test('正式画布空闲时没有状态点或关系线永久动画抢帧', () => {

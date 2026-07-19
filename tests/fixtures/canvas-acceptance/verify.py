@@ -34,6 +34,8 @@ PERFORMANCE_352 = {
     "minPointerMoves": 100,
     "minDistinctPositions": 80,
     "minDisplacementPx": 150,
+    "maxHeldDisplacementPx": 260,
+    "releaseJumpMaxPx": 8,
     "frameP95MaxMs": 20,
     "frameMaxMs": 50,
     "slowFrameRatioMax": 0.05,
@@ -47,6 +49,7 @@ PERFORMANCE_352 = {
 PERFORMANCE_DISTRICT_ID = "district:/fixture"
 PERFORMANCE_WORKSPACE_ID = "/fixture/perf-352/workspace-01"
 PERFORMANCE_NOTE_ID = "note:perf-352"
+CDP_TASK_EVENT_NAMES = {"RunTask", "ThreadControllerImpl::RunTask"}
 RUN_ID = f"{time.strftime('%Y%m%dT%H%M%S')}-{os.getpid()}"
 PROD_GRAPH = {
     "sessions": [],
@@ -495,6 +498,10 @@ def verify_performance_352(browser, artifacts_dir):
                 "handle": f'.react-flow__node-workspace[data-id="{PERFORMANCE_WORKSPACE_ID}"]',
                 "xFraction": 0.5,
                 "yPx": 20,
+                # Stay inside the empty vertical gap below row one. A diagonal drag crosses
+                # workspace-02 and legitimately triggers collision packing on release.
+                "dragX": 0,
+                "dragY": 180,
             },
             {
                 "name": "note",
@@ -560,7 +567,8 @@ def verify_performance_352(browser, artifacts_dir):
             assert target_box and before, f"{spec['name']} drag geometry unavailable"
             start_x = target_box["x"] + target_box["width"] * spec["xFraction"]
             start_y = target_box["y"] + spec.get("yPx", target_box["height"] * spec.get("yFraction", 0.5))
-            drag_x, drag_y = 180, 100
+            drag_x = spec.get("dragX", 180)
+            drag_y = spec.get("dragY", 100)
             page.mouse.move(start_x, start_y)
             page.evaluate("selector => window.__FLOW_PERF_352__.start(selector)", spec["node"])
             page.mouse.down()
@@ -570,6 +578,8 @@ def verify_performance_352(browser, artifacts_dir):
                     start_y + drag_y * step / 120,
                 )
                 page.wait_for_timeout(16)
+            held = node.bounding_box()
+            assert held, f"{spec['name']} held drag geometry unavailable"
             page.mouse.up()
             page.wait_for_timeout(80)
             perf = page.evaluate("() => window.__FLOW_PERF_352__.stop()")
@@ -586,13 +596,17 @@ def verify_performance_352(browser, artifacts_dir):
                 (round(position["x"], 1), round(position["y"], 1))
                 for position in perf["positions"]
             })
+            held_displacement = math.hypot(held["x"] - before["x"], held["y"] - before["y"])
+            release_jump = math.hypot(after["x"] - held["x"], after["y"] - held["y"])
             displacement = math.hypot(after["x"] - before["x"], after["y"] - before["y"])
             page_long_tasks = [duration for duration in perf["longTasks"] if duration >= 50]
             checks = {
                 "frameSamples": len(frame_intervals) >= thresholds["minFrameSamples"],
                 "pointerMoves": perf["pointerMoves"] >= thresholds["minPointerMoves"],
                 "distinctPositions": distinct_positions >= thresholds["minDistinctPositions"],
-                "displacement": displacement >= thresholds["minDisplacementPx"],
+                "heldDisplacement": thresholds["minDisplacementPx"]
+                <= held_displacement <= thresholds["maxHeldDisplacementPx"],
+                "releaseJump": release_jump <= thresholds["releaseJumpMaxPx"],
                 "frameP95": frame_p95 <= thresholds["frameP95MaxMs"],
                 "frameMax": frame_max <= thresholds["frameMaxMs"],
                 "slowFrameRatio": slow_ratio <= thresholds["slowFrameRatioMax"],
@@ -618,6 +632,8 @@ def verify_performance_352(browser, artifacts_dir):
                 "slowFrameRatio": round(slow_ratio, 5),
                 "pointerMoves": perf["pointerMoves"],
                 "distinctPositions": distinct_positions,
+                "heldDisplacementPx": round(held_displacement, 2),
+                "releaseJumpPx": round(release_jump, 2),
                 "displacementPx": round(displacement, 2),
                 "pageLongTaskCount": len(page_long_tasks),
                 "pageMaxLongTaskMs": round(max(page_long_tasks, default=0), 3),
@@ -629,17 +645,21 @@ def verify_performance_352(browser, artifacts_dir):
 
         trace = json.loads(trace_bytes)
         trace_events = trace.get("traceEvents", [])
+        cdp_task_events = [
+            event for event in trace_events
+            if event.get("ph") == "X"
+            and event.get("name") in CDP_TASK_EVENT_NAMES
+        ]
         cdp_long_tasks = [
             event.get("dur", 0) / 1000
-            for event in trace_events
-            if event.get("name") == "RunTask"
-            and event.get("ph") == "X"
-            and event.get("dur", 0) >= 50_000
+            for event in cdp_task_events
+            if event.get("dur", 0) >= 50_000
         ]
 
         checks = {
             "nodeCount": detail["nodeCount"] == thresholds["nodeCount"],
             "allTargets": len(target_metrics) == 3 and all(all(metric["checks"].values()) for metric in target_metrics),
+            "cdpTaskCoverage": len(cdp_task_events) > 0,
             "cdpLongTasks": len(cdp_long_tasks) <= thresholds["longTaskMaxCount"],
         }
         assert all(checks.values()), json.dumps({"checks": checks, "cdpLongTasks": cdp_long_tasks}, ensure_ascii=False)
@@ -672,6 +692,8 @@ def verify_performance_352(browser, artifacts_dir):
             "targets": target_metrics,
             "cdpLongTaskCount": len(cdp_long_tasks),
             "cdpMaxLongTaskMs": round(max(cdp_long_tasks, default=0), 3),
+            "cdpTaskEventCount": len(cdp_task_events),
+            "cdpTaskEventNames": sorted({event.get("name") for event in cdp_task_events}),
             "traceEventCount": len(trace_events),
             "thresholds": thresholds,
             "checks": checks,

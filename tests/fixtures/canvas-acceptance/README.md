@@ -44,7 +44,7 @@ python3 tests/fixtures/canvas-acceptance/capture-hero.py
 
 `--suite prod` 先以只读 graph/EventSource stub 启动真实 production 入口，再在 fresh context 运行 26 项墨迹全链（其中文字用 Playwright 真实鼠标验焦点）、接力双工具选择与智能整理；四段都要求 console error/warning、page error、失败请求、外联与 `/api` 资源为零。
 
-`--suite perf352` 先要求 352 节点及上述真实拓扑完整，并在 1500ms 空闲窗内满足运行中动画、`UpdateLayoutTree`、`PrePaint`、`Paint` 全为 0；随后要求三个拖动目标都达到 ≥90 个真实 rAF 样本、≥100 个 pointer move、≥80 个不同位置、位移 ≥150px、帧间隔 p95 ≤20ms、最大 ≤50ms、慢帧比例 ≤5%、页面与 CDP Long Task 均为 0。报告记录浏览器版本、两份 trace 的 SHA-256、字节数与全部阈值。它测的是真实空闲成本与真实拖动，不拿 300/800 挂载耗时做代理。
+`--suite perf352` 先要求 352 节点及上述真实拓扑完整，并在 1500ms 空闲窗内满足运行中动画、`UpdateLayoutTree`、`PrePaint`、`Paint` 全为 0；随后要求三个拖动目标都达到 ≥90 个真实 rAF 样本、≥100 个 pointer move、≥80 个不同位置、按住位移 150–260px、松手跳变 ≤8px、帧间隔 p95 ≤20ms、最大 ≤50ms、慢帧比例 ≤5%、页面与 CDP Long Task 均为 0。CDP 门同时要求识别到 Chrome 当前主线程任务事件（`RunTask` 或 `ThreadControllerImpl::RunTask`），避免事件名漂移把检查变成恒真。报告记录浏览器版本、两份 trace 的 SHA-256、字节数与全部阈值。它测的是真实空闲成本与真实拖动，不拿 300/800 挂载耗时做代理。
 
 隔离闸门：
 
