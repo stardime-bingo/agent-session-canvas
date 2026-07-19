@@ -2,7 +2,7 @@
  * [INPUT]: 依赖 api 的动作通道、ui 的 Icon/toast/confirmPop
  * [OUTPUT]: 对外提供八套右键菜单构建器（session/workspace/district/board/note/drawing/pane/edge）
  *           与三个删除流程（deleteSessionFlow/deleteBoardFlow/deleteNoteFlow）——菜单、节点按钮、详情面板共用同一条河
- * [POS]: canvas 的菜单与危险动作层。铁律：拉起必有 toast 回执，删除必过自绘确认，绝不碰原生弹窗
+ * [POS]: canvas 的菜单与危险动作层。铁律：拉起/打开目录必有 toast 回执，删除必过自绘确认，绝不碰原生弹窗
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
 import React from 'react';
@@ -16,6 +16,9 @@ const L = (icon, text) => <><Icon name={icon} /> {text}</>;
 // 拉起终端：成功有回执，失败说人话——右键菜单的动作不许无声无息
 const launchGo = (payload, okMsg) =>
   api.launch(payload).then(() => toast(okMsg, 'ok')).catch(e => toast(`拉起失败：${e.message}`, 'error'));
+const revealGo = target => api.reveal(target)
+  .then(() => toast('已用默认文件管理器打开目录', 'ok'))
+  .catch(e => toast(`打开目录失败：${e.message}`, 'error'));
 
 // ============================================================
 //  删除三流程：确认 → 执行 → 回执，一处定义各处共用
@@ -89,13 +92,13 @@ export const workspaceMenu = (ws, ctx) => [
   { label: L('plus', 'Claude 新会话'), fn: () => launchGo({ tool: 'claude', cwd: ws.path, mode: 'new' }, '已拉起 Claude 新会话') },
   { label: L('plus', 'Codex 新会话'), fn: () => launchGo({ tool: 'codex', cwd: ws.path, mode: 'new' }, '已拉起 Codex 新会话') },
   { label: L('focus', '聚焦此工作区'), fn: () => ctx.focusWs(ws.path) },
-  { label: L('folder', '在 Finder 打开'), fn: () => api.reveal(ws.path).catch(e => toast(e.message, 'error')) },
+  { label: L('folder', '用默认文件管理器打开'), fn: () => revealGo(ws.path) },
   { label: L('edit', '改名（看板显示）'), fn: () => ctx.rename(ws.path) },
 ];
 
 export const districtMenu = (node, ctx) => [
   { label: L('focus', '聚焦此街区'), fn: () => ctx.focusDistrict(node) },
-  { label: L('folder', '在 Finder 打开目录'), fn: () => api.reveal(node.data._dir).catch(() => toast(`目录不存在：${node.data._dir}`, 'error')) },
+  { label: L('folder', '用默认文件管理器打开'), fn: () => revealGo(node.data._dir) },
   { label: L('board', '在此新建画板'), fn: pos => ctx.addBoardAt(pos) },
 ];
 

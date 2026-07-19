@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 react、api 的会话详情/动作接口、util 的展示函数、ui 的 Icon/toast/InlineEdit、menus 的 deleteSessionFlow、HandoffLaunchChoices 的双工具接班入口
- * [OUTPUT]: 对外提供 DetailPanel 组件：首屏=标题+一键续开+接力/元信息/删除，
+ * [OUTPUT]: 对外提供 DetailPanel 组件：首屏=标题+一键续开+接力/元信息(醒目默认文件管理器入口)/删除，
  *           次级=聊了什么+最后停在哪里（尾部独立摘录）+运行实例；错误态自动退避重连
  * [POS]: panels 的右侧行动面板——画布是地图，这里是扳机。接力、定位与清理入口固定在内容长文之前
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -125,6 +125,18 @@ export default function DetailPanel({ width = 400, sessionKey, onClose, onCollap
   };
 
   const s = detail;
+  const openDirectory = async () => {
+    setBusy('reveal');
+    try {
+      await api.reveal(s.cwd);
+      toast('已用默认文件管理器打开目录', 'ok');
+    } catch (e) {
+      toast(`打开目录失败：${e.message}`, 'error');
+    } finally {
+      setBusy(null);
+    }
+  };
+
   return (
     <div style={{
       width, height: '100%', flexShrink: 0, background: 'var(--bg-panel)',
@@ -230,9 +242,13 @@ export default function DetailPanel({ width = 400, sessionKey, onClose, onCollap
 
           <Section title="DETAIL · 元信息">
             <Row label="路径">
-              <span style={{ cursor: 'pointer' }} title="在 Finder 打开"
-                onClick={() => api.reveal(s.cwd).then(() => toast('已在 Finder 打开', 'ok')).catch(e => toast(e.message, 'error'))}>
-                {s.cwd} <Icon name="folder" size={10} />
+              <span className="detail-path-action">
+                <span className="mono detail-path-value" title={s.cwd}>{s.cwd}</span>
+                <button type="button" className="btn folder-open-btn" disabled={Boolean(busy)}
+                  title="用电脑默认的文件管理器打开此目录" aria-label="用默认文件管理器打开目录"
+                  onClick={openDirectory}>
+                  <Icon name="folder" size={13} /> {busy === 'reveal' ? '正在打开…' : '打开目录'}
+                </button>
               </span>
             </Row>
             {s.gitBranch && <Row label="分支"><span className="mono">⎇ {s.gitBranch}</span></Row>}

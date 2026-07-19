@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 scanner 的图数据、launcher 的终端拉起、ai 的摘要/接力、store 的增强仓与静态目录、scene 的 LWW 快照仓
- * [OUTPUT]: 对外提供 HTTP 服务（:4517）：graph/session/context(深档上下文)/scan/launch/AI/rename/events + 画布场景快照(PUT scene)与图片资产 API + 前端静态托管
+ * [OUTPUT]: 对外提供 HTTP 服务（:4517）：graph/session/context(深档上下文)/scan/launch/AI/rename/events/reveal(默认文件管理器) + 画布场景快照(PUT scene)与图片资产 API + 前端静态托管
  * [POS]: server 的总入口与路由层，前端画布与本地地形之间唯一的桥
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -15,6 +15,7 @@ import { summarize, makeHandoff, extractDigest, extractEndingDigest, extractCont
 import { runBackfill, backfillStatus, findCandidates } from './backfill.mjs';
 import { WEB_DIST, loadEnrich, updateEnrich, appendJsonlVerified, DATA_DIR } from './store.mjs';
 import { createScene } from './scene.mjs';
+import { revealInDefaultFileViewer } from './file-viewer.mjs';
 
 const PORT = +process.env.AGENT_CANVAS_PORT || 4517;   // 环境变量仅供并行实例测试，生产恒为 4517
 const scene = createScene(DATA_DIR);
@@ -309,9 +310,7 @@ const routes = {
   'POST /api/reveal': async body => {
     // 只开真实存在的本地路径，URL/scheme 一律拒绝
     if (!body.path?.startsWith('/') || !fs.existsSync(body.path)) throw new Error('路径不存在');
-    const { spawn } = await import('node:child_process');
-    spawn('open', [body.path], { detached: true, stdio: 'ignore' }).unref();
-    return { ok: true };
+    return revealInDefaultFileViewer(body.path);
   },
 };
 

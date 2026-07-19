@@ -244,11 +244,23 @@ def verify_interaction(browser):
     editor.wait_for(state="visible", timeout=10_000)
     assert editor.evaluate("node => document.activeElement === node")
     editor.fill("真实鼠标文字可见")
-    page.get_by_title("选择绘图（V）：框选/Shift 多选/拖动/缩放/旋转/Cmd+C/V/Alt 拖").click()
+    page.get_by_title("画笔（P，点已有绘图直接选择，Esc 收起）").click()
     rendered_text = page.locator(".ink-world text", has_text="真实鼠标文字可见").last
     rendered_box = rendered_text.bounding_box()
     assert rendered_box and rendered_box["width"] > 40 and rendered_box["height"] > 10, rendered_box
+    rendered_id = rendered_text.evaluate("node => node.closest('[data-ink-element-id]').dataset.inkElementId")
+    drawing_before_direct_select = page.evaluate("() => window.__FIXTURE_STORE__.get().drawing.length")
+    page.mouse.click(rendered_box["x"] + rendered_box["width"] / 2,
+                     rendered_box["y"] + rendered_box["height"] / 2)
+    page.wait_for_function(
+        "id => window.__FIXTURE_PROBE__.current.snapshot().tool === 'select'"
+        " && window.__FIXTURE_PROBE__.current.snapshot().selectedId === id",
+        arg=rendered_id,
+        timeout=10_000,
+    )
+    assert page.evaluate("() => window.__FIXTURE_STORE__.get().drawing.length") == drawing_before_direct_select
     checks["trustedPointerTextInput"] = True
+    checks["trustedPointerDirectSelect"] = True
     checks["visibleShortcutLabels"] = True
     assert_clean(diagnostics)
     context.close()

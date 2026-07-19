@@ -1,7 +1,7 @@
 /**
  * [INPUT]: 依赖真实 FlowCanvas/scene-store/UIHost 与 4518 synthetic 数据；自研墨迹直渲，无故障注入
  * [OUTPUT]: 无 fetch 全内存交互画布 + 原生墨迹全链自动验收：冷渲/连发即时/P-R-O-A-T-E 实画/笔迹与文字可见位置/文字双击与字号/
- *           框选与 Shift 多选/批量样式移动缩放旋转删除/复制粘贴/Alt 拖/图片粘贴与 drop/文字图片变换/
+ *           创作工具点已有墨迹直接转选择/框选与 Shift 多选/批量样式移动缩放旋转删除/复制粘贴/Alt 拖/图片粘贴与 drop/文字图片变换/
  *           橡皮撤销/Esc 收工具/后台冲刷；报告挂 window
  * [POS]: 仅由 ?mode=interaction 动态加载；证伪"文档变更到像素可见=一次 React commit"的宪法
  * [PROTOCOL]: 变更时更新此头部，然后检查 main.jsx/README/web/CLAUDE.md
@@ -195,6 +195,18 @@ function InteractionCanvas() {
       const shortcutElements = store.get().drawing.slice(shortcutStart);
       checks.toolShortcuts = penTool === 'freedraw'
         && ['freedraw', 'rectangle', 'ellipse', 'arrow', 'text'].every(type => shortcutElements.some(el => el.type === type));
+
+      // 3a) 创作工具不是模态牢笼：R 仍武装时直接点已有墨迹，应立刻转 V 并选中；不新增幽灵图形。
+      const beforeDirectSelect = store.get().drawing.length;
+      key('r');
+      await waitFor(() => probe().snapshot().tool === 'rectangle', 'rectangle re-arm');
+      pointer('pointerdown', { x: 1140, y: 215 });
+      pointer('pointerup', { x: 1140, y: 215 });
+      await tick();
+      checks.directSelectWhileDrawing = probe().snapshot().tool === 'select'
+        && probe().snapshot().selectedId === 'fixture-landmark'
+        && store.get().drawing.length === beforeDirectSelect;
+      if (!checks.directSelectWhileDrawing) key('v');   // 旧实现继续跑完其余诊断，失败仍由本检查如实保留
 
       // 3b) 不只证明对象存在：手绘路径必须落在元素 x/y，文字必须有非透明像素包围盒。
       const createdPen = shortcutElements.find(el => el.type === 'freedraw');

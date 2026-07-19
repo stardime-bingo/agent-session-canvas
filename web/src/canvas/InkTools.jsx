@@ -1,7 +1,7 @@
 /**
  * [INPUT]: scene-store、输入前布局提交钩子、ink.js 元素工厂、ink-selection.js 选择内核、drawing.js 命中、gestures.js 相机数学、RF instance
  * [OUTPUT]: useInkTools——笔/形状/文字直写文档；单选/框选/多选、批量移动/缩放/旋转/删除/改样式、复制粘贴与 Alt 拖；
- *           V/P/R/O/A/T/E 快捷键、橡皮、真实指针落点不丢焦的就地文字编辑和单相机滚轮；指针写入前先落定只读布局投影
+ *           V/P/R/O/A/T/E 快捷键、创作态点已有墨迹直接转选择、橡皮、真实指针落点不丢焦的就地文字编辑和单相机滚轮；指针写入前先落定只读布局投影
  * [POS]: canvas 的自研墨迹交互层。每一帧手势只做同步内存 mutate；持久化永远在 scene-store 后台
  * [PROTOCOL]: 变更时更新此头部，然后检查 web/CLAUDE.md
  */
@@ -270,6 +270,12 @@ export function useInkTools({ store, instRef, rootRef, hitAt, beforeInput, wheel
     if (!p) return;
     if (textEdit) closeTextEditor();
     if (active === 'select') return beginSelectGesture(e, p);
+    // 创作工具只在空白处新建；点到已有墨迹就沿用本次 pointer 手势直接选择/拖动，
+    // 不再要求用户先按 Esc 或 V。橡皮保持专用命中语义，不能被这里抢走。
+    if (active !== 'eraser' && hitAt(p.x, p.y, 'all', true)) {
+      setTool('select');
+      return beginSelectGesture(e, p);
+    }
     if (active === 'eraser') {
       store.endCoalescing();
       const gesture = { kind: 'erase', erased: new Set(), coalesce: `ink-erase:${Date.now()}` };
@@ -291,7 +297,7 @@ export function useInkTools({ store, instRef, rootRef, hitAt, beforeInput, wheel
     gestureRef.current = { kind: 'draw', id: element.id, element, moved: false };
     mutateDrawing(els => upsertInkElement(els, element), { coalesce: `ink:${element.id}` });
     capturePointer(e.currentTarget, e.pointerId);
-  }, [beforeInput, flowPoint, textEdit, closeTextEditor, beginSelectGesture, eraseAt, style, mutateDrawing, openTextEditor, store]);
+  }, [beforeInput, flowPoint, textEdit, closeTextEditor, beginSelectGesture, eraseAt, hitAt, setTool, style, mutateDrawing, openTextEditor, store]);
 
   const onPointerMove = useCallback(e => {
     const gesture = gestureRef.current;

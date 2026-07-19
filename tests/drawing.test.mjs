@@ -1,7 +1,7 @@
 /**
  * [INPUT]: web/src/canvas/drawing.js 墨迹纯几何内核
  * [OUTPUT]: 命中检测双模（描边带/选择热区/旋转/折线段/后画者优先/墓碑锁定）、包围盒、
- *           平移/删除/沉浮不可变变换、大实心底板判定、4518 交互/布局与真实拓扑 352 节点性能夹具契约回归
+ *           平移/删除/沉浮不可变变换、大实心底板判定、4518 创作态直选/交互/布局与真实拓扑 352 节点性能夹具契约回归
  * [POS]: tests 的墨迹几何证伪层——命中区严格贴墨迹，隐形玻璃一块都不许有
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -103,6 +103,7 @@ test('4518 新合同夹具：合成 input/pointer 只在隔离页驱动真实 Fl
   assert.doesNotMatch(fixture, /requestAnimationFrame/,
     '验收轮询必须用 setTimeout——隐藏窗格 rAF 停摆（v23 教训）');
   assert.match(fixture, /data-run-suite/, '必须有可见的手动运行按钮');
+  assert.match(fixture, /directSelectWhileDrawing/, '创作工具点已有墨迹必须直接转选择，不得要求先按 Esc');
 });
 
 test('300/800 直渲性能红线写死进 4518 合同', () => {

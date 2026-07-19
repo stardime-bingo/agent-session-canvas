@@ -787,7 +787,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       {ink.toolButtons.map(([t, icon, label]) => (
         <button key={t} className={`btn ${ink.tool === t ? 'primary' : 'ghost'}`}
           onClick={() => ink.setTool(ink.tool === t ? 'none' : t)}
-          title={`${label}（${INK_TOOL_KEYS[t]}，Esc 收起）`}>
+          title={`${label}（${INK_TOOL_KEYS[t]}，${t === 'eraser' ? '拖过绘图即擦除' : '点已有绘图直接选择'}，Esc 收起）`}>
           <Icon name={icon} /> {label} <kbd className="tool-key">{INK_TOOL_KEYS[t]}</kbd>
         </button>
       ))}

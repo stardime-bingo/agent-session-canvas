@@ -107,6 +107,17 @@ body {
 .btn.ghost { background: transparent; box-shadow: none; }
 .btn:disabled { opacity: 0.4; cursor: wait; }
 
+.detail-path-action {
+  display: flex; align-items: flex-start; gap: 8px; flex-wrap: wrap; min-width: 0;
+}
+.detail-path-value { flex: 1 1 180px; min-width: 0; word-break: break-all; }
+.btn.folder-open-btn {
+  flex: 0 0 auto; color: var(--accent); background: var(--accent-glow);
+  border-color: var(--accent-soft); font-weight: 650; padding: 5px 10px;
+  box-shadow: 0 1px 2px rgba(21, 94, 239, 0.1), 0 0 0 2px rgba(21, 94, 239, 0.04);
+}
+.btn.folder-open-btn:hover { color: var(--accent); background: var(--accent-wash); border-color: var(--accent); }
+
 .chip {
   white-space: nowrap; flex-shrink: 0;
   font-family: var(--mono); font-size: 11px; line-height: 1;
