@@ -87,6 +87,7 @@ export default function App() {
       storeRef.current = createSceneStore(serverDoc, {
         persistScene: async (scene, options) => {
           const receipt = await api.putScene(scene, options);
+          if (options?.confirmedFileIds?.length) void clearRecoveryFiles(options.confirmedFileIds);
           clearSceneRecovery(sceneRecoveryKey(WRITER_ID), { clientSeq: scene.clientSeq });
           if (recoveredKeyRef.current) {
             const cleared = clearSceneRecovery(recoveredKeyRef.current, {
@@ -102,9 +103,7 @@ export default function App() {
           return receipt;
         },
         persistFiles: async (files, options) => {
-          const receipt = await api.putDrawingFiles(files, options);
-          void clearRecoveryFiles(Object.keys(files));
-          return receipt;
+          return api.putDrawingFiles(files, options);
         },
       });
       if (recovery) {

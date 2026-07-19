@@ -12,7 +12,7 @@ hooks/ - Claude Code SessionEnd 接力钩子 (自动生成接力提示词)
 data/ - 运行时产物: scan-cache.json(可丢弃) enrich/canvas/layout/drawing-files.json(珍贵) launch/(临时脚本)
 tests/ - 零依赖 node:test 回归：场景仓 LWW/资产先行、scene-store(合并 undo/防抖冲刷/退避/LWW 采纳)、增量布局/容器缩放、
   滚轮设备判定与缩放数学、绘图命中与选择(框选/闭包/缩放/旋转/复制)、上下文倒序分页；fixtures/canvas-acceptance 是
-  4518 无数据性能(300/800 挂载红线 + 352 节点真实拖动 trace)/交互验收夹具(十五链)与匿名 README hero；scene-sync-acceptance 以临时 data dir/端口验双标签 LWW、daemon 重启与 pagehide；archive/ 存放 v17 事务机器的陪葬测试与旧夹具（归档不删除）
+  4518 无数据性能(300/800 挂载红线 + 352 节点真实拖动 trace)/墨迹交互全链与匿名 README hero；scene-sync-acceptance 以临时 data dir/端口验双标签 LWW、daemon 重启、文字与 IndexedDB 图片 pagehide；archive/ 存放 v17 事务机器的陪葬测试与旧夹具（归档不删除）
 scripts/ - 开源安装、只读诊断、Finder 双击启停薄入口与验收服务；安装脚本按当前 checkout 生成 launchd plist，不写死个人路径；
   serve-canvas-acceptance 只绑 4518、只暴露 allowlist production/fixture dist，拒绝 /api、/data、/@fs、/.git
 plugins/ - Claude Code / Codex 共用的薄插件；统一控制脚本负责安装、诊断、启停、单行 JSON 状态与打开本地实机，stop 保留 plist/data，start 可从保留 plist 恢复注册
@@ -56,7 +56,7 @@ npm run scan         # 仅扫描，输出统计
   图片资产内容寻址、同 ID 不可变、资产先行引用后到、孤儿随场景写顺手裁剪；轻校验挡结构性垃圾，
   不做逐字节公证——磁盘格式与 v17 完全兼容（canvas/layout/drawing-files.json），备份与回滚零迁移
 - **关页大载荷恢复律 (web/src/scene-recovery.js)**: pagehide 先把不含图片正文的最终逻辑场景同步写入同源 localStorage，再尽力 keepalive；
-  未确认图片单独暂存在 IndexedDB。仅 dirty/saving/error 页保存恢复，saved 页服从服务端；重开只回放比服务端 canvas mtime 更新的记录，正常后台冲刷成功后清理，避免 64KB keepalive 上限造成最终编辑丢失
+  未确认图片单独暂存在 IndexedDB。仅 dirty/saving/error 页保存恢复，saved 页服从服务端；重开只回放比服务端 canvas mtime 更新的记录，资产上传不等于场景确认，只有对应场景成功回执后才清恢复正文，避免 64KB keepalive 上限或双 writer 孤儿裁剪造成最终编辑丢失
 - **自研墨迹层 (ink.js + InkLayer + InkTools)**: 笔迹/矩形/椭圆/箭头/文字全部自写——落笔即场景文档元素、
   拖画即 coalesce mutate（一笔=一步 undo）、收笔即定稿（意外小形状判废），文字就地 textarea 击键直写；
   渲染=React 直出 SVG（沉层负 z 垫底/浮层高 z 盖顶），与卡片共用唯一 RF 相机——

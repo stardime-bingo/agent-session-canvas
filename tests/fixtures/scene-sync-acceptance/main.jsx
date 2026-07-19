@@ -16,11 +16,20 @@ import {
   readLatestSceneRecovery,
   saveSceneRecovery,
   sceneRecoveryKey,
+  stageRecoveryFile,
 } from '../../../web/src/scene-recovery.js';
 import TopBar from '../../../web/src/panels/TopBar.jsx';
 
 const h = React.createElement;
 const NOTE_ID = 'sync-acceptance-note';
+const IMAGE_ID = 'sync-acceptance-image';
+const IMAGE_FILE_ID = 'sync-acceptance-image-file';
+const IMAGE_FILE = Object.freeze({
+  id: IMAGE_FILE_ID,
+  mimeType: 'image/png',
+  dataURL: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+  created: 1,
+});
 const toDoc = graph => ({
   layout: graph.layout || {},
   edges: graph.canvas?.edges || [],
@@ -52,6 +61,17 @@ function AcceptanceBody({ store }) {
     else next.push(value);
     return { ...current, notes: next };
   }, { coalesce: `sync-note:${NOTE_ID}` }), [store]);
+  const addImage = useCallback(async () => {
+    await stageRecoveryFile(IMAGE_FILE);
+    store.mutate(current => ({
+      ...current,
+      drawing: [...current.drawing.filter(item => item.id !== IMAGE_ID), {
+        id: IMAGE_ID, type: 'image', fileId: IMAGE_FILE_ID,
+        x: 40, y: 40, width: 1, height: 1,
+      }],
+      drawingFiles: { ...current.drawingFiles, [IMAGE_FILE_ID]: IMAGE_FILE },
+    }));
+  }, [store]);
 
   useEffect(() => subscribeEvents(event => {
     if (event.type !== 'scene-updated' || event.writerId === WRITER_ID) return;
@@ -81,6 +101,8 @@ function AcceptanceBody({ store }) {
     ready: true,
     writerId: WRITER_ID,
     edit,
+    addImage,
+    recoveryFilePresent: async () => Boolean((await loadRecoveryFiles([IMAGE_FILE_ID]))[IMAGE_FILE_ID]),
     flushNow: () => store.flushNow(),
     snapshot: () => ({
       writerId: WRITER_ID,
@@ -90,6 +112,8 @@ function AcceptanceBody({ store }) {
       syncError: store.status().error?.message || null,
       live,
       recovery: window.__SYNC_RECOVERY__ || { applied: false },
+      imagePresent: store.get().drawing.some(item => item.id === IMAGE_ID)
+        && Boolean(store.get().drawingFiles[IMAGE_FILE_ID]),
       adoptions: [...adoptionsRef.current],
     }),
   };
@@ -152,6 +176,7 @@ function App() {
       const nextStore = createSceneStore(serverDoc, {
         persistScene: async (scene, options) => {
           const receipt = await api.putScene(scene, options);
+          if (options?.confirmedFileIds?.length) void clearRecoveryFiles(options.confirmedFileIds);
           clearSceneRecovery(sceneRecoveryKey(WRITER_ID), { clientSeq: scene.clientSeq });
           if (recoveredKeyRef.current) {
             const cleared = clearSceneRecovery(recoveredKeyRef.current, {
@@ -167,9 +192,7 @@ function App() {
           return receipt;
         },
         persistFiles: async (files, options) => {
-          const receipt = await api.putDrawingFiles(files, options);
-          void clearRecoveryFiles(Object.keys(files));
-          return receipt;
+          return api.putDrawingFiles(files, options);
         },
       });
       if (recovery) {

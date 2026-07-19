@@ -1,7 +1,8 @@
 /**
  * [INPUT]: 依赖真实 FlowCanvas/scene-store/UIHost 与 4518 synthetic 数据；自研墨迹直渲，无故障注入
  * [OUTPUT]: 无 fetch 全内存交互画布 + 原生墨迹全链自动验收：冷渲/连发即时/P-R-O-A-T-E 实画/文字双击与字号/
- *           框选多选/批量移动缩放旋转/复制粘贴/Alt 拖/图片粘贴与 drop/文字图片变换/橡皮撤销/删除撤销/后台冲刷；报告挂 window
+ *           框选与 Shift 多选/批量样式移动缩放旋转删除/复制粘贴/Alt 拖/图片粘贴与 drop/文字图片变换/
+ *           橡皮撤销/Esc 收工具/后台冲刷；报告挂 window
  * [POS]: 仅由 ?mode=interaction 动态加载；证伪"文档变更到像素可见=一次 React commit"的宪法
  * [PROTOCOL]: 变更时更新此头部，然后检查 main.jsx/README/web/CLAUDE.md
  */
@@ -229,6 +230,30 @@ function InteractionCanvas() {
       await waitFor(() => probe().snapshot().selectedIds.length === 2, 'marquee multi-select');
       checks.marqueeMultiSelect = !!shellRef.current?.querySelector('[data-ink-handle="se"]');
 
+      // 5b) Shift 点击必须真实追加/移除选择，不用探针直接塞 selection 充数。
+      const shiftBox = selectionBounds(store.get().drawing, [createdText.id]);
+      const shiftPoint = { x: (shiftBox.minX + shiftBox.maxX) / 2, y: (shiftBox.minY + shiftBox.maxY) / 2 };
+      pointer('pointerdown', shiftPoint, { shiftKey: true });
+      pointer('pointerup', shiftPoint, { shiftKey: true });
+      await waitFor(() => probe().snapshot().selectedIds.length === 3, 'shift add selection');
+      const shiftAdded = probe().snapshot().selectedIds.includes(createdText.id);
+      pointer('pointerdown', shiftPoint, { shiftKey: true });
+      pointer('pointerup', shiftPoint, { shiftKey: true });
+      await waitFor(() => probe().snapshot().selectedIds.length === 2, 'shift remove selection');
+      checks.shiftAddSelection = shiftAdded && !probe().snapshot().selectedIds.includes(createdText.id);
+
+      // 5c) 样式岛的真实控件一次改两项：描边、填充、线宽都写回同一场景文档。
+      const styledIds = [...probe().snapshot().selectedIds];
+      const styleIsland = await waitFor(() => shellRef.current?.querySelector('[data-ink-style-island="true"]'), 'batch style island');
+      styleIsland.querySelectorAll('[title="描边颜色"]')[5].click();
+      styleIsland.querySelectorAll('[title="填充颜色"]')[3].click();
+      styleIsland.querySelector('button[title="线宽 5"]').click();
+      await waitFor(() => styledIds.every(id => {
+        const item = store.get().drawing.find(el => el.id === id);
+        return item?.strokeColor === '#7c3aed' && item?.backgroundColor === '#fde0e0' && item?.strokeWidth === 5;
+      }), 'batch style writeback');
+      checks.batchStyle = true;
+
       // 6) 多选批量移动：一次 pointer 流、一次 coalesce undo 步
       pointer('pointerdown', { x: 1120, y: 200 });
       pointer('pointermove', { x: 1140, y: 220 });
@@ -341,10 +366,10 @@ function InteractionCanvas() {
       await waitFor(() => store.get().drawing.some(el => el.id === eraseTarget.id), 'eraser undo');
       checks.eraserUndo = true;
       key('v');
-      probe().setSelectedId(eraseTarget.id);
-      await waitFor(() => probe().snapshot().selectedIds[0] === eraseTarget.id, 'delete target selection');
+      probe().setSelectedIds([eraseTarget.id, dropped.id]);
+      await waitFor(() => probe().snapshot().selectedIds.length === 2, 'batch delete target selection');
 
-      // 13) Delete + 全画布 undo：生产快捷键删除，store 历史原样复活
+      // 13) 多选 Delete + 全画布 undo：生产快捷键一次删两项，store 历史原样复活
       await waitFor(() => dom() === store.get().drawing.length, 'alt clone dom commit');
       const beforeDelete = dom();
       details.delete = {
@@ -355,7 +380,7 @@ function InteractionCanvas() {
       };
       key('Delete');
       try {
-        await waitFor(() => dom() === beforeDelete - 1, 'delete hides');
+        await waitFor(() => dom() === beforeDelete - 2, 'batch delete hides');
       } finally {
         details.delete.afterDom = dom();
         details.delete.afterDrawing = store.get().drawing.length;
@@ -363,7 +388,17 @@ function InteractionCanvas() {
       }
       store.undo();
       await waitFor(() => dom() === beforeDelete, 'undo revives');
-      checks.deleteUndo = true;
+      checks.batchDeleteUndo = [eraseTarget.id, dropped.id]
+        .every(id => store.get().drawing.some(el => el.id === id));
+
+      // 13b) Esc 分层退出：先清选择，再从 select 收回到 none。
+      probe().setSelectedId(eraseTarget.id);
+      await waitFor(() => probe().snapshot().selectedIds.length === 1, 'escape target selection');
+      key('Escape');
+      await waitFor(() => probe().snapshot().selectedIds.length === 0 && probe().snapshot().tool === 'select', 'escape clears selection');
+      key('Escape');
+      await waitFor(() => probe().snapshot().tool === 'none', 'escape closes ink tool');
+      checks.escapeClosesTool = true;
 
       // 14) 后台冲刷：防抖后 persist 收到最终文档，以上输入没有一步等待它
       await waitFor(() => flushedRef.current.length > 0, 'background flush', 5000);

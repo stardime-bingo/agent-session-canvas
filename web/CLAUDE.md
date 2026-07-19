@@ -34,10 +34,10 @@ src/App.jsx: 总装线——graph 地形状态 + SceneStore 创建/采纳（SSE 
   整理（tidy 规划交 FlowCanvas.applyArrange 一次 mutate，撤销走全局 undo）+ 全局快捷键（含 Cmd+Z/Shift+Cmd+Z）+
   画布终端框(ContextFrame)开合 + pagehide keepalive/本地恢复双保险 + 空态指路牌
 src/scene-store.js: 场景真相源——createSceneStore：同步 mutate/订阅/undo/redo(coalesce, 容量100)、稳定 sync status 快照、
-  防抖 300ms 后台冲刷（files delta 先行、失败 1s→15s 无限退避、在飞期追加自动追赶）、adoptRemote LWW、
+  防抖 300ms 后台冲刷（files delta 先行、对应 scene 回执才确认 fileIds、失败 1s→15s 无限退避、在飞期追加自动追赶）、adoptRemote LWW、
   pagehide flushNow keepalive（普通请求在飞时并发最新 clientSeq，服务端拒绝旧请求倒灌）
 src/scene-recovery.js: pagehide 大载荷恢复边界——localStorage 同步保存不含图片正文的最终场景，IndexedDB 暂存未确认图片；
-  仅 dirty/saving/error 页关页时保存、仅记录比服务端 canvas mtime 更新时回放，正常后台冲刷成功后清理，不进入日常渲染主权
+  仅 dirty/saving/error 页关页时保存、仅记录比服务端 canvas mtime 更新时回放，图片上传后仍保留到对应 scene 成功回执才清理，不进入日常渲染主权
 src/api.js: 数据访问唯一通道——graph/session/contextPage/AI/launch + putScene 场景快照/putDrawingFiles 资产（均可 pagehide keepalive）+ WRITER_ID + subscribeEvents
 src/util.js: 展示工具箱——relTime/shortPath/fmtSize/classifyDigestLine + handoffSkillPrompt(交接三件套自包含提示词) + TOOL_META/STATUS_META
 src/ui.jsx: UI 原子库——Icon 单色 SVG 集、toast polite status（动作按钮可键盘触发）/confirmPop() 单例 + <UIHost/>、<InlineEdit/> 就地改名

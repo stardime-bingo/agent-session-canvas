@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 from playwright.sync_api import sync_playwright
 
@@ -85,6 +85,18 @@ def read_graph(base):
 
 def read_health(base):
     with urlopen(f"{base}/health", timeout=2) as response:
+        assert response.status == 200
+        return json.load(response)
+
+
+def post_json(base, path, body):
+    request = Request(
+        f"{base}{path}",
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(request, timeout=3) as response:
         assert response.status == 200
         return json.load(response)
 
@@ -334,6 +346,66 @@ def run(browser, base, data_dir, port, server_process):
         assert clean_reopen["text"] == large_text
         assert_clean(diag_g)
 
+        # 图片恢复反例：资产上传后，场景写被拒；另一个 writer 的 LWW 裁掉孤儿，关页时 daemon
+        # 不可达。重开必须从 IndexedDB 找回正文、重新先传资产再提交引用，不能只剩 fileId。
+        context_h, page_h, diag_h = open_fixture(browser, base)
+        context_i, page_i, diag_i = open_fixture(browser, base)
+        contexts.extend([context_h, context_i])
+        image_writer = page_snapshot(page_h)["writerId"]
+        post_json(base, "/__acceptance/reject-scenes", {"writerId": image_writer, "count": 100})
+        files_before = read_health(base)["startedFileWrites"]
+        page_h.evaluate("() => window.__SYNC_ACCEPTANCE__.addImage()")
+        image_failed = wait_page(
+            page_h,
+            lambda value: value["sync"] == "error" and value["imagePresent"] is True,
+            "image scene fails after asset upload",
+        )
+        wait_until(
+            lambda: read_health(base),
+            lambda health: health["startedFileWrites"] > files_before,
+            "image asset uploaded before rejected scene",
+        )
+        assert page_h.evaluate("() => window.__SYNC_ACCEPTANCE__.recoveryFilePresent()") is True
+
+        # B 的空图场景在 A 重试前成为 LWW，并把尚未引用的服务端资产裁掉。
+        page_i.locator('[data-testid="sync-note"]').fill("image-race-prune")
+        page_i.evaluate("() => window.__SYNC_ACCEPTANCE__.flushNow()")
+        pruned = wait_until(
+            lambda: read_graph(base),
+            lambda graph: note_text(graph) == "image-race-prune"
+            and not graph.get("canvas", {}).get("drawingFiles", {}),
+            "other writer prunes orphan image",
+        )
+        assert not pruned["canvas"]["drawing"]
+        stopped_image_code = stop_server(server_process)
+        page_h.close()
+
+        restarted_image, ready_image, _ = start_server(data_dir, port)
+        server_process = restarted_image
+        restarts.append({"pid": restarted_image.pid, "phase": "image-recovery"})
+        page_j = context_h.new_page()
+        diag_j = diagnostics(context_h, page_j, base)
+        response_j = page_j.goto(base, wait_until="load", timeout=90_000)
+        assert response_j is not None and response_j.status == 200
+        page_j.wait_for_function("() => window.__SYNC_ACCEPTANCE__?.ready === true", timeout=90_000)
+        reopened_image = page_snapshot(page_j)
+        assert reopened_image["recovery"]["applied"] is True, reopened_image
+        assert reopened_image["imagePresent"] is True, reopened_image
+        persisted_image = wait_until(
+            lambda: read_graph(base),
+            lambda graph: len(graph.get("canvas", {}).get("drawing", [])) == 1
+            and "sync-acceptance-image-file" in graph.get("canvas", {}).get("drawingFiles", {}),
+            "IndexedDB image body restored and persisted",
+        )
+        saved_image = wait_page(page_j, lambda value: value["sync"] == "saved", "restored image saved")
+        assert saved_image["imagePresent"] is True
+        assert page_j.evaluate("() => window.__SYNC_ACCEPTANCE__.recoveryFilePresent()") is False
+        assert not diag_h["consoleWarnings"] and not diag_h["pageErrors"]
+        assert not diag_h["externalResources"] and not diag_h["dialogs"]
+        assert all(item["url"].startswith(base) for item in diag_h["requestFailed"])
+        assert_clean(diag_i)
+        assert_clean(diag_j)
+
         # 离线阶段只允许同源网络失败；页面错误、外联与刷新对话框始终为零。
         offline_failures = diag_a["requestFailed"] + diag_b["requestFailed"]
         assert offline_failures, "daemon stop should produce observable same-origin request failures"
@@ -379,14 +451,27 @@ def run(browser, base, data_dir, port, server_process):
                     "cleanReopenRecoveryApplied": clean_reopen["recovery"]["applied"],
                 },
                 "serverWriteDelayMs": ready["writeDelayMs"],
+                "imageRecovery": {
+                    "failedSync": image_failed["sync"],
+                    "serverStoppedExitCode": stopped_image_code,
+                    "recoveryApplied": reopened_image["recovery"]["applied"],
+                    "imagePresentAfterReopen": saved_image["imagePresent"],
+                    "serverDrawingCount": len(persisted_image["canvas"]["drawing"]),
+                    "serverFileIds": sorted(persisted_image["canvas"]["drawingFiles"].keys()),
+                    "recoveryAssetClearedAfterSceneReceipt": not page_j.evaluate(
+                        "() => window.__SYNC_ACCEPTANCE__.recoveryFilePresent()"
+                    ),
+                    "expectedInjectedFailureConsoleErrors": len(diag_h["consoleErrors"]),
+                    "restartWriteDelayMs": ready_image["writeDelayMs"],
+                },
             },
             "diagnostics": {
                 "preOfflineClean": True,
-                "pageErrors": len(diag_a["pageErrors"]) + len(diag_b["pageErrors"]) + len(diag_e["pageErrors"]) + len(diag_f["pageErrors"]) + len(diag_g["pageErrors"]),
-                "externalResources": len(diag_a["externalResources"]) + len(diag_b["externalResources"]) + len(diag_e["externalResources"]) + len(diag_f["externalResources"]) + len(diag_g["externalResources"]),
-                "dialogs": len(diag_a["dialogs"]) + len(diag_b["dialogs"]) + len(diag_e["dialogs"]) + len(diag_f["dialogs"]) + len(diag_g["dialogs"]),
-                "freshReopenConsoleErrors": len(diag_g["consoleErrors"]),
-                "freshReopenConsoleWarnings": len(diag_g["consoleWarnings"]),
+                "pageErrors": len(diag_a["pageErrors"]) + len(diag_b["pageErrors"]) + len(diag_e["pageErrors"]) + len(diag_f["pageErrors"]) + len(diag_g["pageErrors"]) + len(diag_j["pageErrors"]),
+                "externalResources": len(diag_a["externalResources"]) + len(diag_b["externalResources"]) + len(diag_e["externalResources"]) + len(diag_f["externalResources"]) + len(diag_g["externalResources"]) + len(diag_j["externalResources"]),
+                "dialogs": len(diag_a["dialogs"]) + len(diag_b["dialogs"]) + len(diag_e["dialogs"]) + len(diag_f["dialogs"]) + len(diag_g["dialogs"]) + len(diag_j["dialogs"]),
+                "freshReopenConsoleErrors": len(diag_j["consoleErrors"]),
+                "freshReopenConsoleWarnings": len(diag_j["consoleWarnings"]),
             },
             "isolatedFiles": files,
         }, server_process

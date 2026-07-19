@@ -50,7 +50,8 @@ export function createSceneStore(initial, { persistScene, persistFiles } = {}) {
 
   const persistSnapshot = async (snapshot, persistOptions) => {
     const delta = sceneFilesDelta(lastFlushed.drawingFiles, snapshot.drawingFiles);
-    if (Object.keys(delta).length) await persistFiles(delta, persistOptions);
+    const fileIds = Object.keys(delta);
+    if (fileIds.length) await persistFiles(delta, persistOptions);
     return persistScene({
       clientSeq: snapshot.seq,
       layout: snapshot.layout,
@@ -58,7 +59,7 @@ export function createSceneStore(initial, { persistScene, persistFiles } = {}) {
         edges: snapshot.edges, notes: snapshot.notes,
         boards: snapshot.boards, drawing: snapshot.drawing,
       },
-    }, persistOptions);
+    }, fileIds.length ? { ...persistOptions, confirmedFileIds: fileIds } : persistOptions);
   };
 
   const acceptReceipt = (snapshot, receipt) => {

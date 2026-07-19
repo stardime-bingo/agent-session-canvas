@@ -28,6 +28,8 @@ const scene = createScene(dataDir);
 const clients = new Set();
 let pendingSceneWrites = 0;
 let startedSceneWrites = 0;
+let startedFileWrites = 0;
+const rejectedSceneWriters = new Map();
 
 await build({
   root: fixture,
@@ -98,7 +100,15 @@ const server = http.createServer(async (request, response) => {
 
   if (request.method === 'GET' && url.pathname === '/health') {
     response.writeHead(200, { 'Content-Type': 'application/json' });
-    response.end(JSON.stringify({ ok: true, port, dataDir, rev: scene.rev, pendingSceneWrites, startedSceneWrites }));
+    response.end(JSON.stringify({ ok: true, port, dataDir, rev: scene.rev, pendingSceneWrites, startedSceneWrites, startedFileWrites }));
+    return;
+  }
+  if (request.method === 'POST' && url.pathname === '/__acceptance/reject-scenes') {
+    const body = await readBody(request);
+    if (typeof body.writerId !== 'string' || !body.writerId) throw new Error('writerId required');
+    rejectedSceneWriters.set(body.writerId, Math.max(1, Number(body.count) || 1));
+    response.writeHead(200, { 'Content-Type': 'application/json' });
+    response.end(JSON.stringify({ ok: true, writerId: body.writerId }));
     return;
   }
   if (request.method === 'GET' && url.pathname === '/favicon.ico') {
@@ -123,6 +133,12 @@ const server = http.createServer(async (request, response) => {
     startedSceneWrites++;
     try {
       const body = await readBody(request);
+      const rejected = rejectedSceneWriters.get(body.writerId) || 0;
+      if (rejected > 0) {
+        if (rejected === 1) rejectedSceneWriters.delete(body.writerId);
+        else rejectedSceneWriters.set(body.writerId, rejected - 1);
+        throw new Error('acceptance forced scene failure');
+      }
       await new Promise(resolve => setTimeout(resolve, WRITE_DELAY_MS));
       const result = scene.write({
         layout: body.layout, canvas: body.canvas,
@@ -142,6 +158,7 @@ const server = http.createServer(async (request, response) => {
   if (request.method === 'POST' && url.pathname === '/api/drawing-files') {
     try {
       const body = await readBody(request);
+      startedFileWrites++;
       const result = scene.addFiles(body.files);
       response.writeHead(200, { 'Content-Type': 'application/json' });
       response.end(JSON.stringify(result));

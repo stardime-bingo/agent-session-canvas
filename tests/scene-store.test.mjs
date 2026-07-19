@@ -154,9 +154,34 @@ test('flushNow 为 pagehide 冲刷显式请求 keepalive', async () => {
   }));
   await store.flushNow();
   assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0].options, { keepalive: true });
+  assert.deepEqual(calls[0].options, { keepalive: true, confirmedFileIds: ['fixture'] });
   assert.equal(fileCalls.length, 1);
   assert.deepEqual(fileCalls[0].options, { keepalive: true });
+});
+
+test('图片恢复资产只在对应场景成功后确认，场景失败不会产生误清理信号', async () => {
+  let fail = true;
+  const calls = [];
+  const { store } = makeStore({
+    persistFiles: async files => ({ added: Object.keys(files).length }),
+    persistScene: async (_scene, options) => {
+      calls.push(options);
+      if (fail) throw new Error('场景失败');
+      return { rev: 2 };
+    },
+  });
+  store.mutate(doc => ({
+    ...doc,
+    drawing: [{ id: 'image', type: 'image', fileId: 'asset' }],
+    drawingFiles: { asset: { id: 'asset', dataURL: 'data:image/png;base64,AA==' } },
+  }));
+  await store.flushNow();
+  assert.equal(store.status().status, 'error');
+  assert.deepEqual(calls[0].confirmedFileIds, ['asset']);
+  fail = false;
+  await store.flushNow();
+  assert.equal(store.status().status, 'saved');
+  assert.deepEqual(calls[1].confirmedFileIds, ['asset']);
 });
 
 test('flushNow 在普通冲刷进行中并发发送最终快照，旧回执不得回退已保存基线', async () => {
