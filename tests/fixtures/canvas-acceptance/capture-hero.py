@@ -64,7 +64,10 @@ def main():
             "() => document.documentElement.dataset.heroStatus === 'ready'",
             timeout=30_000,
         )
-        page.add_style_tag(content="*,*::before,*::after{animation-play-state:paused!important;caret-color:transparent!important}")
+        page.add_style_tag(content=(
+            "*,*::before,*::after{animation:none!important;transition:none!important;"
+            "caret-color:transparent!important}"
+        ))
         page.wait_for_timeout(400)
 
         counts = page.evaluate("window.__HERO_ACCEPTANCE__")
