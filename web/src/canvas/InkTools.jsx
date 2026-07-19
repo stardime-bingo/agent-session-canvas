@@ -17,6 +17,7 @@ import {
   measureInkText, updateInkElementDrag, upsertInkElement,
 } from './ink.js';
 import { createImagePlaceholder, loadImageFile } from './image-import.js';
+import { stageRecoveryFile } from '../scene-recovery.js';
 import { wheelViewport } from './gestures.js';
 import { Icon, toast } from '../ui.jsx';
 
@@ -149,7 +150,9 @@ export function useInkTools({ store, instRef, rootRef, hitAt, wheelModeRef, minZ
 
     files.forEach((file, index) => {
       const placeholder = placeholders[index];
-      void loadImageFile(file).then(asset => {
+      void loadImageFile(file).then(async asset => {
+        // 先把大资产放进同源恢复仓，再把 fileId 写进场景；关页时即使 keepalive 超限也能重开追平。
+        await stageRecoveryFile(asset.file);
         store.mutate(doc => {
           if (!doc.drawing.some(el => el.id === placeholder.id)) return doc;   // 用户已 undo：迟到读取没有复活权
           return {

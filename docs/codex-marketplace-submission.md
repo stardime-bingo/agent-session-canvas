@@ -105,7 +105,7 @@ The application is local-first and has no publisher-operated account, telemetry,
 
 Current unreleased changes replace the former third-party drawing transaction stack with a local-first SceneStore and dependency-free SVG ink layer. Selection now supports marquee and Shift multi-select, batch move/resize/rotate/style, copy/paste, Alt-drag duplication, editable text sizes, one-stroke erasing, and image paste/drop with an immediate placeholder and background content addressing. Cards, notes, boards, and ink share one React Flow camera and one undo history; synchronization remains non-blocking and is shown by a quiet status dot.
 
-Version 1.2.0 adds design-tool canvas controls: drag-to-select, Space/middle-button pan, trackpad two-finger pan, pinch zoom, and title-bar-only container moves. Automatic arrange now preserves manual board/district membership and offers immediate Undo or Cmd/Ctrl+Z instead of destructively clearing layout state. It retains the independent session stopping-point view, collision-free incremental layout, BINGOAI publisher metadata, local privacy boundaries, and audited dependency overrides.
+Version 1.2.0 adds design-tool canvas controls: drag-to-select, Space/middle-button pan, trackpad two-finger pan, pinch zoom, and title-bar-only container moves. Automatic arrange now preserves manual board/district membership and offers immediate Undo or Cmd/Ctrl+Z instead of destructively clearing layout state. It retains the independent session stopping-point view, collision-free incremental layout, BINGOAI publisher metadata, local privacy boundaries, and a minimal audited dependency tree without package overrides.
 
 ## Submission fields that require the publisher
 

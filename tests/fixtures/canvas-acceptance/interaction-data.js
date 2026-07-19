@@ -1,7 +1,7 @@
 /**
  * [INPUT]: 依赖真实 FlowCanvas/scene-store/UIHost 与 4518 synthetic 数据；自研墨迹直渲，无故障注入
- * [OUTPUT]: 无 fetch 全内存交互画布 + 原生墨迹十五链自动验收：冷渲/连发即时/快捷键/框选多选/
- *           批量移动/缩放/旋转/复制粘贴/Alt 拖/图片粘贴/橡皮撤销/删除撤销/后台冲刷；window.__CANVAS_ACCEPTANCE__ 输出报告
+ * [OUTPUT]: 无 fetch 全内存交互画布 + 原生墨迹全链自动验收：冷渲/连发即时/P-R-O-A-T-E 实画/文字双击与字号/
+ *           框选多选/批量移动缩放旋转/复制粘贴/Alt 拖/图片粘贴与 drop/文字图片变换/橡皮撤销/删除撤销/后台冲刷；报告挂 window
  * [POS]: 仅由 ?mode=interaction 动态加载；证伪"文档变更到像素可见=一次 React commit"的宪法
  * [PROTOCOL]: 变更时更新此头部，然后检查 main.jsx/README/web/CLAUDE.md
  */
@@ -127,6 +127,24 @@ function InteractionCanvas() {
     const key = (value, extra = {}) => window.dispatchEvent(new KeyboardEvent('keydown', {
       key: value, bubbles: true, cancelable: true, ...extra,
     }));
+    const doubleClick = point => {
+      const screen = probe().flowToScreen(point);
+      input().dispatchEvent(new MouseEvent('dblclick', {
+        bubbles: true, cancelable: true, button: 0, buttons: 0,
+        clientX: screen.x, clientY: screen.y,
+      }));
+    };
+    const setTextarea = (node, value) => {
+      const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+      setter.call(node, value);
+      node.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+    const imageFile = name => {
+      const bytes = Uint8Array.from(atob(
+        'iVBORw0KGgoAAAANSUhEUgAAAHgAAABQAQMAAADoVSPKAAAAIGNIUk0AAHomAACAhAAA+gAAAIDoAAB1MAAA6mAAADqYAAAXcJy6UTwAAAAGUExURRVe7//////9LDEAAAABYktHRAH/Ai3eAAAAB3RJTUUH6gcTBicj96gJgAAAACV0RVh0ZGF0ZTpjcmVhdGUAMjAyNi0wNy0xOVQwNjozOTozNSswMDowMHcryPYAAAAldEVYdGRhdGU6bW9kaWZ5ADIwMjYtMDctMTlUMDY6Mzk6MzUrMDA6MDAGdnBKAAAAKHRFWHRkYXRlOnRpbWVzdGFtcAAyMDI2LTA3LTE5VDA2OjM5OjM1KzAwOjAwUWNRlQAAABJJREFUOMtjYBgFo2AUjIKRCQAFAAABL8GJmgAAAABJRU5ErkJggg==',
+      ), char => char.charCodeAt(0));
+      return new File([bytes], name, { type: 'image/png' });
+    };
     try {
       // 1) 冷渲：文档元素直渲进 DOM，数量一致
       await waitFor(() => dom() === 2, 'cold render');
@@ -140,29 +158,85 @@ function InteractionCanvas() {
       await waitFor(() => shellRef.current?.querySelector('.ink-world [data-ink-element-id="fixture-landmark"] rect')?.getAttribute('x') === '1080', 'dom sync');
       checks.domSync = true;
 
-      // 3) Figma 肌肉记忆：P 武装画笔、V 切回选择，真实 keydown 驱动 production listener
+      // 3) Figma 肌肉记忆不是只看按钮亮起：P/R/O/A/T 都必须真实产出对应元素，V 切回选择
+      const shortcutStart = store.get().drawing.length;
       key('p');
       await waitFor(() => shellRef.current?.querySelector('.ink-input-layer'), 'input layer');
       const penTool = probe().snapshot().tool;
+      pointer('pointerdown', { x: 360, y: 360 });
+      pointer('pointermove', { x: 410, y: 390 });
+      pointer('pointerup', { x: 430, y: 410 });
+      key('r');
+      pointer('pointerdown', { x: 480, y: 360 });
+      pointer('pointermove', { x: 560, y: 420 });
+      pointer('pointerup', { x: 560, y: 420 });
+      key('o');
+      pointer('pointerdown', { x: 600, y: 360 });
+      pointer('pointermove', { x: 680, y: 420 });
+      pointer('pointerup', { x: 680, y: 420 });
+      key('a');
+      pointer('pointerdown', { x: 720, y: 360 });
+      pointer('pointermove', { x: 800, y: 420 });
+      pointer('pointerup', { x: 800, y: 420 });
+      key('t');
+      pointer('pointerdown', { x: 840, y: 360 });
+      pointer('pointerup', { x: 840, y: 360 });
+      const textEditor = await waitFor(() => shellRef.current?.querySelector('.ink-text-editor'), 'new text editor');
+      setTextarea(textEditor, '接力验收文字');
+      const createdText = await waitFor(
+        () => store.get().drawing.find(el => el.type === 'text' && el.text === '接力验收文字'),
+        'new text content',
+      );
+      textEditor.blur();
+      await waitFor(() => !shellRef.current?.querySelector('.ink-text-editor'), 'new text editor close');
       key('v');
       await waitFor(() => probe().snapshot().tool === 'select', 'select shortcut');
-      checks.toolShortcuts = penTool === 'freedraw';
+      const shortcutElements = store.get().drawing.slice(shortcutStart);
+      checks.toolShortcuts = penTool === 'freedraw'
+        && ['freedraw', 'rectangle', 'ellipse', 'arrow', 'text'].every(type => shortcutElements.some(el => el.type === type));
 
-      // 4) 空白拖框选中两元素：合成 pointer 只存在 4518，真实 4517 永不坐标自动化
+      // 4) 已有文字双击就地编辑，字号岛真实改成 28；随后单元素缩放/旋转都写回同一文档
+      doubleClick({ x: createdText.x + 4, y: createdText.y + 4 });
+      const reopenedText = await waitFor(() => shellRef.current?.querySelector('.ink-text-editor'), 'double click text editor');
+      setTextarea(reopenedText, '双击编辑已生效');
+      await waitFor(() => store.get().drawing.find(el => el.id === createdText.id)?.text === '双击编辑已生效', 'double click text update');
+      reopenedText.blur();
+      probe().setSelectedId(createdText.id);
+      await waitFor(() => probe().snapshot().selectedId === createdText.id, 'select edited text');
+      const size28 = await waitFor(() => shellRef.current?.querySelector('button[title="字号 28"]'), 'font size 28');
+      size28.click();
+      await waitFor(() => store.get().drawing.find(el => el.id === createdText.id)?.fontSize === 28, 'font size update');
+      const textBeforeResize = { ...store.get().drawing.find(el => el.id === createdText.id) };
+      const textBox = selectionBounds(store.get().drawing, [createdText.id]);
+      pointer('pointerdown', { x: textBox.maxX, y: textBox.maxY });
+      pointer('pointermove', { x: textBox.maxX + 56, y: textBox.maxY + 32 });
+      pointer('pointerup', { x: textBox.maxX + 56, y: textBox.maxY + 32 });
+      const textRotateBox = selectionBounds(store.get().drawing, [createdText.id]);
+      const textCx = (textRotateBox.minX + textRotateBox.maxX) / 2;
+      const textCy = (textRotateBox.minY + textRotateBox.maxY) / 2;
+      pointer('pointerdown', { x: textCx, y: textRotateBox.minY - 28 });
+      pointer('pointermove', { x: textRotateBox.maxX + 28, y: textCy });
+      pointer('pointerup', { x: textRotateBox.maxX + 28, y: textCy });
+      const transformedText = store.get().drawing.find(el => el.id === createdText.id);
+      checks.textEditSizeTransform = transformedText.text === '双击编辑已生效'
+        && transformedText.fontSize > textBeforeResize.fontSize
+        && Math.abs(transformedText.angle || 0) > 0.5;
+
+      // 5) 空白拖框选中两元素：合成 pointer 只存在 4518，真实 4517 永不坐标自动化
       pointer('pointerdown', { x: 1040, y: 140 });
       pointer('pointermove', { x: 1460, y: 310 });
       pointer('pointerup', { x: 1460, y: 310 });
       await waitFor(() => probe().snapshot().selectedIds.length === 2, 'marquee multi-select');
       checks.marqueeMultiSelect = !!shellRef.current?.querySelector('[data-ink-handle="se"]');
 
-      // 5) 多选批量移动：一次 pointer 流、一次 coalesce undo 步
+      // 6) 多选批量移动：一次 pointer 流、一次 coalesce undo 步
       pointer('pointerdown', { x: 1120, y: 200 });
       pointer('pointermove', { x: 1140, y: 220 });
       pointer('pointerup', { x: 1140, y: 220 });
       checks.groupMove = landmarkX() === 1100
         && store.get().drawing.find(el => el.id === 'fixture-witness')?.x === 1300;
 
-      // 6) 右下手柄批量缩放：文档同步变化，选择保持同一组
+      // 7) 右下手柄批量缩放：文档同步变化，选择保持同一组
       const beforeResize = selectionBounds(store.get().drawing, probe().snapshot().selectedIds);
       pointer('pointerdown', { x: beforeResize.maxX, y: beforeResize.maxY });
       pointer('pointermove', { x: beforeResize.maxX + 60, y: beforeResize.maxY + 40 });
@@ -170,7 +244,7 @@ function InteractionCanvas() {
       const afterResize = selectionBounds(store.get().drawing, probe().snapshot().selectedIds);
       checks.resize = afterResize.maxX - beforeResize.maxX > 59 && afterResize.maxY - beforeResize.maxY > 39;
 
-      // 7) 旋转手柄围绕共同中心旋转，两个元素角度同代推进
+      // 8) 旋转手柄围绕共同中心旋转，两个元素角度同代推进
       const rotateBox = selectionBounds(store.get().drawing, probe().snapshot().selectedIds);
       const cx = (rotateBox.minX + rotateBox.maxX) / 2;
       const cy = (rotateBox.minY + rotateBox.maxY) / 2;
@@ -180,7 +254,7 @@ function InteractionCanvas() {
       checks.rotate = store.get().drawing.filter(el => ['fixture-landmark', 'fixture-witness'].includes(el.id))
         .every(el => Math.abs(el.angle || 0) > 0.5);
 
-      // 8) ClipboardEvent 走 production copy/paste 监听：元素与选择数同步翻倍
+      // 9) ClipboardEvent 走 production copy/paste 监听：元素与选择数同步翻倍
       const transfer = new DataTransfer();
       input().dispatchEvent(new ClipboardEvent('copy', { bubbles: true, cancelable: true, clipboardData: transfer }));
       const beforePaste = store.get().drawing.length;
@@ -189,7 +263,7 @@ function InteractionCanvas() {
       const pastedIds = probe().snapshot().selectedIds;
       checks.copyPaste = store.get().drawing.length === beforePaste + 2 && pastedIds.length === 2;
 
-      // 9) Alt+拖只在首次真正移动时克隆，点击不制造幽灵副本
+      // 10) Alt+拖只在首次真正移动时克隆，点击不制造幽灵副本
       const pasted = store.get().drawing.find(el => el.id === pastedIds[0]);
       const pastedBounds = selectionBounds(store.get().drawing, [pasted.id]);
       const px = (pastedBounds.minX + pastedBounds.maxX) / 2;
@@ -202,10 +276,9 @@ function InteractionCanvas() {
       pointer('pointerup', { x: px + 24, y: py + 16 }, { altKey: true });
       checks.altDrag = store.get().drawing.length === beforeAlt + 1 && probe().snapshot().selectedIds.length === 1;
 
-      // 10) 图片粘贴：占位同步出现，内容寻址资产在后台补齐，不阻塞 ClipboardEvent
-      const png = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='), ch => ch.charCodeAt(0));
+      // 11) 图片 paste 与 drop 都走 production 监听；drop 后的图片再实际缩放、旋转
       const imageTransfer = new DataTransfer();
-      imageTransfer.items.add(new File([png], 'fixture.png', { type: 'image/png' }));
+      imageTransfer.items.add(imageFile('fixture-paste.svg'));
       const filesBefore = Object.keys(store.get().drawingFiles).length;
       input().dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: imageTransfer }));
       const placeholder = store.get().drawing.at(-1);
@@ -214,9 +287,48 @@ function InteractionCanvas() {
       const imported = store.get().drawing.find(el => el.id === placeholder.id);
       checks.imagePaste = placeholderImmediate
         && Object.keys(store.get().drawingFiles).length === filesBefore + 1
-        && imported.width === 1 && imported.height === 1;
+        && imported.width === 120 && imported.height === 80;
 
-      // 11) 橡皮：E 武装，按住划过同步删除；整笔 coalesce 成一步 undo
+      const dropTransfer = new DataTransfer();
+      dropTransfer.items.add(imageFile('fixture-drop.svg'));
+      const dropPoint = probe().flowToScreen({ x: 940, y: 500 });
+      const canvasRoot = shellRef.current.querySelector('.canvas-root');
+      const beforeDrop = store.get().drawing.length;
+      canvasRoot.dispatchEvent(new DragEvent('dragover', {
+        bubbles: true, cancelable: true, dataTransfer: dropTransfer,
+        clientX: dropPoint.x, clientY: dropPoint.y,
+      }));
+      canvasRoot.dispatchEvent(new DragEvent('drop', {
+        bubbles: true, cancelable: true, dataTransfer: dropTransfer,
+        clientX: dropPoint.x, clientY: dropPoint.y,
+      }));
+      const dropped = store.get().drawing.at(-1);
+      await waitFor(() => store.get().drawing.find(el => el.id === dropped.id)?.fileId, 'dropped image content address');
+      checks.imageDrop = store.get().drawing.length === beforeDrop + 1 && dropped.type === 'image';
+      probe().setSelectedId(dropped.id);
+      await waitFor(() => probe().snapshot().selectedId === dropped.id, 'select dropped image');
+      const imageBox = selectionBounds(store.get().drawing, [dropped.id]);
+      pointer('pointerdown', { x: imageBox.maxX, y: imageBox.maxY });
+      pointer('pointermove', { x: imageBox.maxX + 72, y: imageBox.maxY + 48 });
+      pointer('pointerup', { x: imageBox.maxX + 72, y: imageBox.maxY + 48 });
+      const imageRotateBox = selectionBounds(store.get().drawing, [dropped.id]);
+      const imageCx = (imageRotateBox.minX + imageRotateBox.maxX) / 2;
+      const imageCy = (imageRotateBox.minY + imageRotateBox.maxY) / 2;
+      pointer('pointerdown', { x: imageCx, y: imageRotateBox.minY - 28 });
+      pointer('pointermove', { x: imageRotateBox.maxX + 28, y: imageCy });
+      pointer('pointerup', { x: imageRotateBox.maxX + 28, y: imageCy });
+      const transformedImage = store.get().drawing.find(el => el.id === dropped.id);
+      details.imageTransform = {
+        before: imageBox,
+        afterResize: imageRotateBox,
+        width: transformedImage.width,
+        height: transformedImage.height,
+        angle: transformedImage.angle || 0,
+      };
+      checks.imageTransform = transformedImage.width > 190 && transformedImage.height > 125
+        && Math.abs(transformedImage.angle || 0) > 0.5;
+
+      // 12) 橡皮：E 武装，按住划过同步删除；整笔 coalesce 成一步 undo
       const eraseTarget = imported;
       const eraseX = eraseTarget.x + eraseTarget.width / 2;
       const eraseY = eraseTarget.y + eraseTarget.height / 2;
@@ -232,7 +344,7 @@ function InteractionCanvas() {
       probe().setSelectedId(eraseTarget.id);
       await waitFor(() => probe().snapshot().selectedIds[0] === eraseTarget.id, 'delete target selection');
 
-      // 12) Delete + 全画布 undo：生产快捷键删除，store 历史原样复活
+      // 13) Delete + 全画布 undo：生产快捷键删除，store 历史原样复活
       await waitFor(() => dom() === store.get().drawing.length, 'alt clone dom commit');
       const beforeDelete = dom();
       details.delete = {
@@ -253,12 +365,12 @@ function InteractionCanvas() {
       await waitFor(() => dom() === beforeDelete, 'undo revives');
       checks.deleteUndo = true;
 
-      // 13) 后台冲刷：防抖后 persist 收到最终文档，以上输入没有一步等待它
+      // 14) 后台冲刷：防抖后 persist 收到最终文档，以上输入没有一步等待它
       await waitFor(() => flushedRef.current.length > 0, 'background flush', 5000);
       checks.backgroundFlush = flushedRef.current.at(-1).canvas.drawing.some(el => el.id === 'fixture-landmark');
       details.flushCount = flushedRef.current.length;
 
-      // 14) 浏览器原生诊断由 main.jsx 统一收集；套件内也必须保持零错误/零警告
+      // 15) 浏览器原生诊断由 main.jsx 统一收集；套件内也必须保持零错误/零警告
       checks.consoleClean = window.__CANVAS_CONSOLE_ERRORS__.length === 0
         && window.__CANVAS_CONSOLE_WARNINGS__.length === 0
         && window.__CANVAS_PAGE_ERRORS__.length === 0;

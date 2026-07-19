@@ -108,6 +108,9 @@ test('300/800 直渲性能红线写死进 4518 合同', () => {
   const fixture = fs.readFileSync(path.resolve('tests/fixtures/canvas-acceptance/main.jsx'), 'utf8');
   assert.match(fixture, /MOUNT_BUDGET_MS\s*=.*300:\s*900.*800:\s*1600/s);
   assert.match(fixture, /mountMs\s*<=\s*budgetMs/);
+  assert.match(fixture, /ACCEPTANCE_SAMPLES/);
+  assert.match(fixture, /warmP95Ms\s*<=\s*redline\.warmP95/);
+  assert.match(fixture, /warmMaxMs\s*<=\s*redline\.warmMax/);
 });
 
 test('352 节点性能场景使用 production buildGraph，并要求真实 pointer + CDP trace', () => {
@@ -121,16 +124,17 @@ test('352 节点性能场景使用 production buildGraph，并要求真实 point
     new Set([FLOW_PERFORMANCE_WORKSPACE]),
     false,
   );
-  assert.equal(built.nodes.length, FLOW_PERFORMANCE_NODE_COUNT);
+  assert.equal(built.nodes.length, FLOW_PERFORMANCE_NODE_COUNT - 1);   // production 页再加 1 张真实 NoteNode = 352
   assert.deepEqual(
     built.nodes.reduce((counts, node) => ({ ...counts, [node.type]: (counts[node.type] || 0) + 1 }), {}),
-    { district: 1, workspace: 1, session: 350 },
+    { district: 1, workspace: 1, session: 349 },
   );
   const page = fs.readFileSync(path.resolve('tests/fixtures/canvas-acceptance/performance-352-data.js'), 'utf8');
   const verifier = fs.readFileSync(path.resolve('tests/fixtures/canvas-acceptance/verify.py'), 'utf8');
   assert.match(page, /FlowCanvas/);
   assert.match(page, /PerformanceObserver/);
   assert.match(verifier, /page\.mouse\.down\(\)/);
+  assert.match(verifier, /district container[\s\S]*workspace[\s\S]*note/);
   assert.match(verifier, /Tracing\.start/);
   assert.match(verifier, /frameP95MaxMs.*20/);
 });

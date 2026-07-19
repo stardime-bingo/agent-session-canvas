@@ -1,7 +1,7 @@
 /**
  * [INPUT]: 依赖 react、api 的会话详情/动作接口、util 的展示函数、ui 的 Icon/toast/InlineEdit、menus 的 deleteSessionFlow、HandoffLaunchChoices 的双工具接班入口
  * [OUTPUT]: 对外提供 DetailPanel 组件：首屏=标题+一键续开+聊了什么+最后停在哪里（尾部独立摘录），
- *           次级=接力/运行实例/元信息，删除收底；错误态可重试
+ *           次级=接力/运行实例/元信息，删除收底；错误态自动退避重连
  * [POS]: panels 的右侧行动面板——画布是地图，这里是扳机。信息层次铁律：内容先于按钮，按钮先于元数据
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -92,13 +92,18 @@ export default function DetailPanel({ width = 400, sessionKey, onClose, onCollap
   useEffect(() => {
     // alive 守卫：快速切换会话时，慢返的旧请求不许覆盖新会话详情
     let alive = true;
+    let retryTimer = null;
     setDetail(null); setErr(null);
     if (sessionKey) {
       api.session(sessionKey)
         .then(d => alive && setDetail(d))
-        .catch(e => alive && setErr(e.message));
+        .catch(e => {
+          if (!alive) return;
+          setErr(e.message);
+          retryTimer = setTimeout(() => { if (alive) setRetryN(n => n + 1); }, Math.min(1000 * 2 ** retryN, 15000));
+        });
     }
-    return () => { alive = false; };
+    return () => { alive = false; clearTimeout(retryTimer); };
   }, [sessionKey, retryN]);
 
   if (!sessionKey) return null;
@@ -129,14 +134,11 @@ export default function DetailPanel({ width = 400, sessionKey, onClose, onCollap
       <style>{`@keyframes slideIn { from { transform: translateX(30px); opacity: 0; } }`}</style>
 
       {err ? (
-        /* ===== 错误态：说清原因，给条重试的路 ===== */
+        /* ===== 错误态：说清原因，后台自动退避重连，不把恢复责任交给用户 ===== */
         <div style={{ padding: 24 }}>
           <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--danger)' }}>详情加载失败</div>
-          <div className="mono" style={{ fontSize: 11.5, color: 'var(--ink-dim)', margin: '8px 0 14px', lineHeight: 1.6 }}>{err}</div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button className="btn primary" onClick={() => setRetryN(n => n + 1)}><Icon name="refresh" /> 重试</button>
-            <button className="btn" onClick={onClose}>关闭</button>
-          </div>
+          <div className="mono" style={{ fontSize: 11.5, color: 'var(--ink-dim)', margin: '8px 0 14px', lineHeight: 1.6 }}>{err} · 正在自动重连…</div>
+          <button className="btn" onClick={onClose}>关闭</button>
         </div>
       ) : !s ? (
         <div className="mono" style={{ padding: 24, color: 'var(--ink-faint)', fontSize: 12 }}>加载中…</div>

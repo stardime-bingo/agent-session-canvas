@@ -1,10 +1,10 @@
 /**
  * [INPUT]: 4518 query(mode=performance|interaction|performance-352|hero|handoff-choice, size=300|800) 与真实画布组件
- * [OUTPUT]: performance=InkLayer 直渲 N 元素的挂载耗时与 DOM 完整性报告；
+ * [OUTPUT]: performance=InkLayer 直渲 N 元素的挂载、20 次更新帧与 DOM 完整性报告；
  *           interaction=动态加载真实 FlowCanvas 全内存验收页；performance-352=真实 FlowCanvas 拖动取证页；
  *           hero=production FlowCanvas 匿名产品截图页；handoff-choice=production 接力工具双入口；
  *           共享 console/page error 原始 transcript
- * [POS]: 4518 验收夹具入口。自研墨迹后没有导出管线可测——渲染完整性与挂载耗时就是全部性能合同
+ * [POS]: 4518 验收夹具入口。自研墨迹后没有导出管线可测——渲染完整性、挂载与更新帧就是性能合同
  * [PROTOCOL]: 变更时更新此头部，然后检查 interaction-data/README/web/CLAUDE.md
  */
 import React, { useEffect, useRef, useState } from 'react';
@@ -13,7 +13,13 @@ import { ReactFlow, ReactFlowProvider } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
 import '../../../web/src/theme.css';
 import InkLayer from '../../../web/src/canvas/InkLayer.jsx';
-import { createCanvasAcceptanceElements } from './fixture-data.js';
+import {
+  ACCEPTANCE_REDLINES,
+  ACCEPTANCE_SAMPLES,
+  createCanvasAcceptanceElements,
+  mutateBelowPlane,
+  mutateEarlyUniqueText,
+} from './fixture-data.js';
 
 const params = new URLSearchParams(location.search);
 const MODE = ['interaction', 'performance-352', 'hero', 'handoff-choice'].includes(params.get('mode'))
@@ -46,30 +52,85 @@ window.addEventListener('unhandledrejection', event => PAGE_ERRORS.push(String(e
 const probe = { status: 'booting', report: null, run: null };
 window.__CANVAS_ACCEPTANCE__ = probe;
 
+const nextFrame = () => new Promise(resolve => requestAnimationFrame(resolve));
+const percentile = (values, fraction) => {
+  const ordered = [...values].sort((a, b) => a - b);
+  return ordered[Math.min(ordered.length - 1, Math.max(0, Math.ceil(ordered.length * fraction) - 1))] || 0;
+};
+
 function PerformanceCanvas() {
   const [report, setReport] = useState({ size: SIZE, phase: 'mounting' });
   const startedRef = useRef(performance.now());
-  const elements = useRef(createCanvasAcceptanceElements(SIZE)).current;
+  const [elements, setElements] = useState(() => createCanvasAcceptanceElements(SIZE));
 
   useEffect(() => {
-    // 直渲即完整：DOM 元素数与文档一致就是通过——没有导出、没有帧、没有等待
-    const t = setTimeout(() => {
+    let alive = true;
+    const longTasks = [];
+    let observer = null;
+    try {
+      observer = new PerformanceObserver(list => {
+        for (const entry of list.getEntries()) longTasks.push(entry.duration);
+      });
+      observer.observe({ type: 'longtask', buffered: true });
+    } catch { /* verifier 会把不支持明确记入报告。 */ }
+
+    const run = async () => {
+      await nextFrame();
+      await nextFrame();
+      if (!alive) return;
       const domCount = document.querySelectorAll('[data-ink-element-id]').length;
       const expected = elements.filter(el => !el.isDeleted).length;
       const mountMs = Math.round(performance.now() - startedRef.current);
       const budgetMs = MOUNT_BUDGET_MS[SIZE];
-      const pass = domCount === expected && mountMs <= budgetMs
+      const updateFrames = [];
+      let current = elements;
+      for (let tick = 1; tick <= ACCEPTANCE_SAMPLES; tick++) {
+        const started = performance.now();
+        current = mutateBelowPlane(current, tick);
+        if (tick === ACCEPTANCE_SAMPLES) current = mutateEarlyUniqueText(current);
+        setElements(current);
+        await nextFrame();
+        updateFrames.push(performance.now() - started);
+      }
+      await nextFrame();
+      for (const entry of observer?.takeRecords() || []) longTasks.push(entry.duration);
+      const finalDomCount = document.querySelectorAll('[data-ink-element-id]').length;
+      const earlyText = [...document.querySelectorAll('[data-ink-element-id] text')]
+        .some(node => node.textContent === 'Early unique Z');
+      const redline = ACCEPTANCE_REDLINES[SIZE];
+      const warmP95Ms = percentile(updateFrames, 0.95);
+      const warmMaxMs = Math.max(...updateFrames, 0);
+      const maxLongTaskMs = Math.max(...longTasks, 0);
+      const pass = domCount === expected && finalDomCount === expected && earlyText
+        && mountMs <= budgetMs
+        && warmP95Ms <= redline.warmP95 && warmMaxMs <= redline.warmMax
+        && maxLongTaskMs <= redline.longTaskMax
         && CONSOLE_ERRORS.length === 0 && CONSOLE_WARNINGS.length === 0 && PAGE_ERRORS.length === 0;
-      const final = { size: SIZE, domCount, expected, mountMs, budgetMs, pass };
+      const final = {
+        size: SIZE,
+        domCount: finalDomCount,
+        expected,
+        mountMs,
+        budgetMs,
+        samples: updateFrames.length,
+        warmP95Ms: Number(warmP95Ms.toFixed(3)),
+        warmMaxMs: Number(warmMaxMs.toFixed(3)),
+        maxLongTaskMs: Number(maxLongTaskMs.toFixed(3)),
+        longTaskSupported: Boolean(observer),
+        earlyTextUpdated: earlyText,
+        redline,
+        pass,
+      };
       probe.status = pass ? 'complete' : 'fail';
       probe.report = final;
       document.documentElement.dataset.acceptanceStatus = pass ? 'pass' : 'fail';
       document.documentElement.dataset.acceptanceReport = JSON.stringify(final);
       setReport(final);
       window.dispatchEvent(new CustomEvent('canvas-acceptance-complete', { detail: final }));
-    }, 200);
-    return () => clearTimeout(t);
-  }, [elements]);
+    };
+    void run();
+    return () => { alive = false; observer?.disconnect(); };
+  }, []); // 首次挂载后独立跑完 20 次；测试自身 setElements 不得重启套件
 
   return (
     <div style={{ position: 'fixed', inset: 0 }}>

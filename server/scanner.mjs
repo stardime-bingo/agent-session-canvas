@@ -95,12 +95,12 @@ function familyEdges(wsList) {
 //  接力血缘：launch 时记录的 lineage（谁的接力开了新会话），
 //  匹配同 cwd 且 15 分钟内诞生的会话 → 会话级绿色边
 // ============================================================
-function handoffEdges(lineage, sessions) {
+export function handoffEdges(lineage, sessions) {
   const edges = new Map();   // 以 id 去重：同 source 多次点击不产重复边
   for (const rec of lineage || []) {
-    const srcTool = rec.sourceKey.split(':')[0];
+    const targetTool = rec.tool || rec.sourceKey.split(':')[0];   // 旧记录没有 tool 时保持同工具接力语义
     const child = sessions
-      .filter(s => s.cwd === rec.cwd && s.key !== rec.sourceKey && s.tool === srcTool &&
+      .filter(s => s.cwd === rec.cwd && s.key !== rec.sourceKey && s.tool === targetTool &&
         s.createdAt > rec.ts && new Date(s.createdAt) - new Date(rec.ts) < 15 * 60000)
       .sort((a, b) => a.createdAt.localeCompare(b.createdAt))[0];
     if (child) {

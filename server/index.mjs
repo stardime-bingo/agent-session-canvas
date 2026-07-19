@@ -117,7 +117,7 @@ const routes = {
   'GET /api/graph': async () => {
     const snapshot = scene.read();
     return {
-      ...graph, layout: snapshot.layout, rev: snapshot.rev,
+      ...graph, layout: snapshot.layout, rev: snapshot.rev, sceneUpdatedAt: snapshot.updatedAt,
       canvas: { ...snapshot.canvas, drawingFiles: snapshot.drawingFiles },
     };
   },
@@ -219,7 +219,12 @@ const routes = {
     // 接力开新会话时记下血缘：扫描器会把 15 分钟内诞生的孩子连上绿边
     if (body.sourceKey && body.mode === 'prompt') {
       updateEnrich(enrich => {
-        enrich.lineage = [...(enrich.lineage || []), { sourceKey: body.sourceKey, cwd: body.cwd, ts: new Date().toISOString() }].slice(-300);
+        enrich.lineage = [...(enrich.lineage || []), {
+          sourceKey: body.sourceKey,
+          tool: body.tool,
+          cwd: body.cwd,
+          ts: new Date().toISOString(),
+        }].slice(-300);
       });
     }
     return launch(body);

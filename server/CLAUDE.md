@@ -12,10 +12,10 @@ index.mjs: HTTP 总入口(:4517 仅本机，AGENT_CANVAS_PORT 仅供并行测试
   claude=会话文件尾追加 custom-title 行【10 分钟活跃门禁,热文件不动本体】，codex=session_index.jsonl 追加 last-wins 行)。
   安全律: delete 有 10 分钟活跃门禁+force 破门+如实报成败；SSE 30s 心跳清死连接；process 级 uncaught 兜底；
   缓存脏检查(store.saveCache 零变化不落盘)；手动改名写回 Codex 索引后读尾校验——解析器变更仍必须递增 CACHE_VERSION
-scanner.mjs: 扫描编排核心，三层噪音过滤(自噪/子智能体/空壳) + automation 同任务多次运行折叠成聚合卡(runs/runFiles) + 三种关联边：worktree(路径)、family(名字亲缘+泛化名/当前系统用户名动态停用+族上限8)、handoff(launch 血缘 15 分钟窗口)
+scanner.mjs: 扫描编排核心，三层噪音过滤(自噪/子智能体/空壳) + automation 同任务多次运行折叠成聚合卡(runs/runFiles) + 三种关联边：worktree(路径)、family(名字亲缘+泛化名/当前系统用户名动态停用+族上限8)、handoff(launch 血缘按目标 tool 匹配 15 分钟窗口，旧记录兼容同工具)
 store.mjs: 持久层，DATA_DIR(可由 AGENT_CANVAS_DATA_DIR 覆盖供隔离测试) + 原子 JSON 读写；扫描缓存进程内常驻，AI 增强(enrich.json)
   以跨进程文件锁包住“读最新值→改→原子写”，避免 daemon 与 backfill CLI 旧快照互相覆盖；JSONL 追加后读尾校验
-scene.mjs: 场景快照仓（LWW）——read/write/addFiles；全量快照 + tmp/rename 原子写 + 内存 rev；
+scene.mjs: 场景快照仓（LWW）——read/write/addFiles；全量快照 + tmp/rename 原子写 + 内存 rev，canvas mtime 作为跨重启更新时间；
   同 writer 的 clientSeq 单调门防 pagehide 新快照被旧在飞请求倒灌；资产先行引用后到、同 ID 不可变、孤儿随场景写裁剪；轻校验挡结构性垃圾；磁盘格式与旧版全兼容零迁移
 drawing-files.mjs: 旧格式图片资产兼容层——规范化、引用收集纯函数与独立原子落盘原语
 launcher.mjs: 终端拉起，COMMANDS 查表构造命令，prompt 走临时文件注入避开引号地狱，Ghostty 优先 Terminal.app 兜底

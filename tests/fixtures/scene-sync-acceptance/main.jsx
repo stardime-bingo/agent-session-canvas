@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 临时 scene daemon 的真实 /api/graph、/api/scene、/api/events；production SceneStore/api/TopBar
- * [OUTPUT]: 双标签 LWW、离线重试、pagehide keepalive 的匿名浏览器验收页与只读探针
+ * [OUTPUT]: 双标签 LWW、离线重试、pagehide keepalive + >64KB 本地恢复的匿名浏览器验收页与只读探针
  * [POS]: 仅在临时端口运行；不挂载真实 graph、不读取仓内 data、不提供产品第二实现
  * [PROTOCOL]: 变更时更新此头部，然后检查 README/verify.py/web/CLAUDE.md
  */
@@ -9,6 +9,14 @@ import { createRoot } from 'react-dom/client';
 import '../../../web/src/theme.css';
 import { api, subscribeEvents, WRITER_ID } from '../../../web/src/api.js';
 import { createSceneStore } from '../../../web/src/scene-store.js';
+import {
+  clearRecoveryFiles,
+  clearSceneRecovery,
+  loadRecoveryFiles,
+  readLatestSceneRecovery,
+  saveSceneRecovery,
+  sceneRecoveryKey,
+} from '../../../web/src/scene-recovery.js';
 import TopBar from '../../../web/src/panels/TopBar.jsx';
 
 const h = React.createElement;
@@ -61,7 +69,10 @@ function AcceptanceBody({ store }) {
   }, setLive), [store]);
 
   useEffect(() => {
-    const onHide = () => { store.flushNow(); };
+    const onHide = () => {
+      saveSceneRecovery(store.get(), WRITER_ID);
+      store.flushNow();
+    };
     window.addEventListener('pagehide', onHide);
     return () => window.removeEventListener('pagehide', onHide);
   }, [store]);
@@ -78,6 +89,7 @@ function AcceptanceBody({ store }) {
       sync: store.status().status,
       syncError: store.status().error?.message || null,
       live,
+      recovery: window.__SYNC_RECOVERY__ || { applied: false },
       adoptions: [...adoptionsRef.current],
     }),
   };
@@ -120,15 +132,45 @@ function AcceptanceBody({ store }) {
 function App() {
   const [store, setStore] = useState(null);
   const [error, setError] = useState(null);
+  const recoveredKeyRef = useRef(null);
   useEffect(() => {
     let alive = true;
-    api.graph().then(graph => {
+    void (async () => {
+      const graph = await api.graph();
+      const serverDoc = toDoc(graph);
+      const recovery = readLatestSceneRecovery(graph.sceneUpdatedAt || 0);
+      const recoveryFiles = recovery ? await loadRecoveryFiles() : {};
+      window.__SYNC_RECOVERY__ = {
+        applied: Boolean(recovery),
+        clientSeq: recovery?.clientSeq || null,
+        savedAt: recovery?.savedAt || null,
+      };
       if (!alive) return;
-      setStore(createSceneStore(toDoc(graph), {
-        persistScene: (scene, options) => api.putScene(scene, options),
-        persistFiles: (files, options) => api.putDrawingFiles(files, options),
-      }));
-    }).catch(reason => setError(reason.message));
+      const nextStore = createSceneStore(serverDoc, {
+        persistScene: async (scene, options) => {
+          const receipt = await api.putScene(scene, options);
+          clearSceneRecovery(sceneRecoveryKey(WRITER_ID));
+          if (recoveredKeyRef.current) {
+            clearSceneRecovery(recoveredKeyRef.current);
+            recoveredKeyRef.current = null;
+          }
+          return receipt;
+        },
+        persistFiles: async (files, options) => {
+          const receipt = await api.putDrawingFiles(files, options);
+          void clearRecoveryFiles(Object.keys(files));
+          return receipt;
+        },
+      });
+      if (recovery) {
+        recoveredKeyRef.current = recovery.key;
+        nextStore.mutate(() => ({
+          ...recovery.scene,
+          drawingFiles: { ...serverDoc.drawingFiles, ...recoveryFiles },
+        }), { history: false });
+      }
+      setStore(nextStore);
+    })().catch(reason => setError(reason.message));
     return () => { alive = false; };
   }, []);
   if (error) return h('pre', null, `sync fixture failed: ${error}`);

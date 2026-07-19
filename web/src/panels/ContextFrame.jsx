@@ -51,6 +51,7 @@ export default function ContextFrame({ frame, onClose, onOpenDetail }) {
 
   useEffect(() => {
     let alive = true;
+    let retryTimer = null;
     setMeta(null); setPages([]); setErr(null); setPartial(false);
     setAtStart(false); setNextBefore(null); setNearBottom(true);
     api.contextPage(frame.key)
@@ -64,8 +65,12 @@ export default function ContextFrame({ frame, onClose, onOpenDetail }) {
         setPartial(true); setMeta(s);
         setPages([{ text: s.digest || '', off: 0 }]); setAtStart(true);
       }))
-      .catch(e => alive && setErr(e.message));
-    return () => { alive = false; };
+      .catch(e => {
+        if (!alive) return;
+        setErr(e.message);
+        retryTimer = setTimeout(() => { if (alive) setRetryN(n => n + 1); }, Math.min(1000 * 2 ** retryN, 15000));
+      });
+    return () => { alive = false; clearTimeout(retryTimer); };
   }, [frame.key, retryN]);
 
   const loadOlder = async () => {
@@ -174,9 +179,7 @@ export default function ContextFrame({ frame, onClose, onOpenDetail }) {
       {/* ===== 终端体：打开停在最新，上滑向历史生长；视口外行由浏览器原生虚拟化 ===== */}
       <div className="term-body nowheel" ref={bodyRef} onScroll={onScroll} tabIndex={0}>
         {err ? (
-          <div className="tl error">✗ 上下文加载失败：{err}
-            <button className="btn ghost" style={{ marginLeft: 10, fontSize: 11 }} onClick={() => setRetryN(n => n + 1)}>重试</button>
-          </div>
+          <div className="tl error">✗ 上下文暂未连上：{err} · 正在自动重连…</div>
         ) : !pages.length ? (
           <div className="tl tool">▸ 正在连接会话现场…</div>
         ) : (

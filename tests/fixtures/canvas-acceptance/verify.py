@@ -20,6 +20,10 @@ CHROME = os.environ.get(
 TERMINAL = ("complete", "fail", "error")
 FORBIDDEN_RESOURCE_ROOTS = ("/api", "/data", "/@fs", "/.git")
 MOUNT_BUDGET_MS = {300: 900, 800: 1600}
+UPDATE_BUDGET_MS = {
+    300: {"samples": 20, "warmP95": 50, "warmMax": 100, "longTaskMax": 50},
+    800: {"samples": 20, "warmP95": 100, "warmMax": 125, "longTaskMax": 100},
+}
 PERFORMANCE_352 = {
     "nodeCount": 352,
     "minFrameSamples": 90,
@@ -283,6 +287,13 @@ def verify_size(browser, size):
     assert detail["domCount"] == size, detail
     assert detail["budgetMs"] == MOUNT_BUDGET_MS[size], detail
     assert detail["mountMs"] <= detail["budgetMs"], detail
+    update_budget = UPDATE_BUDGET_MS[size]
+    assert detail["samples"] == update_budget["samples"], detail
+    assert detail["warmP95Ms"] <= update_budget["warmP95"], detail
+    assert detail["warmMaxMs"] <= update_budget["warmMax"], detail
+    assert detail["maxLongTaskMs"] <= update_budget["longTaskMax"], detail
+    assert detail["longTaskSupported"] is True, detail
+    assert detail["earlyTextUpdated"] is True, detail
     assert_clean(diagnostics)
     context.close()
     return {
@@ -291,6 +302,10 @@ def verify_size(browser, size):
         "domCount": detail["domCount"],
         "mountMs": detail["mountMs"],
         "budgetMs": detail["budgetMs"],
+        "samples": detail["samples"],
+        "warmP95Ms": detail["warmP95Ms"],
+        "warmMaxMs": detail["warmMaxMs"],
+        "maxLongTaskMs": detail["maxLongTaskMs"],
         "consoleErrors": 0,
         "consoleWarnings": 0,
         "pageErrors": 0,
@@ -312,18 +327,31 @@ def verify_performance_352(browser, artifacts_dir):
         assert report["status"] == "complete", json.dumps(report, ensure_ascii=False)
         detail = report["report"]
         assert detail["nodeCount"] == PERFORMANCE_352["nodeCount"], detail
-        assert detail["targetCount"] == 1, detail
+        assert detail["targets"] == {"district": 1, "workspace": 1, "note": 1}, detail
 
-        target = page.locator(".react-flow__node-district .container-drag-handle")
-        assert target.count() == 1, "performance drag target must be unique"
-        target_box = target.bounding_box()
-        district = page.locator(".react-flow__node-district")
-        before = district.bounding_box()
-        assert target_box and before, "performance drag geometry unavailable"
-        start_x = target_box["x"] + min(180, target_box["width"] * 0.65)
-        start_y = target_box["y"] + target_box["height"] / 2
-        drag_x, drag_y = 180, 100
-        page.mouse.move(start_x, start_y)
+        target_specs = [
+            {
+                "name": "district container",
+                "node": ".react-flow__node-district",
+                "handle": ".react-flow__node-district .container-drag-handle",
+                "xFraction": 0.65,
+                "yFraction": 0.5,
+            },
+            {
+                "name": "workspace",
+                "node": ".react-flow__node-workspace",
+                "handle": ".react-flow__node-workspace",
+                "xFraction": 0.5,
+                "yPx": 20,
+            },
+            {
+                "name": "note",
+                "node": ".react-flow__node-note",
+                "handle": ".react-flow__node-note",
+                "xFraction": 0.65,
+                "yFraction": 0.18,
+            },
+        ]
 
         cdp = context.new_cdp_session(page)
         cdp.send("Tracing.start", {
@@ -337,34 +365,83 @@ def verify_performance_352(browser, artifacts_dir):
             "transferMode": "ReturnAsStream",
         })
         trace_started = True
-        page.evaluate("selector => window.__FLOW_PERF_352__.start(selector)", ".react-flow__node-district")
-        page.mouse.down()
-        for step in range(1, 121):
-            page.mouse.move(
-                start_x + drag_x * step / 120,
-                start_y + drag_y * step / 120,
-            )
-            page.wait_for_timeout(16)
-        page.mouse.up()
-        page.wait_for_timeout(80)
-        perf = page.evaluate("() => window.__FLOW_PERF_352__.stop()")
-        after = district.bounding_box()
-        assert after, "performance drag final geometry unavailable"
+        target_metrics = []
+        thresholds = PERFORMANCE_352
+        for spec in target_specs:
+            handle = page.locator(spec["handle"])
+            node = page.locator(spec["node"])
+            assert handle.count() == 1 and node.count() == 1, f"{spec['name']} drag target must be unique"
+            target_box = handle.bounding_box()
+            before = node.bounding_box()
+            assert target_box and before, f"{spec['name']} drag geometry unavailable"
+            start_x = target_box["x"] + target_box["width"] * spec["xFraction"]
+            start_y = target_box["y"] + spec.get("yPx", target_box["height"] * spec.get("yFraction", 0.5))
+            drag_x, drag_y = 180, 100
+            page.mouse.move(start_x, start_y)
+            page.evaluate("selector => window.__FLOW_PERF_352__.start(selector)", spec["node"])
+            page.mouse.down()
+            for step in range(1, 121):
+                page.mouse.move(
+                    start_x + drag_x * step / 120,
+                    start_y + drag_y * step / 120,
+                )
+                page.wait_for_timeout(16)
+            page.mouse.up()
+            page.wait_for_timeout(80)
+            perf = page.evaluate("() => window.__FLOW_PERF_352__.stop()")
+            after = node.bounding_box()
+            assert after, f"{spec['name']} performance drag final geometry unavailable"
+
+            frame_intervals = perf["frameIntervals"]
+            frame_p95 = percentile(frame_intervals, 0.95)
+            frame_max = max(frame_intervals, default=0)
+            slow_frames = [value for value in frame_intervals if value > thresholds["frameP95MaxMs"]]
+            slow_ratio = len(slow_frames) / len(frame_intervals) if frame_intervals else 1
+            effective_fps = 1000 / (sum(frame_intervals) / len(frame_intervals)) if frame_intervals else 0
+            distinct_positions = len({
+                (round(position["x"], 1), round(position["y"], 1))
+                for position in perf["positions"]
+            })
+            displacement = math.hypot(after["x"] - before["x"], after["y"] - before["y"])
+            page_long_tasks = [duration for duration in perf["longTasks"] if duration >= 50]
+            checks = {
+                "frameSamples": len(frame_intervals) >= thresholds["minFrameSamples"],
+                "pointerMoves": perf["pointerMoves"] >= thresholds["minPointerMoves"],
+                "distinctPositions": distinct_positions >= thresholds["minDistinctPositions"],
+                "displacement": displacement >= thresholds["minDisplacementPx"],
+                "frameP95": frame_p95 <= thresholds["frameP95MaxMs"],
+                "frameMax": frame_max <= thresholds["frameMaxMs"],
+                "slowFrameRatio": slow_ratio <= thresholds["slowFrameRatioMax"],
+                "longTaskSupport": perf["longTaskSupported"] is True,
+                "pageLongTasks": len(page_long_tasks) <= thresholds["longTaskMaxCount"],
+            }
+            assert all(checks.values()), json.dumps({
+                "target": spec["name"],
+                "checks": checks,
+                "frameP95Ms": frame_p95,
+                "frameMaxMs": frame_max,
+                "slowFrameRatio": slow_ratio,
+                "pageLongTasks": page_long_tasks,
+            }, ensure_ascii=False)
+            target_metrics.append({
+                "target": spec["name"],
+                "durationMs": round(perf["durationMs"], 2),
+                "frameSamples": len(frame_intervals),
+                "effectiveFps": round(effective_fps, 2),
+                "frameP95Ms": round(frame_p95, 3),
+                "frameMaxMs": round(frame_max, 3),
+                "slowFrameCount": len(slow_frames),
+                "slowFrameRatio": round(slow_ratio, 5),
+                "pointerMoves": perf["pointerMoves"],
+                "distinctPositions": distinct_positions,
+                "displacementPx": round(displacement, 2),
+                "pageLongTaskCount": len(page_long_tasks),
+                "pageMaxLongTaskMs": round(max(page_long_tasks, default=0), 3),
+                "checks": checks,
+            })
+
         trace_bytes = finish_cdp_trace(cdp, page)
         trace_started = False
-
-        frame_intervals = perf["frameIntervals"]
-        frame_p95 = percentile(frame_intervals, 0.95)
-        frame_max = max(frame_intervals, default=0)
-        slow_frames = [value for value in frame_intervals if value > PERFORMANCE_352["frameP95MaxMs"]]
-        slow_ratio = len(slow_frames) / len(frame_intervals) if frame_intervals else 1
-        effective_fps = 1000 / (sum(frame_intervals) / len(frame_intervals)) if frame_intervals else 0
-        distinct_positions = len({
-            (round(position["x"], 1), round(position["y"], 1))
-            for position in perf["positions"]
-        })
-        displacement = math.hypot(after["x"] - before["x"], after["y"] - before["y"])
-        page_long_tasks = [duration for duration in perf["longTasks"] if duration >= 50]
 
         trace = json.loads(trace_bytes)
         trace_events = trace.get("traceEvents", [])
@@ -376,28 +453,12 @@ def verify_performance_352(browser, artifacts_dir):
             and event.get("dur", 0) >= 50_000
         ]
 
-        thresholds = PERFORMANCE_352
         checks = {
             "nodeCount": detail["nodeCount"] == thresholds["nodeCount"],
-            "frameSamples": len(frame_intervals) >= thresholds["minFrameSamples"],
-            "pointerMoves": perf["pointerMoves"] >= thresholds["minPointerMoves"],
-            "distinctPositions": distinct_positions >= thresholds["minDistinctPositions"],
-            "displacement": displacement >= thresholds["minDisplacementPx"],
-            "frameP95": frame_p95 <= thresholds["frameP95MaxMs"],
-            "frameMax": frame_max <= thresholds["frameMaxMs"],
-            "slowFrameRatio": slow_ratio <= thresholds["slowFrameRatioMax"],
-            "longTaskSupport": perf["longTaskSupported"] is True,
-            "pageLongTasks": len(page_long_tasks) <= thresholds["longTaskMaxCount"],
+            "allTargets": len(target_metrics) == 3 and all(all(metric["checks"].values()) for metric in target_metrics),
             "cdpLongTasks": len(cdp_long_tasks) <= thresholds["longTaskMaxCount"],
         }
-        assert all(checks.values()), json.dumps({
-            "checks": checks,
-            "frameP95Ms": frame_p95,
-            "frameMaxMs": frame_max,
-            "slowFrameRatio": slow_ratio,
-            "pageLongTasks": page_long_tasks,
-            "cdpLongTasks": cdp_long_tasks,
-        }, ensure_ascii=False)
+        assert all(checks.values()), json.dumps({"checks": checks, "cdpLongTasks": cdp_long_tasks}, ensure_ascii=False)
         assert_clean(diagnostics)
 
         artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -407,20 +468,8 @@ def verify_performance_352(browser, artifacts_dir):
         return {
             "status": "pass",
             "browserVersion": browser.version,
-            "target": "district container",
             "nodeCount": detail["nodeCount"],
-            "durationMs": round(perf["durationMs"], 2),
-            "frameSamples": len(frame_intervals),
-            "effectiveFps": round(effective_fps, 2),
-            "frameP95Ms": round(frame_p95, 3),
-            "frameMaxMs": round(frame_max, 3),
-            "slowFrameCount": len(slow_frames),
-            "slowFrameRatio": round(slow_ratio, 5),
-            "pointerMoves": perf["pointerMoves"],
-            "distinctPositions": distinct_positions,
-            "displacementPx": round(displacement, 2),
-            "pageLongTaskCount": len(page_long_tasks),
-            "pageMaxLongTaskMs": round(max(page_long_tasks, default=0), 3),
+            "targets": target_metrics,
             "cdpLongTaskCount": len(cdp_long_tasks),
             "cdpMaxLongTaskMs": round(max(cdp_long_tasks, default=0), 3),
             "traceEventCount": len(trace_events),

@@ -41,7 +41,7 @@ export const api = {
   aiName: key => post('/api/name', { key }),
   wsRename: (path, name) => post('/api/ws-rename', { path, name }),
   reveal: path => post('/api/reveal', { path }),
-  // 场景快照唯一写入口；keepalive 供 pagehide 兜底（body 超 keepalive 限额时浏览器自动降级为普通请求失败，由重试兜住）
+  // 场景快照唯一写入口；keepalive 负责小快照关页续送，大载荷由 scene-recovery 同源快照在重开后追平
   putScene: (scene, { keepalive = false } = {}) =>
     post('/api/scene', { writerId: WRITER_ID, ...scene }, keepalive ? { keepalive: true } : {}),
   putDrawingFiles: (files, { keepalive = false } = {}) =>

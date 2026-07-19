@@ -20,7 +20,7 @@ docs/ + PRIVACY.md + TERMS.md - 文档索引、Codex 市场文案、已完成工
 </directory>
 
 <config>
-package.json - 前端依赖与脚本 (build/test/serve/scan/start) + 上游精确旧依赖的安全补丁 overrides
+package.json - 前端依赖与脚本 (build/test/serve/scan/start)；当前依赖树无 overrides
 vite.config.mjs - 前端构建: root=web, 产物 web/dist, dev 代理 :4517
 </config>
 
@@ -52,9 +52,11 @@ npm run scan         # 仅扫描，输出统计
 - **SceneStore 单一真相源 (web/src/scene-store.js)**: 场景文档 { layout, edges, notes, boards, drawing, drawingFiles, seq }
   唯一写入口 mutate（同步、可 coalesce 进全画布 undo/redo，容量 100）；后台防抖 300ms 全量快照冲刷，
   失败无限退避（1s→15s 封顶）永不阻塞输入，角落只亮"未同步"点；SSE 回声按 writerId 去重，本地干净才采纳（LWW）
-- **场景快照律 (server/scene.mjs)**: POST /api/scene 全量快照 + tmp/rename 原子写 + 内存 rev + SSE 广播；同 writer 的 clientSeq 单调门拒绝 pagehide 新快照之后才落地的旧在飞请求；
+- **场景快照律 (server/scene.mjs)**: POST /api/scene 全量快照 + tmp/rename 原子写 + 内存 rev + SSE 广播，canvas mtime 提供跨重启更新时间；同 writer 的 clientSeq 单调门拒绝 pagehide 新快照之后才落地的旧在飞请求；
   图片资产内容寻址、同 ID 不可变、资产先行引用后到、孤儿随场景写顺手裁剪；轻校验挡结构性垃圾，
   不做逐字节公证——磁盘格式与 v17 完全兼容（canvas/layout/drawing-files.json），备份与回滚零迁移
+- **关页大载荷恢复律 (web/src/scene-recovery.js)**: pagehide 先把不含图片正文的最终逻辑场景同步写入同源 localStorage，再尽力 keepalive；
+  未确认图片单独暂存在 IndexedDB。重开只回放比服务端 canvas mtime 更新的记录，正常后台冲刷成功后清理，避免 64KB keepalive 上限造成最终编辑丢失
 - **自研墨迹层 (ink.js + InkLayer + InkTools)**: 笔迹/矩形/椭圆/箭头/文字全部自写——落笔即场景文档元素、
   拖画即 coalesce mutate（一笔=一步 undo）、收笔即定稿（意外小形状判废），文字就地 textarea 击键直写；
   渲染=React 直出 SVG（沉层负 z 垫底/浮层高 z 盖顶），与卡片共用唯一 RF 相机——
@@ -69,7 +71,7 @@ npm run scan         # 仅扫描，输出统计
   存储仍一份 canvas.drawing；沉浮切换=一次 mutate，选择环/命中/小地图全部读同一份文档
 - **绘图删除不藏在模式里**: 普通模式点击描边带=选中（Delete 删，Esc 返回），右键=选中/沉浮/删除（过确认，
   可 undo）；空心形状中空区穿透给卡片，选绘图武装后封闭形状内部为热区；命中检测纯函数可证伪
-- **交接三件套融合**: 会话卡右键与详情面板一键拉起 Claude 终端，注入自包含 bridge-rescue 提示词
+- **交接三件套融合**: 会话卡右键与详情面板生成自包含 bridge-rescue 提示词；带接力新开时显式选择 Claude Code 或 Codex，两家入口无默认项
   （bingo-agent-handoff skill），画布递精确会话地址（工具/ID/源转录/项目根/恢复命令），血缘自动连绿边
 - **Adapter 模式**: 每个 Agent 工具一个适配器输出统一 Session 模型，新增工具=新增一个文件
 - **首尾局部读取**: 只读 JSONL 首 64KB + 尾 8KB，3700 文件冷扫 1.5s，mtime 缓存命中 53ms

@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 依赖 store.mjs 的 readJson/writeJson 原子原语，drawing-files.mjs 的资产规范化与引用收集
- * [OUTPUT]: 对外提供 createScene(dataDir) → { read, write, addFiles, rev }——LWW 快照仓
+ * [OUTPUT]: 对外提供 createScene(dataDir) → { read, write, addFiles, rev }——以 canvas mtime 暴露更新时间的 LWW 快照仓
  * [POS]: 画布持久化唯一层。全量快照 + 原子写 + 内存 rev；无锁、无 journal、无 CAS——
  *        单写者本地工具的正确答案是"文件永远是完整快照"，不是两阶段提交
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -54,6 +54,10 @@ export function createScene(dataDir) {
 
   const readCanvas = () => ({ ...structuredClone(EMPTY_CANVAS), ...readJson(canvasFile, {}) });
   const readFiles = () => normalizeDrawingFiles(readJson(filesFile, {}));
+  const updatedAt = () => {
+    try { return fs.statSync(canvasFile).mtimeMs; }
+    catch { return 0; }
+  };
 
   return {
     get rev() { return rev; },
@@ -61,6 +65,7 @@ export function createScene(dataDir) {
     read() {
       return {
         rev,
+        updatedAt: updatedAt(),
         layout: readJson(layoutFile, {}),
         canvas: readCanvas(),
         drawingFiles: readFiles(),

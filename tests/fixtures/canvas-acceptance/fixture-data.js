@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 元素数量 300/800、352 节点 FlowCanvas 规模与确定性序号
- * [OUTPUT]: 确定性双平面自研墨迹元素，以及 1 街区 + 1 工作区 + 350 会话的性能验收数据
+ * [OUTPUT]: 确定性双平面自研墨迹元素，以及 1 街区 + 1 工作区 + 1 便签 + 349 会话的性能验收数据
  * [POS]: 4518 无持久化验收数据真相；不读真实 canvas/layout
  * [PROTOCOL]: 变更时更新此头部，然后检查 README/web/CLAUDE.md
  */
@@ -10,9 +10,10 @@ const COLORS = ['#dbeafe', '#dcfce7', '#fef3c7', '#fce7f3'];
 
 export const FLOW_PERFORMANCE_NODE_COUNT = 352;
 export const FLOW_PERFORMANCE_WORKSPACE = '/Users/fixture/Perf352';
+export const FLOW_PERFORMANCE_NOTE_ID = 'note:perf-352';
 
 export function createFlowPerformanceFixture() {
-  const sessionCount = FLOW_PERFORMANCE_NODE_COUNT - 2;
+  const sessionCount = FLOW_PERFORMANCE_NODE_COUNT - 3;
   const keys = Array.from({ length: sessionCount }, (_, index) => `codex:perf-352-${index}`);
   const sessionsByKey = Object.fromEntries(keys.map((key, index) => [key, {
     key,

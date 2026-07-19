@@ -298,6 +298,30 @@ def run(browser, base, data_dir, port, server_process):
         assert page_e.locator('[data-testid="sync-note"]').input_value() == "pagehide-inflight-final"
         assert_clean(diag_e)
 
+        # Chrome keepalive 总量约 64KB：70KB 最终编辑必须由同源恢复快照接住，重开后普通冲刷再追平服务端。
+        large_text = "pagehide-large-final:" + ("大载荷" * 24000)
+        assert len(large_text.encode("utf-8")) > 70_000
+        page_e.locator('[data-testid="sync-note"]').fill(large_text)
+        page_e.close()
+        page_f = context_e.new_page()
+        diag_f = diagnostics(context_e, page_f, base)
+        response_f = page_f.goto(base, wait_until="load", timeout=90_000)
+        assert response_f is not None and response_f.status == 200
+        page_f.wait_for_function("() => window.__SYNC_ACCEPTANCE__?.ready === true", timeout=90_000)
+        reopened_large = page_snapshot(page_f)
+        assert reopened_large["recovery"]["applied"] is True, reopened_large
+        assert reopened_large["text"] == large_text
+        assert page_f.locator('[data-testid="sync-note"]').input_value() == large_text
+        persisted_large = wait_until(
+            lambda: read_graph(base),
+            lambda graph: note_text(graph) == large_text,
+            "large pagehide local recovery persisted",
+            timeout=15,
+        )
+        saved_large = wait_page(page_f, lambda value: value["sync"] == "saved", "large recovery saved")
+        assert saved_large["text"] == large_text
+        assert_clean(diag_f)
+
         # 离线阶段只允许同源网络失败；页面错误、外联与刷新对话框始终为零。
         offline_failures = diag_a["requestFailed"] + diag_b["requestFailed"]
         assert offline_failures, "daemon stop should produce observable same-origin request failures"
@@ -336,15 +360,20 @@ def run(browser, base, data_dir, port, server_process):
                     "persistedText": note_text(persisted_inflight),
                     "reopenedText": reopened_inflight["text"],
                 },
+                "largePayload": {
+                    "utf8Bytes": len(large_text.encode("utf-8")),
+                    "localRecoveryApplied": reopened_large["recovery"]["applied"],
+                    "persistedTextBytes": len(note_text(persisted_large).encode("utf-8")),
+                },
                 "serverWriteDelayMs": ready["writeDelayMs"],
             },
             "diagnostics": {
                 "preOfflineClean": True,
-                "pageErrors": len(diag_a["pageErrors"]) + len(diag_b["pageErrors"]) + len(diag_e["pageErrors"]),
-                "externalResources": len(diag_a["externalResources"]) + len(diag_b["externalResources"]) + len(diag_e["externalResources"]),
-                "dialogs": len(diag_a["dialogs"]) + len(diag_b["dialogs"]) + len(diag_e["dialogs"]),
-                "freshReopenConsoleErrors": len(diag_e["consoleErrors"]),
-                "freshReopenConsoleWarnings": len(diag_e["consoleWarnings"]),
+                "pageErrors": len(diag_a["pageErrors"]) + len(diag_b["pageErrors"]) + len(diag_e["pageErrors"]) + len(diag_f["pageErrors"]),
+                "externalResources": len(diag_a["externalResources"]) + len(diag_b["externalResources"]) + len(diag_e["externalResources"]) + len(diag_f["externalResources"]),
+                "dialogs": len(diag_a["dialogs"]) + len(diag_b["dialogs"]) + len(diag_e["dialogs"]) + len(diag_f["dialogs"]),
+                "freshReopenConsoleErrors": len(diag_f["consoleErrors"]),
+                "freshReopenConsoleWarnings": len(diag_f["consoleWarnings"]),
             },
             "isolatedFiles": files,
         }, server_process

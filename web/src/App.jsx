@@ -1,5 +1,5 @@
 /**
- * [INPUT]: 依赖 api 的数据通道、scene-store 的场景真相源、canvas/FlowCanvas 画布、panels 三件套、ui 的 UIHost/toast
+ * [INPUT]: 依赖 api 的数据通道、scene-store/scene-recovery 的场景真相源与关页恢复、canvas/FlowCanvas、panels、ui
  * [OUTPUT]: 对外提供 App 根组件：全局状态、过滤管道、SSE 订阅（地形举旗 + 场景回声采纳）、
  *           岛屿布局、对象动作分发（全部同步 mutate）、整理与全画布 undo、画布终端框开合
  * [POS]: web 的总装线——数据如河流单向流动：地形 graph + 场景 doc → 过滤 → 画布/面板；
@@ -9,6 +9,14 @@
 import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { api, subscribeEvents, WRITER_ID } from './api.js';
 import { createSceneStore } from './scene-store.js';
+import {
+  clearRecoveryFiles,
+  clearSceneRecovery,
+  loadRecoveryFiles,
+  readLatestSceneRecovery,
+  saveSceneRecovery,
+  sceneRecoveryKey,
+} from './scene-recovery.js';
 import FlowCanvas from './canvas/FlowCanvas.jsx';
 import { tidyLayoutEntries } from './canvas/layout.js';
 import TopBar from './panels/TopBar.jsx';
@@ -59,11 +67,12 @@ export default function App() {
   const [expandedWs, setExpandedWs] = useState(() => new Set());   // 会话级展开记忆，刷新即收
   const focusRef = useRef(() => {});
   const actionsRef = useRef({});
+  const recoveredKeyRef = useRef(null);
 
   // ---- 场景真相源：首次 graph 到达即诞生（随 setGraph 同帧可见），此后一切画布写动作同步进它 ----
   const storeRef = useRef(null);
-  const adoptScene = useCallback(g => {
-    const sceneDoc = {
+  const adoptScene = useCallback((g, recovery = null, recoveryFiles = {}) => {
+    const serverDoc = {
       layout: g.layout || {},
       edges: g.canvas?.edges || [],
       notes: g.canvas?.notes || [],
@@ -72,22 +81,44 @@ export default function App() {
       drawingFiles: g.canvas?.drawingFiles || {},
     };
     if (!storeRef.current) {
-      storeRef.current = createSceneStore(sceneDoc, {
-        persistScene: (scene, options) => api.putScene(scene, options),
-        persistFiles: (files, options) => api.putDrawingFiles(files, options),
+      storeRef.current = createSceneStore(serverDoc, {
+        persistScene: async (scene, options) => {
+          const receipt = await api.putScene(scene, options);
+          clearSceneRecovery(sceneRecoveryKey(WRITER_ID));
+          if (recoveredKeyRef.current) {
+            clearSceneRecovery(recoveredKeyRef.current);
+            recoveredKeyRef.current = null;
+          }
+          return receipt;
+        },
+        persistFiles: async (files, options) => {
+          const receipt = await api.putDrawingFiles(files, options);
+          void clearRecoveryFiles(Object.keys(files));
+          return receipt;
+        },
       });
+      if (recovery) {
+        recoveredKeyRef.current = recovery.key;
+        storeRef.current.mutate(() => ({
+          ...recovery.scene,
+          drawingFiles: { ...serverDoc.drawingFiles, ...recoveryFiles },
+        }), { history: false });
+      }
     } else {
-      storeRef.current.adoptRemote(sceneDoc, g.rev);   // 本地脏改动本地胜；旧代际读值拒绝倒灌
+      storeRef.current.adoptRemote(serverDoc, g.rev);   // 本地脏改动本地胜；旧代际读值拒绝倒灌
     }
   }, []);
   const store = storeRef.current;
 
-  const reload = useCallback(() => api.graph().then(g => {
-    adoptScene(g);
+  const reload = useCallback(async () => {
+    const g = await api.graph();
+    const recovery = readLatestSceneRecovery(g.sceneUpdatedAt || 0);
+    const recoveryFiles = recovery ? await loadRecoveryFiles() : {};
+    adoptScene(g, recovery, recoveryFiles);
     setGraph(g);
     setLive(true);
     setPending(false);
-  }), [adoptScene]);
+  }, [adoptScene]);
 
   // ---- 双侧边栏：宽度可拖、可收回，记进 localStorage ----
   const [leftW, setLeftW] = useState(+localStorage.leftW || 250);
@@ -189,9 +220,14 @@ export default function App() {
     }, up => setLive(up));
   }, [reload, adoptScene]);
 
-  // pagehide 兜底：离开页面前把未冲刷的场景推一把（keepalive 尽力而为，失败由下次会话的重试兜住）
+  // pagehide 双保险：先同步留同源恢复快照，再发 keepalive；大于浏览器 64KB 时重开会自动回放本地快照。
   useEffect(() => {
-    const onHide = () => { storeRef.current?.flushNow(); };
+    const onHide = () => {
+      const current = storeRef.current;
+      if (!current) return;
+      saveSceneRecovery(current.get(), WRITER_ID);
+      current.flushNow();
+    };
     window.addEventListener('pagehide', onHide);
     return () => window.removeEventListener('pagehide', onHide);
   }, []);

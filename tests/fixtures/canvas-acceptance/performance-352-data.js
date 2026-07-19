@@ -1,6 +1,6 @@
 /**
  * [INPUT]: 352 节点确定性匿名数据、真实 FlowCanvas/SceneStore、浏览器 held pointer
- * [OUTPUT]: production FlowCanvas 性能页；暴露 rAF 帧间隔、Long Task、拖动位移与诊断探针
+ * [OUTPUT]: production FlowCanvas 性能页；为街区/工作区/便签暴露 rAF 帧间隔、Long Task、拖动位移与诊断探针
  * [POS]: 仅由 4518 ?mode=performance-352 加载；不请求 API、不读写真实 data、不复制生产画布
  * [PROTOCOL]: 变更时更新此头部，然后检查 main.jsx/verify.py/README/web/CLAUDE.md
  */
@@ -14,6 +14,7 @@ import { UIHost } from '../../../web/src/ui.jsx';
 import {
   createFlowPerformanceFixture,
   FLOW_PERFORMANCE_NODE_COUNT,
+  FLOW_PERFORMANCE_NOTE_ID,
   FLOW_PERFORMANCE_WORKSPACE,
 } from './fixture-data.js';
 
@@ -26,7 +27,15 @@ const INITIAL_DOC = {
     [`district:${DISTRICT_KEY}`]: { x: 0, y: 0 },
   },
   edges: [],
-  notes: [],
+  notes: [{
+    id: FLOW_PERFORMANCE_NOTE_ID,
+    x: 980,
+    y: 80,
+    w: 232,
+    h: 128,
+    text: '352 节点便签拖动目标',
+    color: 'yellow',
+  }],
   boards: [],
   drawing: [],
   drawingFiles: {},
@@ -126,10 +135,14 @@ function Performance352Canvas() {
   useEffect(() => {
     const timer = setTimeout(() => {
       const nodeCount = shellRef.current?.querySelectorAll('.react-flow__node').length || 0;
-      const targetCount = shellRef.current?.querySelectorAll('.react-flow__node-district .container-drag-handle').length || 0;
-      const pass = nodeCount === FLOW_PERFORMANCE_NODE_COUNT && targetCount === 1;
+      const targets = {
+        district: shellRef.current?.querySelectorAll('.react-flow__node-district .container-drag-handle').length || 0,
+        workspace: shellRef.current?.querySelectorAll('.react-flow__node-workspace').length || 0,
+        note: shellRef.current?.querySelectorAll('.react-flow__node-note').length || 0,
+      };
+      const pass = nodeCount === FLOW_PERFORMANCE_NODE_COUNT && Object.values(targets).every(count => count === 1);
       probe.status = pass ? 'complete' : 'fail';
-      probe.report = { nodeCount, expectedNodeCount: FLOW_PERFORMANCE_NODE_COUNT, targetCount, pass };
+      probe.report = { nodeCount, expectedNodeCount: FLOW_PERFORMANCE_NODE_COUNT, targets, pass };
       document.documentElement.dataset.performance352Status = pass ? 'pass' : 'fail';
     }, 250);
     return () => clearTimeout(timer);
@@ -141,6 +154,15 @@ function Performance352Canvas() {
     return { ...current, layout };
   }), [store]);
 
+  const onCanvasAction = useCallback((kind, payload) => {
+    if (kind !== 'setNote') return true;
+    store.mutate(current => ({
+      ...current,
+      notes: current.notes.map(note => note.id === payload.id ? { ...note, ...payload } : note),
+    }));
+    return true;
+  }, [store]);
+
   return h('div', { ref: shellRef, style: { position: 'fixed', inset: 0 } },
     h(FlowCanvas, {
       workspaces: FIXTURE.workspaces,
@@ -150,7 +172,7 @@ function Performance352Canvas() {
       canvas: doc,
       store,
       onMoveNode,
-      onCanvasAction: () => true,
+      onCanvasAction,
       onRenameSession: () => {},
       onRenameWs: () => {},
       selectedKey: null,
@@ -171,7 +193,7 @@ function Performance352Canvas() {
     } },
       h('b', null, '352-node production FlowCanvas'),
       h('div', { 'data-performance-352-status': probe.status }, `status: ${probe.status}`),
-      h('div', null, 'target: district container'),
+      h('div', null, 'targets: district / workspace / note'),
     ),
   );
 }
