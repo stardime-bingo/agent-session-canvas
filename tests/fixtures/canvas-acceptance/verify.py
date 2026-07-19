@@ -319,6 +319,55 @@ def verify_handoff_choice(browser):
     }
 
 
+def verify_detail_busy(browser):
+    context = browser.new_context(viewport={"width": 900, "height": 720})
+    page = context.new_page()
+    diagnostics = diagnostics_for(context, page)
+    response = page.goto(f"{BASE}/?mode=detail-busy", wait_until="networkidle", timeout=90_000)
+    assert response is not None and response.status == 200
+    page.wait_for_function("() => window.__DETAIL_BUSY__?.ready === true", timeout=90_000)
+
+    trigger = page.get_by_role("button", name="生成接力提示词", exact=True)
+    assert trigger.count() == 1 and trigger.is_enabled()
+    trigger.click()
+    busy = page.get_by_role("button", name="正在生成接力提示词", exact=True)
+    busy.wait_for(state="visible", timeout=10_000)
+    box = busy.bounding_box()
+    assert box, box
+    page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+    state = busy.evaluate("""node => ({
+      ariaBusy: node.getAttribute('aria-busy'),
+      cursor: getComputedStyle(node).cursor,
+      dotCount: node.querySelectorAll('.busy-dots i').length,
+      dotAnimation: getComputedStyle(node.querySelector('.busy-dots i')).animationName,
+    })""")
+    assert state == {
+        "ariaBusy": "true",
+        "cursor": "default",
+        "dotCount": 3,
+        "dotAnimation": "busy-dot",
+    }, state
+    assert page.evaluate("() => window.__DETAIL_BUSY__.handoffCalls") == 1
+
+    page.emulate_media(reduced_motion="reduce")
+    reduced_animation = busy.locator(".busy-dots i").first.evaluate("node => getComputedStyle(node).animationName")
+    assert reduced_animation == "none", reduced_animation
+    assert_clean(diagnostics)
+    context.close()
+    return {
+        "status": "pass",
+        "label": "正在生成接力提示词",
+        "cursor": state["cursor"],
+        "inlineDots": state["dotCount"],
+        "reducedMotionAnimation": reduced_animation,
+        "consoleErrors": 0,
+        "consoleWarnings": 0,
+        "pageErrors": 0,
+        "externalResources": 0,
+        "apiResources": 0,
+    }
+
+
 def verify_layout_quality(browser):
     context = browser.new_context(viewport={"width": 1440, "height": 960})
     page = context.new_page()
@@ -741,6 +790,7 @@ with sync_playwright() as playwright:
                 "production": verify_production(browser),
                 "interaction": verify_interaction(browser),
                 "handoffChoice": verify_handoff_choice(browser),
+                "detailBusy": verify_detail_busy(browser),
                 "layoutQuality": verify_layout_quality(browser),
             }
         elif args.suite == "perf352":

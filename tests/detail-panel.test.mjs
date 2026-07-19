@@ -1,6 +1,6 @@
 /**
  * [INPUT]: web/src/panels/DetailPanel.jsx 的详情侧栏 JSX 顺序
- * [OUTPUT]: 接力/元信息/删除固定在长内容之前，并提供醒目默认文件管理器按钮的静态回归
+ * [OUTPUT]: 接力/元信息/删除固定在长内容之前，并提供醒目默认文件管理器按钮与克制忙碌反馈的静态回归
  * [POS]: tests 的详情面板信息层次合同
  * [PROTOCOL]: 变更时更新此头部，然后检查 web/CLAUDE.md
  */
@@ -23,4 +23,17 @@ test('详情路径使用醒目独立按钮，所有画布入口不再把 Finder 
   assert.match(detail, /用电脑默认的文件管理器打开此目录/);
   assert.doesNotMatch(detail, /Finder/);
   assert.doesNotMatch(menus, /Finder/);
+});
+
+test('AI 生成忙碌态留在按钮内，不触发 macOS 系统等待彩球', () => {
+  const detail = fs.readFileSync('web/src/panels/DetailPanel.jsx', 'utf8');
+  const theme = fs.readFileSync('web/src/theme.css', 'utf8');
+  assert.match(detail, /const BusyLabel/);
+  assert.match(detail, /aria-busy=\{busy === 'handoff'\}/);
+  assert.match(detail, /aria-busy=\{busy === 'summarize'\}/);
+  assert.match(detail, /正在生成接力提示词/);
+  assert.match(detail, /正在生成摘要/);
+  assert.match(theme, /\.btn\[aria-busy="true"\]/);
+  assert.match(theme, /@media \(prefers-reduced-motion: reduce\)/);
+  assert.doesNotMatch(theme, /cursor:\s*(?:wait|progress)/);
 });

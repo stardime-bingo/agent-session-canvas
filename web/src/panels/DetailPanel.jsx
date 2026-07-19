@@ -1,7 +1,7 @@
 /**
  * [INPUT]: 依赖 react、api 的会话详情/动作接口、util 的展示函数、ui 的 Icon/toast/InlineEdit、menus 的 deleteSessionFlow、HandoffLaunchChoices 的双工具接班入口
  * [OUTPUT]: 对外提供 DetailPanel 组件：首屏=标题+一键续开+接力/元信息(醒目默认文件管理器入口)/删除，
- *           次级=聊了什么+最后停在哪里（尾部独立摘录）+运行实例；错误态自动退避重连
+ *           次级=聊了什么+最后停在哪里（尾部独立摘录）+运行实例；AI 生成使用按钮内状态点，错误态自动退避重连
  * [POS]: panels 的右侧行动面板——画布是地图，这里是扳机。接力、定位与清理入口固定在内容长文之前
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
@@ -24,6 +24,14 @@ const Section = ({ title, children }) => (
     <div className="mono" style={{ fontSize: 10, color: 'var(--ink-faint)', letterSpacing: '0.1em', marginBottom: 8 }}>{title}</div>
     {children}
   </div>
+);
+
+const BusyLabel = ({ icon, children }) => (
+  <span className="busy-label" aria-live="polite">
+    <Icon name={icon} size={12} />
+    <span>{children}</span>
+    <span className="busy-dots" aria-hidden="true"><i /><i /><i /></span>
+  </span>
 );
 
 // ============================================================
@@ -207,9 +215,12 @@ export default function DetailPanel({ width = 400, sessionKey, onClose, onCollap
               <div style={{ fontSize: 12, color: 'var(--ink-faint)' }}>尚未生成——生成后可一键带着它开新会话</div>
             )}
             <div style={{ display: 'flex', gap: 8, marginTop: 9, flexWrap: 'wrap' }}>
-              <button className="btn" disabled={busy}
+              <button className="btn" disabled={busy} aria-busy={busy === 'handoff'}
+                aria-label={busy === 'handoff' ? '正在生成接力提示词' : undefined}
                 onClick={() => run('handoff', () => api.handoff(s.key), '接力提示词已生成')}>
-                {busy === 'handoff' ? '⇥ 蒸馏中…' : <><Icon name="handoff" /> {s.handoff ? '重新生成' : '生成接力提示词'}</>}
+                {busy === 'handoff'
+                  ? <BusyLabel icon="handoff">正在生成接力提示词</BusyLabel>
+                  : <><Icon name="handoff" /> {s.handoff ? '重新生成' : '生成接力提示词'}</>}
               </button>
               {/* 深档出口：拉起终端跑 bingo-agent-handoff 桥接救援——画布递精确地址，skill 出三件套 */}
               <button className="btn" disabled={busy} title="拉起 Claude 终端执行 bingo-agent-handoff 桥接救援：只读提取本会话，产出总汇报/施工接手/独立审计三件套"
@@ -288,9 +299,12 @@ export default function DetailPanel({ width = 400, sessionKey, onClose, onCollap
               </>
             )}
             <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-              <button className="btn" disabled={busy}
+              <button className="btn" disabled={busy} aria-busy={busy === 'summarize'}
+                aria-label={busy === 'summarize' ? '正在生成摘要' : undefined}
                 onClick={() => run('summarize', () => api.summarize(s.key), '摘要已生成')}>
-                {busy === 'summarize' ? '◈ 蒸馏中…' : <><Icon name="spark" /> {s.summary ? '更新摘要' : '生成摘要'}</>}
+                {busy === 'summarize'
+                  ? <BusyLabel icon="spark">正在生成摘要</BusyLabel>
+                  : <><Icon name="spark" /> {s.summary ? '更新摘要' : '生成摘要'}</>}
               </button>
               <button className="btn" disabled={busy} title="AI 只给这一个会话精工起名（不覆盖你手动起的名）"
                 onClick={() => run('ai-name', () => api.aiName(s.key), 'AI 已起名')}>

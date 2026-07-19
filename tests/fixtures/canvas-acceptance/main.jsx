@@ -1,8 +1,8 @@
 /**
- * [INPUT]: 4518 query(mode=performance|interaction|performance-352|hero|handoff-choice|layout-quality, size=300|800) 与真实画布组件
+ * [INPUT]: 4518 query(mode=performance|interaction|performance-352|hero|handoff-choice|detail-busy|layout-quality, size=300|800) 与真实画布组件
  * [OUTPUT]: performance=InkLayer 直渲 N 元素的挂载、20 次更新帧与 DOM 完整性报告；
  *           interaction=动态加载真实 FlowCanvas 全内存验收页；performance-352=真实 FlowCanvas 拖动取证页；
- *           hero=production FlowCanvas 匿名产品截图页；handoff-choice=production 接力工具双入口；layout-quality=智能整理视觉/行为验收；
+ *           hero=production FlowCanvas 匿名产品截图页；handoff-choice=production 接力工具双入口；detail-busy=详情 AI 忙碌反馈；layout-quality=智能整理视觉/行为验收；
  *           共享 console/page error 原始 transcript
  * [POS]: 4518 验收夹具入口。自研墨迹后没有导出管线可测——渲染完整性、挂载与更新帧就是性能合同
  * [PROTOCOL]: 变更时更新此头部，然后检查 interaction-data/README/web/CLAUDE.md
@@ -22,7 +22,7 @@ import {
 } from './fixture-data.js';
 
 const params = new URLSearchParams(location.search);
-const MODE = ['interaction', 'performance-352', 'hero', 'handoff-choice', 'layout-quality'].includes(params.get('mode'))
+const MODE = ['interaction', 'performance-352', 'hero', 'handoff-choice', 'detail-busy', 'layout-quality'].includes(params.get('mode'))
   ? params.get('mode')
   : 'performance';
 const SIZE = Number(params.get('size')) === 800 ? 800 : 300;
@@ -180,6 +180,14 @@ if (MODE === 'interaction') {
       PAGE_ERRORS.push(error.message);
       document.documentElement.dataset.handoffChoiceStatus = 'error';
       document.getElementById('root').textContent = `handoff choice fixture failed: ${error.message}`;
+    });
+} else if (MODE === 'detail-busy') {
+  import('./detail-busy-data.jsx')
+    .then(module => module.mountDetailBusyFixture(document.getElementById('root')))
+    .catch(error => {
+      PAGE_ERRORS.push(error.message);
+      document.documentElement.dataset.detailBusyStatus = 'error';
+      document.getElementById('root').textContent = `detail busy fixture failed: ${error.message}`;
     });
 } else if (MODE === 'layout-quality') {
   import('./layout-quality-data.js')

@@ -9,6 +9,7 @@
 - performance-352：确定性匿名数据生成 1 街区 + 12 工作区 + 335 会话 + 3 画板 + 1 便签，共 352 个真实 React Flow 节点，并补齐 171 个活跃状态点、22 条关系线与 3 个墨迹元素；浏览器先取空闲 trace，要求常驻动画及 `UpdateLayoutTree / PrePaint / Paint` 全为 0，再用 held pointer 依次拖动街区、工作区与便签，采集各自 rAF 帧间隔、Long Task 与原始 CDP Performance trace。
 - hero：production `FlowCanvas + SceneStore + TopBar` 的专用匿名构图；展示会话卡、画板、便签、自研墨迹与真实同步点，不含验收 HUD，也不读取真实路径或资产。
 - handoff-choice：production `HandoffLaunchChoices` 的匿名双入口；分别用键盘和指针选择 Claude Code/Codex，断言两家收到同一份接力提示词且页面加载时不会默认拉起任何一家。
+- detail-busy：production `DetailPanel` 的匿名 AI 生成状态；真实点击后让请求保持在飞，断言状态留在按钮内、鼠标为普通箭头、没有系统等待彩球，并覆盖 Reduced Motion 静态状态点。
 - layout-quality：production `FlowCanvas + SceneStore + TopBar` 的匿名乱序地图；真实点击“智能整理”，直接读取 React Flow DOM 验证工作区活跃度行对齐、1–4 条平衡车道、画板压缩并参与排布、街区终点持久化、容器墨迹随行、便签不动及一键撤销；随后让已整理街区增长，确认后继与其墨迹同 delta 顺延且仍零碰撞，再真实拖动后继街区缩放手柄，验证投影先原子提交且墨迹不跳。基线与全量 DOM 读取在产品计时窗外，首帧只绑定目标节点 transform 提交，并采集同步耗时与 Long Task。
 
 所有轮询使用 `setTimeout`，不依赖隐藏标签页会停摆的 `requestAnimationFrame`。输入先同步进入 SceneStore；验收观察者只等待 React commit 与后台冲刷，不把等待塞回产品交互路径。
@@ -25,6 +26,7 @@ npm run acceptance:canvas
 - `http://127.0.0.1:4518/?mode=performance-352`
 - `http://127.0.0.1:4518/?mode=hero`
 - `http://127.0.0.1:4518/?mode=handoff-choice`
+- `http://127.0.0.1:4518/?mode=detail-busy`
 - `http://127.0.0.1:4518/?mode=layout-quality`
 
 机器探针统一为 `window.__CANVAS_ACCEPTANCE__`；interaction 可用可见按钮手动启动，也可加 `&autorun=1`。
