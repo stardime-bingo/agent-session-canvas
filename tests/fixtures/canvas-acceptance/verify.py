@@ -310,18 +310,30 @@ def verify_layout_quality(browser):
     result = page.evaluate("() => window.__LAYOUT_ACCEPTANCE__")
     report = result["report"]
     assert result["status"] == "complete" and report["pass"] is True, json.dumps(result, ensure_ascii=False)
+    assert report["domComplete"] is True, report
     assert report["collisions"] == [], report
     assert report["rowsAligned"] is True, report
     assert report["membershipsPreserved"] is True, report
     assert report["districtGeometryPersisted"] is True, report
     assert report["boardMoved"] is True and report["boardCompacted"] is True, report
-    assert report["noteUnchanged"] is True and report["inkCarried"] is True, report
+    assert report["domBoardMoved"] is True and report["domBoardCompacted"] is True, report
+    assert report["noteUnchanged"] is True and report["domNoteUnchanged"] is True, report
+    assert report["inkCarried"] is True and report["domInkCarried"] is True, report
     assert 2 <= report["laneCount"] <= 4, report
     assert 1.2 <= report["bounds"]["aspect"] <= 2.2, report
     assert report["performance"]["syncMs"] <= 50, report
     assert report["performance"]["firstPaintMs"] <= 100, report
     assert report["performance"]["longTaskSupported"] is True, report
     assert not [value for value in report["performance"]["longTasks"] if value >= 50], report
+    assert page.evaluate("() => window.__LAYOUT_ACCEPTANCE__.growArrangedDistrict()") is True
+    page.wait_for_function(
+        "() => ['complete', 'fail'].includes(window.__LAYOUT_ACCEPTANCE__?.growthStatus)",
+        timeout=10_000,
+    )
+    growth = page.evaluate("() => window.__LAYOUT_ACCEPTANCE__.growthReport")
+    assert growth["pass"] is True, growth
+    assert growth["targetGrew"] is True and growth["followerMoved"] is True, growth
+    assert growth["collisions"] == [], growth
     assert page.get_by_role("button", name="智能整理", exact=True).count() == 1
     undo = page.get_by_role("button", name="撤销", exact=True)
     assert undo.count() == 1 and undo.is_enabled()
@@ -347,6 +359,8 @@ def verify_layout_quality(browser):
         "districtGeometryPersisted": True,
         "boardMoved": True,
         "boardCompacted": True,
+        "domVerified": True,
+        "growth": growth,
         "noteUnchanged": True,
         "inkCarried": True,
         "undoRestored": True,

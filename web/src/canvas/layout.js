@@ -40,6 +40,21 @@ export function arrangedSceneGeometry(nodes, targetLayout) {
   return { layout, boards };
 }
 
+/** 整理承载认领必须读场景已存几何；渲染态避碰位移不能篡改墨迹的原容器归属。 */
+export function persistedContainerNodes(nodes, layout, boards) {
+  const boardById = new Map((boards || []).map(board => [`board:${board.id}`, board]));
+  return nodes.map(node => {
+    const saved = node.type === 'district' ? layout?.[node.id]
+      : node.type === 'board' ? boardById.get(node.id) : null;
+    if (!Number.isFinite(saved?.x) || !Number.isFinite(saved?.y)) return node;
+    return {
+      ...node, position: { x: saved.x, y: saved.y },
+      width: Number.isFinite(saved.w) ? saved.w : node.width,
+      height: Number.isFinite(saved.h) ? saved.h : node.height,
+    };
+  });
+}
+
 /**
  * React Flow 从左/上缩放父容器时会实时补偿直属子节点，使其绝对位置不变。
  * 松手后必须把这份新相对坐标写进 layout；否则图数据重建会把子节点拉回旧相对坐标，
@@ -165,15 +180,11 @@ export function arrangeFlowBlocks(blocks) {
 
 /** 街区/画板变大后可能侵入邻居；保留空间顺序，只把后方容器向下顺延。 */
 export function resolveContainerOverlaps(blocks) {
-  const fixed = blocks
-    .filter(block => block.fixed)
-    .map((block, order) => ({ block, order }))
-    .sort((a, b) => a.block.y - b.block.y || a.block.x - b.block.x || a.order - b.order);
   const ordered = blocks
-    .filter(block => !block.fixed)
     .map((block, order) => ({ block, order }))
-    .sort((a, b) => a.block.y - b.block.y || a.block.x - b.block.x || a.order - b.order);
-  const placed = fixed.map(item => item.block);
+    .sort((a, b) => Number(b.block.fixed) - Number(a.block.fixed)
+      || a.block.y - b.block.y || a.block.x - b.block.x || a.order - b.order);
+  const placed = [];
 
   for (const item of ordered) {
     const block = item.block;

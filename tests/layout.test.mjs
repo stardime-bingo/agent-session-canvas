@@ -204,6 +204,29 @@ test('explicit intelligent tidy includes boards in balanced lanes and compacts o
   });
 });
 
+test('persisted intelligent tidy geometry still yields when an earlier district grows', () => {
+  const workspaces = [
+    { path: '/Users/test/A', visibleKeys: ['a:1'], lastActivity: '2026-07-19T00:00:00.000Z' },
+    { path: '/Users/test/B', visibleKeys: ['b:1'], lastActivity: '2026-07-18T00:00:00.000Z' },
+  ];
+  const sessions = { 'a:1': { cwd: '/Users/test/A' }, 'b:1': { cwd: '/Users/test/B' } };
+  const layout = {
+    '/Users/test/A': { d: 'A' }, '/Users/test/B': { d: 'B' },
+    'district:A': { x: 0, y: 0, w: 600, h: 300 },
+    'district:B': { x: 0, y: 500, w: 600, h: 300 },
+  };
+  const grownKeys = Array.from({ length: 8 }, (_, index) => `a:${index + 1}`);
+  workspaces[0].visibleKeys = grownKeys;
+  for (const key of grownKeys) sessions[key] = { cwd: '/Users/test/A' };
+
+  const built = buildGraph(workspaces, sessions, layout, [], [], new Set(), false);
+  const districtA = built.nodes.find(node => node.id === 'district:A');
+  const districtB = built.nodes.find(node => node.id === 'district:B');
+
+  assert.equal(districtA.position.y, 0);
+  assert.ok(districtB.position.y >= districtA.position.y + districtA.height + GUTTER);
+});
+
 test('整理桥先以逆向 delta 钉回旧像素，release 后只撤位移不提前撤动画类', () => {
   const properties = new Map();
   const classes = new Set();

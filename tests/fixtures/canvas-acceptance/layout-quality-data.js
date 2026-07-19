@@ -4,12 +4,12 @@
  * [POS]: 只在 ?mode=layout-quality 加载；不请求 API、不读取 4517/data
  * [PROTOCOL]: 变更时更新 main.jsx/verify.py/README/web/CLAUDE.md
  */
-import React, { useCallback, useEffect, useMemo, useRef, useSyncExternalStore } from 'react';
+import React, { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { createRoot } from 'react-dom/client';
 import '@xyflow/react/dist/style.css';
 import '../../../web/src/theme.css';
 import FlowCanvas from '../../../web/src/canvas/FlowCanvas.jsx';
-import { buildGraph, tidyLayoutEntries } from '../../../web/src/canvas/layout.js';
+import { tidyLayoutEntries } from '../../../web/src/canvas/layout.js';
 import { createSceneStore } from '../../../web/src/scene-store.js';
 import TopBar from '../../../web/src/panels/TopBar.jsx';
 import { toast, UIHost } from '../../../web/src/ui.jsx';
@@ -63,7 +63,7 @@ addWorkspace(BOARD_GROUP, 0, BOARD_KEY);
 addWorkspace(BOARD_GROUP, 1, BOARD_KEY);
 
 const INITIAL_BOARD = {
-  id: BOARD_ID, x: 1350, y: 980, w: 1580, h: 1120,
+  id: BOARD_ID, x: 4800, y: 900, w: 1580, h: 1120,
   name: '人工项目画板', color: 'blue',
 };
 const INITIAL_NOTE = { id: 'note:layout-loose', x: -220, y: 3280, w: 240, h: 138, color: 'yellow', text: '便签保持手工位置' };
@@ -85,6 +85,7 @@ const INITIAL_DOC = {
 };
 const probe = window.__LAYOUT_ACCEPTANCE__ = { ready: false, status: 'booting', report: null };
 const arrangePerformance = { syncMs: null, firstPaintMs: null, longTasks: [] };
+let arrangeBeforeDom = null;
 let longTaskObserver = null;
 try {
   longTaskObserver = new PerformanceObserver(list => {
@@ -98,25 +99,55 @@ function rectsOverlap(a, b) {
   return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
 }
 
+function flowRect(selector, id) {
+  const element = document.querySelector(selector);
+  const pane = document.querySelector('.react-flow__pane');
+  const viewport = document.querySelector('.react-flow__viewport');
+  if (!element || !pane || !viewport) return null;
+  const rect = element.getBoundingClientRect();
+  const paneRect = pane.getBoundingClientRect();
+  const matrix = new DOMMatrix(getComputedStyle(viewport).transform);
+  if (!Number.isFinite(matrix.a) || matrix.a <= 0) return null;
+  return {
+    id, x: (rect.left - paneRect.left - matrix.e) / matrix.a,
+    y: (rect.top - paneRect.top - matrix.f) / matrix.a,
+    w: rect.width / matrix.a, h: rect.height / matrix.a,
+  };
+}
+
+const nodeRect = id => flowRect(`.react-flow__node[data-id="${CSS.escape(id)}"]`, id);
+const inkRect = id => flowRect(`[data-ink-element-id="${CSS.escape(id)}"]`, id);
+const close = (left, right, tolerance = 2) => Math.abs(left - right) <= tolerance;
+
+function domSnapshot() {
+  const containerIds = [...GROUPS.map(group => `district:${group.key}`), BOARD_KEY];
+  return {
+    containers: containerIds.map(id => nodeRect(id)),
+    workspaces: WORKSPACES.map(workspace => nodeRect(workspace.path)),
+    note: nodeRect(INITIAL_NOTE.id),
+    ink: inkRect(INITIAL_INK.id),
+    boardStyle: document.querySelector(`.react-flow__node[data-id="${CSS.escape(BOARD_KEY)}"]`)?.style.transform || '',
+  };
+}
+
 function collectReport(doc) {
-  const built = buildGraph(WORKSPACES, SESSIONS_BY_KEY, doc.layout, doc.boards, [], new Set(), false);
-  const containers = built.nodes.filter(node => node.type === 'district' || node.type === 'board').map(node => ({
-    id: node.id, type: node.type, x: node.position.x, y: node.position.y,
-    w: node.width ?? node.data._w, h: node.height ?? node.data._h,
+  const dom = domSnapshot();
+  const containers = dom.containers.map(item => ({
+    ...item, type: item?.id === BOARD_KEY ? 'board' : 'district',
   }));
+  const domComplete = [...containers, ...dom.workspaces, dom.note, dom.ink].every(Boolean);
   const collisions = [];
   for (let left = 0; left < containers.length; left++) {
     for (let right = left + 1; right < containers.length; right++) {
       if (rectsOverlap(containers[left], containers[right])) collisions.push([containers[left].id, containers[right].id]);
     }
   }
-  const workspaceNodes = built.nodes.filter(node => node.type === 'workspace');
   const rowOrder = [];
   let rowsAligned = true;
   for (const container of containers) {
-    const actual = workspaceNodes
-      .filter(node => node.parentId === container.id)
-      .sort((a, b) => a.position.y - b.position.y || a.position.x - b.position.x)
+    const actual = dom.workspaces
+      .filter(node => doc.layout[node.id]?.d === (container.type === 'board' ? container.id : container.id.slice(9)))
+      .sort((a, b) => a.y - b.y || a.x - b.x)
       .map(node => node.id);
     const expected = WORKSPACES
       .filter(workspace => doc.layout[workspace.path]?.d === (container.type === 'board' ? container.id : container.id.slice(9)))
@@ -125,18 +156,29 @@ function collectReport(doc) {
     rowOrder.push({ container: container.id, actual, expected });
     if (actual.join('\n') !== expected.join('\n')) rowsAligned = false;
   }
-  const minX = Math.min(...containers.map(item => item.x), INITIAL_NOTE.x);
-  const minY = Math.min(...containers.map(item => item.y), INITIAL_NOTE.y);
-  const maxX = Math.max(...containers.map(item => item.x + item.w), INITIAL_NOTE.x + INITIAL_NOTE.w);
-  const maxY = Math.max(...containers.map(item => item.y + item.h), INITIAL_NOTE.y + INITIAL_NOTE.h);
+  const minX = Math.min(...containers.map(item => item.x), dom.note.x);
+  const minY = Math.min(...containers.map(item => item.y), dom.note.y);
+  const maxX = Math.max(...containers.map(item => item.x + item.w), dom.note.x + dom.note.w);
+  const maxY = Math.max(...containers.map(item => item.y + item.h), dom.note.y + dom.note.h);
   const board = doc.boards[0];
   const ink = doc.drawing.find(item => item.id === INITIAL_INK.id);
+  const beforeBoard = arrangeBeforeDom?.containers.find(item => item?.id === BOARD_KEY);
+  const afterBoard = containers.find(item => item.id === BOARD_KEY);
   const districtEntries = Object.entries(doc.layout).filter(([key]) => key.startsWith('district:'));
   const membershipsPreserved = WORKSPACES.every(workspace =>
     doc.layout[workspace.path]?.d === INITIAL_LAYOUT[workspace.path].d);
+  const laneXs = [];
+  for (const container of containers) {
+    if (!laneXs.some(x => close(x, container.x))) laneXs.push(container.x);
+  }
+  const boardDx = afterBoard.x - beforeBoard.x;
+  const boardDy = afterBoard.y - beforeBoard.y;
+  const inkDx = dom.ink.x - arrangeBeforeDom.ink.x;
+  const inkDy = dom.ink.y - arrangeBeforeDom.ink.y;
   return {
+    domComplete,
     containerCount: containers.length,
-    laneCount: new Set(containers.map(item => item.x)).size,
+    laneCount: laneXs.length,
     bounds: { width: maxX - minX, height: maxY - minY, aspect: (maxX - minX) / (maxY - minY) },
     collisions,
     rowsAligned,
@@ -145,10 +187,14 @@ function collectReport(doc) {
     districtGeometryPersisted: districtEntries.length === GROUPS.length,
     boardMoved: board.x !== INITIAL_BOARD.x || board.y !== INITIAL_BOARD.y,
     boardCompacted: board.w < INITIAL_BOARD.w && board.h < INITIAL_BOARD.h,
+    domBoardMoved: !close(afterBoard.x, beforeBoard.x) || !close(afterBoard.y, beforeBoard.y),
+    domBoardCompacted: afterBoard.w < beforeBoard.w - 2 && afterBoard.h < beforeBoard.h - 2,
     boardPosition: { x: board.x, y: board.y, w: board.w, h: board.h },
     noteUnchanged: doc.notes[0].x === INITIAL_NOTE.x && doc.notes[0].y === INITIAL_NOTE.y,
+    domNoteUnchanged: close(dom.note.x, arrangeBeforeDom.note.x) && close(dom.note.y, arrangeBeforeDom.note.y),
     inkCarried: Math.round(ink.x - INITIAL_INK.x) === Math.round(board.x - INITIAL_BOARD.x)
       && Math.round(ink.y - INITIAL_INK.y) === Math.round(board.y - INITIAL_BOARD.y),
+    domInkCarried: close(inkDx, boardDx, 4) && close(inkDy, boardDy, 4),
     performance: {
       syncMs: arrangePerformance.syncMs,
       firstPaintMs: arrangePerformance.firstPaintMs,
@@ -174,20 +220,59 @@ function LayoutQualityCanvas() {
   const focusRef = useRef(() => {});
   const actionsRef = useRef({});
   const arrangedRef = useRef(false);
-  const expanded = useMemo(() => new Set(), []);
+  const [fixtureWorkspaces, setFixtureWorkspaces] = useState(WORKSPACES);
+  const [fixtureSessions, setFixtureSessions] = useState(SESSIONS_BY_KEY);
+  const [expanded, setExpanded] = useState(() => new Set());
+  const growthBeforeRef = useRef(null);
+
+  const growArrangedDistrict = useCallback(() => {
+    const before = domSnapshot();
+    const lanes = new Map();
+    for (const container of before.containers.filter(item => item?.id.startsWith('district:'))) {
+      const key = Math.round(container.x);
+      lanes.set(key, [...(lanes.get(key) || []), container]);
+    }
+    const lane = [...lanes.values()]
+      .map(items => items.sort((a, b) => a.y - b.y))
+      .find(items => items.length >= 2);
+    if (!lane) { probe.growthStatus = 'fail'; return false; }
+    const targetId = lane[0].id;
+    const membership = targetId.slice('district:'.length);
+    const targets = fixtureWorkspaces.filter(workspace => doc.layout[workspace.path]?.d === membership);
+    const additions = {};
+    const nextWorkspaces = fixtureWorkspaces.map(workspace => {
+      if (!targets.includes(workspace)) return workspace;
+      const keys = Array.from({ length: 8 }, (_, index) => `codex:growth-${membership}-${workspace.path}-${index}`);
+      keys.forEach(key => { additions[key] = { ...SESSIONS_BY_KEY[workspace.visibleKeys[0]], key, cwd: workspace.path }; });
+      return { ...workspace, visibleKeys: [...workspace.visibleKeys, ...keys], sessionKeys: [...workspace.sessionKeys, ...keys] };
+    });
+    growthBeforeRef.current = { snapshot: before, targetId, laneIds: lane.map(item => item.id) };
+    probe.growthStatus = 'growing';
+    setFixtureSessions(current => ({ ...current, ...additions }));
+    setExpanded(new Set(targets.map(workspace => workspace.path)));
+    setFixtureWorkspaces(nextWorkspaces);
+    return true;
+  }, [doc.layout, fixtureWorkspaces]);
+  probe.growArrangedDistrict = growArrangedDistrict;
 
   const arrange = useCallback(() => {
     const target = Object.fromEntries(tidyLayoutEntries(store.get().layout).map(({ path, ...entry }) => [path, entry]));
     longTaskObserver?.takeRecords();
     Object.assign(arrangePerformance, { syncMs: null, firstPaintMs: null, longTasks: [] });
     const started = performance.now();
+    arrangeBeforeDom = domSnapshot();
+    const beforeBoardStyle = arrangeBeforeDom.boardStyle;
     probe.status = 'arranging';
     const applied = actionsRef.current.applyArrange?.(target);
     arrangePerformance.syncMs = performance.now() - started;
     if (!applied) { probe.status = 'fail'; return; }
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      arrangePerformance.firstPaintMs = performance.now() - started;
-    }));
+    const observeCommittedDom = () => {
+      const current = domSnapshot();
+      if (current.boardStyle && current.boardStyle !== beforeBoardStyle) {
+        arrangePerformance.firstPaintMs = performance.now() - started;
+      } else if (performance.now() - started <= 100) requestAnimationFrame(observeCommittedDom);
+    };
+    requestAnimationFrame(observeCommittedDom);
     arrangedRef.current = true;
     toast('已按活跃度整理街区与画板', 'ok', { label: '撤销', onClick: () => store.undo() });
     setTimeout(() => focusRef.current(null), 40);
@@ -207,9 +292,11 @@ function LayoutQualityCanvas() {
     if (!arrangedRef.current) return undefined;
     const timer = setTimeout(() => {
       const report = collectReport(store.get());
-      const pass = report.collisions.length === 0 && report.rowsAligned && report.membershipsPreserved
+      const pass = report.domComplete && report.collisions.length === 0 && report.rowsAligned && report.membershipsPreserved
         && report.districtGeometryPersisted && report.boardMoved && report.boardCompacted
-        && report.noteUnchanged && report.inkCarried && report.laneCount >= 2 && report.laneCount <= 4
+        && report.domBoardMoved && report.domBoardCompacted
+        && report.noteUnchanged && report.domNoteUnchanged && report.inkCarried && report.domInkCarried
+        && report.laneCount >= 2 && report.laneCount <= 4
         && report.bounds.aspect >= 1.2 && report.bounds.aspect <= 2.2
         && report.performance.syncMs <= 50 && report.performance.firstPaintMs <= 100
         && report.performance.longTaskSupported && report.performance.longTasks.filter(duration => duration >= 50).length === 0;
@@ -220,6 +307,38 @@ function LayoutQualityCanvas() {
     return () => clearTimeout(timer);
   }, [doc.seq, store]);
 
+  useEffect(() => {
+    if (probe.growthStatus !== 'growing') return undefined;
+    const timer = setTimeout(() => {
+      const before = growthBeforeRef.current;
+      const after = domSnapshot();
+      const targetBefore = before.snapshot.containers.find(item => item.id === before.targetId);
+      const targetAfter = after.containers.find(item => item.id === before.targetId);
+      const followerMoved = before.laneIds.slice(1).some(id => {
+        const previous = before.snapshot.containers.find(item => item.id === id);
+        const current = after.containers.find(item => item.id === id);
+        return current.y > previous.y + 2;
+      });
+      const collisions = [];
+      for (let left = 0; left < after.containers.length; left++) {
+        for (let right = left + 1; right < after.containers.length; right++) {
+          if (rectsOverlap(after.containers[left], after.containers[right])) {
+            collisions.push([after.containers[left].id, after.containers[right].id]);
+          }
+        }
+      }
+      probe.growthReport = {
+        targetId: before.targetId,
+        targetGrew: targetAfter.h > targetBefore.h + 2,
+        followerMoved,
+        collisions,
+      };
+      probe.growthReport.pass = probe.growthReport.targetGrew && followerMoved && collisions.length === 0;
+      probe.growthStatus = probe.growthReport.pass ? 'complete' : 'fail';
+    }, 120);
+    return () => clearTimeout(timer);
+  }, [fixtureWorkspaces, expanded]);
+
   const onMoveNode = useCallback(entries => store.mutate(current => {
     const layout = { ...current.layout };
     for (const entry of entries || []) layout[entry.path] = { ...layout[entry.path], ...entry };
@@ -228,7 +347,7 @@ function LayoutQualityCanvas() {
 
   return h('div', { 'data-layout-quality': 'true', style: { position: 'fixed', inset: 0 } },
     h(FlowCanvas, {
-      workspaces: WORKSPACES, sessionsByKey: SESSIONS_BY_KEY, edges: [], layout: doc.layout,
+      workspaces: fixtureWorkspaces, sessionsByKey: fixtureSessions, edges: [], layout: doc.layout,
       canvas: doc, store, onMoveNode, onCanvasAction: () => true,
       onRenameSession: () => {}, onRenameWs: () => {}, selectedKey: null, onSelect: () => {},
       onChanged: () => {}, onArrange: arrange, focusRef, actionsRef, expanded, searching: false,
@@ -245,5 +364,6 @@ function LayoutQualityCanvas() {
 
 export function mountLayoutQualityFixture(target) {
   localStorage.setItem('vp', JSON.stringify({ x: 70, y: 90, zoom: 0.18 }));
+  probe.domSnapshot = domSnapshot;
   createRoot(target).render(h(LayoutQualityCanvas));
 }

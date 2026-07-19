@@ -16,7 +16,7 @@ import SessionNode from './SessionNode.jsx';
 import DistrictNode from './DistrictNode.jsx';
 import BoardNode, { BOARD_COLORS } from './BoardNode.jsx';
 import NoteNode from './NoteNode.jsx';
-import { arrangedSceneGeometry, buildGraph, PAD, resizedContainerChildren } from './layout.js';
+import { arrangedSceneGeometry, buildGraph, PAD, persistedContainerNodes, resizedContainerChildren } from './layout.js';
 import { sessionMenu, workspaceMenu, districtMenu, boardMenu, noteMenu, drawingMenu, paneMenu, edgeMenu, deleteBoardFlow, deleteNoteFlow } from './menus.jsx';
 import { connectionDrop, describeEdge, EDGE_META, syncHandleHitArea } from './connections.js';
 import {
@@ -536,7 +536,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     batchBridgeRef.current?.clear();
   }, []);
   const applyArrange = useCallback(targetLayout => {
-    const before = instRef.current?.getNodes() || built.nodes;
+    const before = persistedContainerNodes(instRef.current?.getNodes() || built.nodes, layout, canvas.boards);
     const after = buildGraph(workspaces, sessionsByKey, targetLayout, canvas.boards, edges, expanded, searching, { reflowBoards: true });
     const moves = planBatchCarry(before, after.nodes, aliveDrawing());
     const arranged = arrangedSceneGeometry(after.nodes, targetLayout);
