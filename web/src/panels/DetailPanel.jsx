@@ -1,8 +1,8 @@
 /**
  * [INPUT]: 依赖 react、api 的会话详情/动作接口、util 的展示函数、ui 的 Icon/toast/InlineEdit、menus 的 deleteSessionFlow、HandoffLaunchChoices 的双工具接班入口
- * [OUTPUT]: 对外提供 DetailPanel 组件：首屏=标题+一键续开+聊了什么+最后停在哪里（尾部独立摘录），
- *           次级=接力/运行实例/元信息，删除收底；错误态自动退避重连
- * [POS]: panels 的右侧行动面板——画布是地图，这里是扳机。信息层次铁律：内容先于按钮，按钮先于元数据
+ * [OUTPUT]: 对外提供 DetailPanel 组件：首屏=标题+一键续开+接力/元信息/删除，
+ *           次级=聊了什么+最后停在哪里（尾部独立摘录）+运行实例；错误态自动退避重连
+ * [POS]: panels 的右侧行动面板——画布是地图，这里是扳机。接力、定位与清理入口固定在内容长文之前
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
  */
 import React, { useEffect, useMemo, useState } from 'react';
@@ -182,50 +182,7 @@ export default function DetailPanel({ width = 400, sessionKey, onClose, onCollap
             </button>
           </div>
 
-          {/* ===== 这会话聊了什么：有摘要给结论，没摘要给原文摘录托底 ===== */}
-          <Section title="CONTEXT · 聊了什么">
-            {s.summary ? (
-              <>
-                <div style={{ fontSize: 12.5, color: 'var(--ink-dim)', lineHeight: 1.7 }}>
-                  {s.summary.summary || s.summary.title}
-                  <div style={{ display: 'flex', gap: 5, marginTop: 7, flexWrap: 'wrap' }}>
-                    {(s.summary.tags || []).map(t => <span key={t} className="chip on" style={{ cursor: 'default' }}>{t}</span>)}
-                    {s.summary.outcome && <span className="chip" style={{ cursor: 'default' }}>{s.summary.outcome}</span>}
-                  </div>
-                </div>
-                <DigestView text={s.digest} startCollapsed />
-              </>
-            ) : (
-              <>
-                <div style={{ fontSize: 11.5, color: 'var(--ink-faint)' }}>还没有 AI 摘要——先看从会话原文抽出的对白与行动轨迹：</div>
-                <DigestView text={s.digest} />
-              </>
-            )}
-            <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
-              <button className="btn" disabled={busy}
-                onClick={() => run('summarize', () => api.summarize(s.key), '摘要已生成')}>
-                {busy === 'summarize' ? '◈ 蒸馏中…' : <><Icon name="spark" /> {s.summary ? '更新摘要' : '生成摘要'}</>}
-              </button>
-              <button className="btn" disabled={busy} title="AI 只给这一个会话精工起名（不覆盖你手动起的名）"
-                onClick={() => run('ai-name', () => api.aiName(s.key), 'AI 已起名')}>
-                {busy === 'ai-name' ? '✎ 起名中…' : <><Icon name="tag" /> AI 起名</>}
-              </button>
-            </div>
-          </Section>
-
-          {/* ===== 会话落点：独立读取文件尾，默认从最后 14 行看起，不被开场摘录截断 ===== */}
-          <Section title="STOP · 最后停在哪里">
-            <div style={{ fontSize: 11.5, color: 'var(--ink-faint)', lineHeight: 1.6 }}>
-              最近一次活动于 {relTime(s.updatedAt)}。下面按时间顺序保留会话停止前的对白、工具动作与报错：
-            </div>
-            {s.endingDigest ? (
-              <DigestView text={s.endingDigest} fromEnd />
-            ) : (
-              <div style={{ marginTop: 8, fontSize: 12, color: 'var(--ink-faint)' }}>文件尾没有可展示的会话事件。</div>
-            )}
-          </Section>
-
-          {/* ===== 接力：交棒给下一个 Agent ===== */}
+          {/* ===== 顶部行动区：接力、元信息与删除优先于长内容 ===== */}
           <Section title="HANDOFF · 接力提示词">
             {s.handoff ? (
               <pre style={{
@@ -271,21 +228,6 @@ export default function DetailPanel({ width = 400, sessionKey, onClose, onCollap
             </div>
           </Section>
 
-          {/* ===== 自动化聚合卡：每一次运行都有据可查 ===== */}
-          {s.runs > 1 && s.runFiles?.length > 0 && (
-            <Section title={`RUNS · ${s.runs} 次运行实例`}>
-              <div className="mono" style={{ fontSize: 10.5, color: 'var(--ink-dim)', lineHeight: 1.9, maxHeight: 150, overflowY: 'auto' }}>
-                {[...s.runFiles].reverse().map((f, i) => (
-                  <div key={f} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
-                    title={f}>
-                    {i === 0 ? '▸ ' : '· '}{f.split('/').pop().replace('.jsonl', '')}{i === 0 ? '（此卡代表）' : ''}
-                  </div>
-                ))}
-              </div>
-            </Section>
-          )}
-
-          {/* ===== 元信息：次级细节居后 ===== */}
           <Section title="DETAIL · 元信息">
             <Row label="路径">
               <span style={{ cursor: 'pointer' }} title="在 Finder 打开"
@@ -303,13 +245,70 @@ export default function DetailPanel({ width = 400, sessionKey, onClose, onCollap
             </Row>
           </Section>
 
-          {/* ===== 危险区：删除 = 移入废纸篓（自绘确认，活跃门禁二次确认） ===== */}
           <Section title="DANGER · 删除">
             <button className="btn danger" disabled={busy}
               onClick={e => deleteSessionFlow(s, { x: e.clientX - 270, y: e.clientY - 130 }, () => { onChanged?.(); onClose(); })}>
               <Icon name="trash" /> 删除此会话
             </button>
           </Section>
+
+          {/* ===== 这会话聊了什么：有摘要给结论，没摘要给原文摘录托底 ===== */}
+          <Section title="CONTEXT · 聊了什么">
+            {s.summary ? (
+              <>
+                <div style={{ fontSize: 12.5, color: 'var(--ink-dim)', lineHeight: 1.7 }}>
+                  {s.summary.summary || s.summary.title}
+                  <div style={{ display: 'flex', gap: 5, marginTop: 7, flexWrap: 'wrap' }}>
+                    {(s.summary.tags || []).map(t => <span key={t} className="chip on" style={{ cursor: 'default' }}>{t}</span>)}
+                    {s.summary.outcome && <span className="chip" style={{ cursor: 'default' }}>{s.summary.outcome}</span>}
+                  </div>
+                </div>
+                <DigestView text={s.digest} startCollapsed />
+              </>
+            ) : (
+              <>
+                <div style={{ fontSize: 11.5, color: 'var(--ink-faint)' }}>还没有 AI 摘要——先看从会话原文抽出的对白与行动轨迹：</div>
+                <DigestView text={s.digest} />
+              </>
+            )}
+            <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+              <button className="btn" disabled={busy}
+                onClick={() => run('summarize', () => api.summarize(s.key), '摘要已生成')}>
+                {busy === 'summarize' ? '◈ 蒸馏中…' : <><Icon name="spark" /> {s.summary ? '更新摘要' : '生成摘要'}</>}
+              </button>
+              <button className="btn" disabled={busy} title="AI 只给这一个会话精工起名（不覆盖你手动起的名）"
+                onClick={() => run('ai-name', () => api.aiName(s.key), 'AI 已起名')}>
+                {busy === 'ai-name' ? '✎ 起名中…' : <><Icon name="tag" /> AI 起名</>}
+              </button>
+            </div>
+          </Section>
+
+          {/* ===== 会话落点：独立读取文件尾，默认从最后 14 行看起，不被开场摘录截断 ===== */}
+          <Section title="STOP · 最后停在哪里">
+            <div style={{ fontSize: 11.5, color: 'var(--ink-faint)', lineHeight: 1.6 }}>
+              最近一次活动于 {relTime(s.updatedAt)}。下面按时间顺序保留会话停止前的对白、工具动作与报错：
+            </div>
+            {s.endingDigest ? (
+              <DigestView text={s.endingDigest} fromEnd />
+            ) : (
+              <div style={{ marginTop: 8, fontSize: 12, color: 'var(--ink-faint)' }}>文件尾没有可展示的会话事件。</div>
+            )}
+          </Section>
+
+          {/* ===== 自动化聚合卡：每一次运行都有据可查 ===== */}
+          {s.runs > 1 && s.runFiles?.length > 0 && (
+            <Section title={`RUNS · ${s.runs} 次运行实例`}>
+              <div className="mono" style={{ fontSize: 10.5, color: 'var(--ink-dim)', lineHeight: 1.9, maxHeight: 150, overflowY: 'auto' }}>
+                {[...s.runFiles].reverse().map((f, i) => (
+                  <div key={f} style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+                    title={f}>
+                    {i === 0 ? '▸ ' : '· '}{f.split('/').pop().replace('.jsonl', '')}{i === 0 ? '（此卡代表）' : ''}
+                  </div>
+                ))}
+              </div>
+            </Section>
+          )}
+
         </>
       )}
     </div>
