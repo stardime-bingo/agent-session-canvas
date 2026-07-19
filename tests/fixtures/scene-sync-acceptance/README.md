@@ -7,7 +7,7 @@
 - 两个独立 browser context：干净标签静默采纳远端 LWW；脏本地拒绝远端覆盖，随后自己的后台冲刷成为最后写并让双方收敛。
 - daemon 暂停/恢复：浏览器输入继续同步可见，状态点进入 `dirty/error`；同一临时 data dir 重启后无限退避自动追平并回到 `saved`。
 - pagehide：既测 300ms 防抖前立即关闭，也测普通 flush 已在飞后再次输入最终文字并关闭；`flushNow` 以 fetch keepalive 发送最新 clientSeq，旧请求不得倒灌，重开后最终文字仍在。
-- IndexedDB 图片反例：A 先上传资产但场景被拒，B 的 LWW 空图写入真实裁掉服务端孤儿，随后 daemon 停止、A 关页；重开必须从 IndexedDB 找回图片正文，重新按“资产先行→场景确认”落盘，并在确认后清掉恢复资产。
+- 图片深交错反例：A 的图片场景先成功并清本地恢复正文，A 再变 dirty；B 从该场景出发删除图片并成为空图 LWW，A 拒绝远端覆盖。普通 LWW 写必须保守留住内容寻址正文；随后 daemon 停止、A 关页，重开必须在不依赖已清 IndexedDB 的情况下恢复 A 图片并追平。
 
 运行：
 

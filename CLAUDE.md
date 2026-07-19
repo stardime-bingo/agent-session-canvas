@@ -53,10 +53,10 @@ npm run scan         # 仅扫描，输出统计
   唯一写入口 mutate（同步、可 coalesce 进全画布 undo/redo，容量 100）；后台防抖 300ms 全量快照冲刷，
   失败无限退避（1s→15s 封顶）永不阻塞输入，角落只亮"未同步"点；SSE 回声按 writerId 去重，本地干净才采纳（LWW）
 - **场景快照律 (server/scene.mjs)**: POST /api/scene 全量快照 + tmp/rename 原子写 + 内存 rev + SSE 广播，canvas mtime 提供跨重启更新时间；同 writer 的 clientSeq 单调门拒绝 pagehide 新快照之后才落地的旧在飞请求；
-  图片资产内容寻址、同 ID 不可变、资产先行引用后到、孤儿随场景写顺手裁剪；轻校验挡结构性垃圾，
+  图片资产内容寻址、同 ID 不可变、资产先行引用后到；普通 LWW 写保守保留未引用正文，因为服务端看不到其他脏标签仍持有的引用，破坏性 GC 必须另走显式保守策略；轻校验挡结构性垃圾，
   不做逐字节公证——磁盘格式与 v17 完全兼容（canvas/layout/drawing-files.json），备份与回滚零迁移
 - **关页大载荷恢复律 (web/src/scene-recovery.js)**: pagehide 先把不含图片正文的最终逻辑场景同步写入同源 localStorage，再尽力 keepalive；
-  未确认图片单独暂存在 IndexedDB。仅 dirty/saving/error 页保存恢复，saved 页服从服务端；重开只回放比服务端 canvas mtime 更新的记录，资产上传不等于场景确认，只有对应场景成功回执后才清恢复正文，避免 64KB keepalive 上限或双 writer 孤儿裁剪造成最终编辑丢失
+  未确认图片单独暂存在 IndexedDB。仅 dirty/saving/error 页保存恢复，saved 页服从服务端；重开只回放比服务端 canvas mtime 更新的记录，资产上传不等于场景确认，只有对应场景成功回执后才清恢复正文；服务端同时保守留存内容寻址资产，避免 64KB keepalive 上限或双 writer 深交错造成最终编辑丢失
 - **自研墨迹层 (ink.js + InkLayer + InkTools)**: 笔迹/矩形/椭圆/箭头/文字全部自写——落笔即场景文档元素、
   拖画即 coalesce mutate（一笔=一步 undo）、收笔即定稿（意外小形状判废），文字就地 textarea 击键直写；
   渲染=React 直出 SVG（沉层负 z 垫底/浮层高 z 盖顶），与卡片共用唯一 RF 相机——

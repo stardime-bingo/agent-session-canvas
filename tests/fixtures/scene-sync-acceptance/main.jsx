@@ -72,6 +72,10 @@ function AcceptanceBody({ store }) {
       drawingFiles: { ...current.drawingFiles, [IMAGE_FILE_ID]: IMAGE_FILE },
     }));
   }, [store]);
+  const removeImage = useCallback(() => store.mutate(current => ({
+    ...current,
+    drawing: current.drawing.filter(item => item.id !== IMAGE_ID),
+  })), [store]);
 
   useEffect(() => subscribeEvents(event => {
     if (event.type !== 'scene-updated' || event.writerId === WRITER_ID) return;
@@ -102,6 +106,7 @@ function AcceptanceBody({ store }) {
     writerId: WRITER_ID,
     edit,
     addImage,
+    removeImage,
     recoveryFilePresent: async () => Boolean((await loadRecoveryFiles([IMAGE_FILE_ID]))[IMAGE_FILE_ID]),
     flushNow: () => store.flushNow(),
     snapshot: () => ({

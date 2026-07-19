@@ -1,6 +1,7 @@
 /**
  * [INPUT]: 依赖 store.mjs 的 readJson/writeJson 原子原语，drawing-files.mjs 的资产规范化与引用收集
- * [OUTPUT]: 对外提供 createScene(dataDir) → { read, write, addFiles, rev }——以 canvas mtime 暴露更新时间的 LWW 快照仓
+ * [OUTPUT]: 对外提供 createScene(dataDir) → { read, write, addFiles, rev }——以 canvas mtime 暴露更新时间的 LWW 快照仓；
+ *           内容寻址图片在普通 LWW 写入时保守保留，避免其他脏标签仍引用的正文被破坏性回收
  * [POS]: 画布持久化唯一层。全量快照 + 原子写 + 内存 rev；无锁、无 journal、无 CAS——
  *        单写者本地工具的正确答案是"文件永远是完整快照"，不是两阶段提交
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -84,12 +85,8 @@ export function createScene(dataDir) {
       if (missing.length) throw new Error(`绘图引用的图片不在仓内: ${missing[0]}`);
       writeJson(canvasFile, { edges: canvas.edges, notes: canvas.notes, boards: canvas.boards, drawing: canvas.drawing });
       writeJson(layoutFile, layout);
-      // 孤儿图片顺手裁剪：只留仍被引用的资产，失败不影响本次提交
-      const used = new Set(drawingFileIds(canvas.drawing));
-      const pruned = Object.fromEntries(Object.entries(files).filter(([id]) => used.has(id)));
-      if (Object.keys(pruned).length !== Object.keys(files).length) {
-        try { writeJson(filesFile, pruned); } catch { /* 孤儿资产无害，下次再裁 */ }
-      }
+      // 不在普通 LWW 写入中回收未引用资产：服务端看不到其他标签尚未落盘的脏场景，
+      // 立即裁剪会让“脏本地拒绝远端覆盖”随后永远缺图。内容寻址孤儿无害，GC 必须另走显式保守策略。
       if (ordered) writerSeq.set(writerId, clientSeq);
       return { rev: ++rev };
     },

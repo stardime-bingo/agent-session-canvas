@@ -16,7 +16,7 @@ scanner.mjs: 扫描编排核心，三层噪音过滤(自噪/子智能体/空壳)
 store.mjs: 持久层，DATA_DIR(可由 AGENT_CANVAS_DATA_DIR 覆盖供隔离测试) + 原子 JSON 读写；扫描缓存进程内常驻，AI 增强(enrich.json)
   以跨进程文件锁包住“读最新值→改→原子写”，避免 daemon 与 backfill CLI 旧快照互相覆盖；JSONL 追加后读尾校验
 scene.mjs: 场景快照仓（LWW）——read/write/addFiles；全量快照 + tmp/rename 原子写 + 内存 rev，canvas mtime 作为跨重启更新时间；
-  同 writer 的 clientSeq 单调门防 pagehide 新快照被旧在飞请求倒灌；资产先行引用后到、同 ID 不可变、孤儿随场景写裁剪；轻校验挡结构性垃圾；磁盘格式与旧版全兼容零迁移
+  同 writer 的 clientSeq 单调门防 pagehide 新快照被旧在飞请求倒灌；资产先行引用后到、同 ID 不可变；普通 LWW 写保守保留未引用正文，避免破坏其他脏标签仍需的资产，GC 只能另走显式保守策略；轻校验挡结构性垃圾；磁盘格式与旧版全兼容零迁移
 drawing-files.mjs: 旧格式图片资产兼容层——规范化、引用收集纯函数与独立原子落盘原语
 launcher.mjs: 终端拉起，COMMANDS 查表构造命令，prompt 走临时文件注入避开引号地狱，Ghostty 优先 Terminal.app 兜底
 llm.mjs: 模型路由层，codex(gpt-5.6-sol)→claude(sonnet 稳定别名)→deepseek(v4-flash) 按序降级；codex exec 用 --ephemeral 防自噪并兼容 -o 文件/stdout 两种最终文本出口；档位 xhigh/high

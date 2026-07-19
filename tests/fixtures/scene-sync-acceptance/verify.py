@@ -346,37 +346,55 @@ def run(browser, base, data_dir, port, server_process):
         assert clean_reopen["text"] == large_text
         assert_clean(diag_g)
 
-        # 图片恢复反例：资产上传后，场景写被拒；另一个 writer 的 LWW 裁掉孤儿，关页时 daemon
-        # 不可达。重开必须从 IndexedDB 找回正文、重新先传资产再提交引用，不能只剩 fileId。
+        # 深交错反例：A 的图片场景先成功（本地 IDB 已清），A 再变 dirty；B 随后以空图成为 LWW。
+        # 普通 scene 写必须保守保留内容寻址正文，否则 A 拒绝远端覆盖后会永久缺图。
         context_h, page_h, diag_h = open_fixture(browser, base)
-        context_i, page_i, diag_i = open_fixture(browser, base)
-        contexts.extend([context_h, context_i])
+        contexts.append(context_h)
         image_writer = page_snapshot(page_h)["writerId"]
-        post_json(base, "/__acceptance/reject-scenes", {"writerId": image_writer, "count": 100})
         files_before = read_health(base)["startedFileWrites"]
         page_h.evaluate("() => window.__SYNC_ACCEPTANCE__.addImage()")
-        image_failed = wait_page(
+        page_h.evaluate("() => window.__SYNC_ACCEPTANCE__.flushNow()")
+        first_image_saved = wait_page(
             page_h,
-            lambda value: value["sync"] == "error" and value["imagePresent"] is True,
-            "image scene fails after asset upload",
+            lambda value: value["sync"] == "saved" and value["imagePresent"] is True,
+            "first image scene saved",
         )
-        wait_until(
-            lambda: read_health(base),
-            lambda health: health["startedFileWrites"] > files_before,
-            "image asset uploaded before rejected scene",
-        )
-        assert page_h.evaluate("() => window.__SYNC_ACCEPTANCE__.recoveryFilePresent()") is True
-
-        # B 的空图场景在 A 重试前成为 LWW，并把尚未引用的服务端资产裁掉。
-        page_i.locator('[data-testid="sync-note"]').fill("image-race-prune")
-        page_i.evaluate("() => window.__SYNC_ACCEPTANCE__.flushNow()")
-        pruned = wait_until(
+        first_image_graph = wait_until(
             lambda: read_graph(base),
-            lambda graph: note_text(graph) == "image-race-prune"
-            and not graph.get("canvas", {}).get("drawingFiles", {}),
-            "other writer prunes orphan image",
+            lambda graph: len(graph.get("canvas", {}).get("drawing", [])) == 1
+            and "sync-acceptance-image-file" in graph.get("canvas", {}).get("drawingFiles", {}),
+            "first image scene and asset persisted",
         )
-        assert not pruned["canvas"]["drawing"]
+        assert read_health(base)["startedFileWrites"] > files_before
+        first_recovery_asset_cleared = not page_h.evaluate(
+            "() => window.__SYNC_ACCEPTANCE__.recoveryFilePresent()"
+        )
+        assert first_recovery_asset_cleared is True
+
+        # A 后续本地编辑必须保持 dirty/error，确保它拒绝 B 的空图 SSE，而不是先静默采纳。
+        post_json(base, "/__acceptance/reject-scenes", {"writerId": image_writer, "count": 100})
+        page_h.locator('[data-testid="sync-note"]').fill("image-local-dirty")
+
+        context_i, page_i, diag_i = open_fixture(browser, base)
+        contexts.append(context_i)
+        assert page_snapshot(page_i)["imagePresent"] is True
+        page_i.evaluate("() => window.__SYNC_ACCEPTANCE__.removeImage()")
+        page_i.locator('[data-testid="sync-note"]').fill("image-race-empty-lww")
+        page_i.evaluate("() => window.__SYNC_ACCEPTANCE__.flushNow()")
+
+        retained = wait_until(
+            lambda: read_graph(base),
+            lambda graph: note_text(graph) == "image-race-empty-lww"
+            and not graph.get("canvas", {}).get("drawing", [])
+            and "sync-acceptance-image-file" in graph.get("canvas", {}).get("drawingFiles", {}),
+            "other writer empty scene retains content-addressed image body",
+        )
+        dirty_image = wait_page(
+            page_h,
+            lambda value: value["sync"] == "error" and value["imagePresent"] is True
+            and value["adoptions"] and value["adoptions"][-1]["accepted"] is False,
+            "dirty image tab rejects empty remote scene",
+        )
         stopped_image_code = stop_server(server_process)
         page_h.close()
 
@@ -452,15 +470,18 @@ def run(browser, base, data_dir, port, server_process):
                 },
                 "serverWriteDelayMs": ready["writeDelayMs"],
                 "imageRecovery": {
-                    "failedSync": image_failed["sync"],
+                    "firstSceneSaved": first_image_saved["sync"] == "saved",
+                    "firstServerDrawingCount": len(first_image_graph["canvas"]["drawing"]),
+                    "localRecoveryAssetClearedAfterFirstScene": first_recovery_asset_cleared,
+                    "dirtyRemoteAdoptionAccepted": dirty_image["adoptions"][-1]["accepted"],
+                    "assetRetainedAfterOtherWriterEmptyScene": (
+                        "sync-acceptance-image-file" in retained["canvas"]["drawingFiles"]
+                    ),
                     "serverStoppedExitCode": stopped_image_code,
                     "recoveryApplied": reopened_image["recovery"]["applied"],
                     "imagePresentAfterReopen": saved_image["imagePresent"],
                     "serverDrawingCount": len(persisted_image["canvas"]["drawing"]),
                     "serverFileIds": sorted(persisted_image["canvas"]["drawingFiles"].keys()),
-                    "recoveryAssetClearedAfterSceneReceipt": not page_j.evaluate(
-                        "() => window.__SYNC_ACCEPTANCE__.recoveryFilePresent()"
-                    ),
                     "expectedInjectedFailureConsoleErrors": len(diag_h["consoleErrors"]),
                     "restartWriteDelayMs": ready_image["writeDelayMs"],
                 },
