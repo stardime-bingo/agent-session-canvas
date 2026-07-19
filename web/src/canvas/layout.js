@@ -49,8 +49,8 @@ export function persistedContainerNodes(nodes, layout, boards) {
     if (!Number.isFinite(saved?.x) || !Number.isFinite(saved?.y)) return node;
     return {
       ...node, position: { x: saved.x, y: saved.y },
-      width: Number.isFinite(saved.w) ? saved.w : node.width,
-      height: Number.isFinite(saved.h) ? saved.h : node.height,
+      width: Math.max(Number.isFinite(saved.w) ? saved.w : 0, node.width ?? node.data?._w ?? 0),
+      height: Math.max(Number.isFinite(saved.h) ? saved.h : 0, node.height ?? node.data?._h ?? 0),
     };
   });
 }

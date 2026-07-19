@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { arrangedSceneGeometry, arrangeFlowBlocks, buildGraph, CARD_GAP, COL_W, GAP_IN, GUTTER, HEADER_H, PAD, packWorkspaces, resizedContainerChildren, resolveContainerOverlaps, tidyLayoutEntries } from '../web/src/canvas/layout.js';
 import { createBatchCarryBridge, planBatchCarry } from '../web/src/canvas/container-carry.js';
+import { reconcileContainerLayout } from '../web/src/canvas/layout-reconcile.js';
 
 const ws = (path, count = 1) => ({ path, visibleKeys: Array.from({ length: count }, (_, i) => `${path}:${i}`) });
 const heightOf = item => HEADER_H + item.visibleKeys.length * (62 + CARD_GAP) + 8;
@@ -225,6 +226,40 @@ test('persisted intelligent tidy geometry still yields when an earlier district 
 
   assert.equal(districtA.position.y, 0);
   assert.ok(districtB.position.y >= districtA.position.y + districtA.height + GUTTER);
+});
+
+test('growth reconciliation keeps live dimensions so expanded-area ink follows the next arrange', () => {
+  const doc = {
+    layout: { 'district:A': { x: 0, y: 0, w: 600, h: 300 } }, boards: [],
+    drawing: [{ id: 'expanded-ink', x: 20, y: 610, width: 20, height: 20 }],
+  };
+  const nodes = [{
+    id: 'district:A', type: 'district', position: { x: 100, y: 0 }, width: 600, height: 722,
+    data: { _w: 600, _h: 722 },
+  }];
+  const result = reconcileContainerLayout(doc, nodes);
+
+  assert.deepEqual(result.moves[0].anchorIds, ['expanded-ink']);
+  assert.equal(result.doc.drawing[0].x, 120);
+});
+
+test('growth reconciliation atomically moves a displaced follower and its ink', () => {
+  const doc = {
+    layout: {
+      'district:A': { x: 0, y: 0, w: 600, h: 300 },
+      'district:B': { x: 0, y: 500, w: 600, h: 300 },
+    },
+    boards: [], drawing: [{ id: 'follower-ink', x: 20, y: 520, width: 20, height: 20 }],
+  };
+  const nodes = [
+    { id: 'district:A', type: 'district', position: { x: 0, y: 0 }, width: 600, height: 722, data: { _w: 600, _h: 722 } },
+    { id: 'district:B', type: 'district', position: { x: 0, y: 892 }, width: 600, height: 300, data: { _w: 600, _h: 300 } },
+  ];
+  const result = reconcileContainerLayout(doc, nodes);
+
+  assert.equal(result.doc.layout['district:B'].y, 892);
+  assert.deepEqual(result.moves.find(move => move.containerId === 'district:B').anchorIds, ['follower-ink']);
+  assert.equal(result.doc.drawing[0].y, 912);
 });
 
 test('整理桥先以逆向 delta 钉回旧像素，release 后只撤位移不提前撤动画类', () => {

@@ -1,10 +1,10 @@
 /**
  * [INPUT]: 依赖 @xyflow/react、scene-store 真相源、ink.js/InkLayer/InkTools 自研墨迹三件套、
- *          layout 纯布局内核、五种自定义节点、menus 菜单构建器、connections 连接点内核、container-carry 承载规划与 DOM 桥
+ *          layout 纯布局内核与只读增长投影桥、五种自定义节点、menus 菜单构建器、connections 连接点内核、container-carry 承载规划与 DOM 桥
  * [OUTPUT]: 对外提供 FlowCanvas 组件：统一容器模型、弹性生长、拖放改归属、三系统边+手动边、
  *           Figma 式框选/平移/触控板手势、滚轮双模、容器缩放定桩、落空连线选择、缩放感知连接点、
  *           自研墨迹（直写文档、框选/多选/复制、缩放/旋转、样式岛、大底板自动沉层）、顶栏可见快捷键，
- *           容器承载=乐观拖动+一次 mutate、街区/画板/随行墨迹智能整理动效、普通模式绘图命中与删除治理
+ *           容器承载=乐观拖动+一次 mutate、增长避碰在下一次输入前携墨迹落定、街区/画板/随行墨迹智能整理动效、普通模式绘图命中与删除治理
  * [POS]: canvas 的画布引擎总装。单一世界单一相机：墨迹与卡片同住 RF viewport，
  *        文档变更到像素可见=一次 React commit——没有导出、没有帧、没有交接
  * [PROTOCOL]: 变更时更新此头部，然后检查 CLAUDE.md
@@ -17,6 +17,7 @@ import DistrictNode from './DistrictNode.jsx';
 import BoardNode, { BOARD_COLORS } from './BoardNode.jsx';
 import NoteNode from './NoteNode.jsx';
 import { arrangedSceneGeometry, buildGraph, PAD, persistedContainerNodes, resizedContainerChildren } from './layout.js';
+import { stageContainerLayoutProjection } from './layout-reconcile.js';
 import { sessionMenu, workspaceMenu, districtMenu, boardMenu, noteMenu, drawingMenu, paneMenu, edgeMenu, deleteBoardFlow, deleteNoteFlow } from './menus.jsx';
 import { connectionDrop, describeEdge, EDGE_META, syncHandleHitArea } from './connections.js';
 import {
@@ -34,7 +35,6 @@ const INK_TOOL_KEYS = Object.freeze({ freedraw: 'P', rectangle: 'R', ellipse: 'O
 
 const MIN_ZOOM = 0.1, MAX_ZOOM = 1.8;   // 缩放界限唯一真相：RF props 与滚轮内核共用
 const containerKey = id => id.startsWith('district:') ? id.slice(9) : id;
-
 export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, canvas, store, onMoveNode, onCanvasAction, onRenameSession, onRenameWs, selectedKey, onSelect, onChanged, onArrange, focusRef, actionsRef, expanded, searching, onToggleExpand, frameTestProbeRef }) {
   const instRef = useRef(null);
   const rootRef = useRef(null);
@@ -47,6 +47,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   const batchBridgeRef = useRef(null);              // 整理多 delta 桥
   const carryRef = useRef(null);                    // { nodeId, x, y, anchorIds }
   const dragStartRef = useRef(new Map());
+  const projectionRef = useRef(null), projectionCommitRef = useRef(() => store.get());
 
   // ---- 滚轮双模（普通态）：触控板=RF 原生平移，鼠标滚轮=光标锚定缩放；三态钮记忆 ----
   const [wheelMode, setWheelMode] = useState(() =>
@@ -80,9 +81,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     root.addEventListener('wheel', onWheel, { capture: true, passive: false });
     return () => root.removeEventListener('wheel', onWheel, { capture: true });
   }, []);
-
-  const aliveDrawing = useCallback(() => committedDrawingElements(store.get().drawing), [store]);
-
+  const aliveDrawing = useCallback(() => committedDrawingElements(projectionRef.current?.drawing || store.get().drawing), [store]);
   // ---- 普通/选择模式的绘图命中：视觉最上层者赢；空心形状中空区默认穿透，选择模式扩为热区 ----
   const hitDrawingAt = useCallback((fx, fy, planes = 'above', includeHollow = false) => {
     const els = aliveDrawing();
@@ -96,36 +95,35 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   // ---- 自研墨迹交互层 ----
   const ink = useInkTools({
     store, instRef, rootRef, hitAt: hitDrawingAt,
+    beforeInput: () => projectionCommitRef.current(),
     wheelModeRef, minZoom: MIN_ZOOM, maxZoom: MAX_ZOOM,
   });
   const inkArmed = ink.tool !== 'none';
-
   const mutateDrawing = useCallback((fn, options) => {
     store.mutate(doc => {
       const drawing = fn(doc.drawing);
       return drawing === doc.drawing ? doc : { ...doc, drawing };
     }, options);
   }, [store]);
-
   const built = useMemo(
     () => buildGraph(workspaces, sessionsByKey, layout, canvas.boards, edges, expanded, searching),
     [workspaces, sessionsByKey, layout, canvas.boards, edges, expanded, searching],
   );
-
+  const projectedScene = stageContainerLayoutProjection(
+    canvas, built.nodes, layout, canvas.boards, store, projectionRef, projectionCommitRef);
+  const commitLayoutProjection = useCallback(() => projectionCommitRef.current(), []);
   const drawingHitFromEvent = (e, planes) => {
     if (inkArmed) return null;   // armed 期间命中由捕获层负责
     if (e.target?.closest?.(DRAWING_HIT_BLOCK)) return null;
     const p = instRef.current?.screenToFlowPosition({ x: e.clientX, y: e.clientY });
     return p ? hitDrawingAt(p.x, p.y, planes) : null;
   };
-
   // 普通模式点中墨迹 → 一步进入选择模式并选中它
   const enterInkSelection = hit => {
     ink.setTool('select');
     ink.setSelectedId(hit.id);
     toast('已选中绘图——可拖动、缩放、旋转，Shift 加选');
   };
-
   const drawingMenuItems = hit => drawingMenu(hit, {
     enterSelection: enterInkSelection, mutateDrawing, store,
   });
@@ -151,10 +149,10 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
 
   const onPaneClick = useCallback(e => {
     const hit = drawingHitFromEvent(e, 'all');   // 纯空地：浮层批注优先，其次沉层底板
-    if (hit) return enterInkSelection(hit);
+    if (hit) { commitLayoutProjection(); return enterInkSelection(hit); }
     onSelect(null);
     setMenu(null);
-  }, [onSelect, inkArmed, hitDrawingAt]);   // eslint-disable-line react-hooks/exhaustive-deps
+  }, [onSelect, inkArmed, hitDrawingAt, commitLayoutProjection]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   //  节点装配：便签自由漂浮；选中态交 React Flow 原生管理
   const allNodes = useMemo(() => [
@@ -422,6 +420,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
   //  容器承载：拖动乐观进行（墨迹 DOM 桥跟随），松手一次 mutate——渲染同步跟上，桥即撤
   // ============================================================
   const onNodeDragStart = useCallback((_, node) => {
+    commitLayoutProjection();
     if (node.type !== 'district' && node.type !== 'board') return;
     const containers = (instRef.current?.getNodes() || [])
       .filter(c => c.type === 'district' || c.type === 'board')
@@ -433,7 +432,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       dragBridgeRef.current ||= createInkDragBridge(rootRef.current);
       dragBridgeRef.current.mark(anchorIds);
     }
-  }, [aliveDrawing]);
+  }, [aliveDrawing, commitLayoutProjection]);
 
   const setDropHi = useCallback(id => {
     if (dropHiRef.current === id) return;
@@ -536,9 +535,10 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     batchBridgeRef.current?.clear();
   }, []);
   const applyArrange = useCallback(targetLayout => {
-    const before = persistedContainerNodes(instRef.current?.getNodes() || built.nodes, layout, canvas.boards);
-    const after = buildGraph(workspaces, sessionsByKey, targetLayout, canvas.boards, edges, expanded, searching, { reflowBoards: true });
-    const moves = planBatchCarry(before, after.nodes, aliveDrawing());
+    const current = commitLayoutProjection();
+    const before = persistedContainerNodes(instRef.current?.getNodes() || built.nodes, current.layout, current.boards);
+    const after = buildGraph(workspaces, sessionsByKey, targetLayout, current.boards, edges, expanded, searching, { reflowBoards: true });
+    const moves = planBatchCarry(before, after.nodes, committedDrawingElements(current.drawing));
     const arranged = arrangedSceneGeometry(after.nodes, targetLayout);
     rootRef.current?.classList.add('arranging');
     batchBridgeRef.current ||= createBatchCarryBridge(rootRef.current);
@@ -557,7 +557,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       drawing: applyBatchCarry(doc.drawing, moves),
     }));
     return true;
-  }, [built, workspaces, sessionsByKey, canvas.boards, edges, expanded, searching, store, aliveDrawing]);
+  }, [built, workspaces, sessionsByKey, edges, expanded, searching, store, commitLayoutProjection]);
 
   // ---- 就地改名信号、焦点与动作出口 ----
   const clearSelection = useCallback(() => {
@@ -585,9 +585,9 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
 
   const onNodeClick = useCallback((e, node) => {
     const hit = drawingHitFromEvent(e);   // 视觉最上层者赢：描边带上的点击优先归绘图，空心区照常穿透
-    if (hit) return enterInkSelection(hit);
+    if (hit) { commitLayoutProjection(); return enterInkSelection(hit); }
     if (node.type === 'session') onSelect(node.id);
-  }, [onSelect, inkArmed, hitDrawingAt]);   // eslint-disable-line react-hooks/exhaustive-deps
+  }, [onSelect, inkArmed, hitDrawingAt, commitLayoutProjection]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   const onNodeDoubleClick = useCallback((_, node) => {
     if (node.type === 'session' || node.type === 'board' || node.type === 'workspace') {
@@ -703,7 +703,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
     >
       {/* 自研墨迹：与节点共享唯一 viewport transform——沉层垫底、浮层盖顶、选择环随选中 */}
       <InkLayer
-        elements={canvas.drawing}
+        elements={projectedScene.drawing}
         files={canvas.drawingFiles}
         selectedId={ink.selectedId}
         selectedIds={ink.selectedIds}
@@ -759,7 +759,7 @@ export default function FlowCanvas({ workspaces, sessionsByKey, edges, layout, c
       />}
       {/* 小地图墨迹层：缩略图是空间定向工具，区域底板是最有定向价值的地标 */}
       {!inkArmed && <MiniMapInk
-        elements={committedDrawingElements(canvas.drawing)}
+        elements={committedDrawingElements(projectedScene.drawing)}
         revision={canvas.seq}
         rootRef={rootRef}
       />}

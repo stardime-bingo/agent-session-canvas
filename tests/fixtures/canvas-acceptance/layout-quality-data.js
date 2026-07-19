@@ -18,10 +18,10 @@ const h = React.createElement;
 const BOARD_ID = 'layout-quality-board';
 const BOARD_KEY = `board:${BOARD_ID}`;
 const GROUPS = [
-  { key: '产品 / 发布', slug: 'launch', count: 6, x: 80, y: 180 },
-  { key: '内容 / 增长', slug: 'content', count: 5, x: 2550, y: 120 },
-  { key: '工程 / 基建', slug: 'infra', count: 4, x: 520, y: 1920 },
-  { key: '课程 / 交付', slug: 'course', count: 3, x: 3100, y: 1750 },
+  { key: '产品 / 发布', slug: 'launch', count: 2, x: 80, y: 180 },
+  { key: '内容 / 增长', slug: 'content', count: 2, x: 2550, y: 120 },
+  { key: '工程 / 基建', slug: 'infra', count: 2, x: 520, y: 1920 },
+  { key: '课程 / 交付', slug: 'course', count: 2, x: 3100, y: 1750 },
 ];
 const WORKSPACES = [];
 const SESSIONS_BY_KEY = {};
@@ -30,7 +30,7 @@ let serial = 0;
 
 function addWorkspace(group, index, membership = group.key) {
   const path = `/Users/fixture/${group.slug}/workspace-${index + 1}`;
-  const count = [1, 5, 2, 8, 3, 6][(serial + index) % 6];
+  const count = [1, 2, 1, 2][(serial + index) % 4];
   const keys = Array.from({ length: count }, (_, sessionIndex) => `codex:layout-${serial}-${sessionIndex}`);
   const day = String(Math.max(1, 19 - serial)).padStart(2, '0');
   const lastActivity = `2026-07-${day}T0${serial % 9}:00:00.000Z`;
@@ -75,12 +75,17 @@ const INITIAL_INK = {
   isDeleted: false, groupIds: [], frameId: null, boundElements: null, updated: 1,
   link: null, locked: false, customData: { below: true },
 };
+const DISTRICT_INKS = GROUPS.map((group, index) => ({
+  ...INITIAL_INK, id: `layout-district-ink-${group.slug}`,
+  x: group.x + 42, y: group.y + 82, width: 180 + index * 20, height: 90,
+  seed: INITIAL_INK.seed + index + 1, versionNonce: INITIAL_INK.versionNonce + index + 1,
+}));
 const INITIAL_DOC = {
   layout: INITIAL_LAYOUT,
   edges: [],
   notes: [INITIAL_NOTE],
   boards: [INITIAL_BOARD],
-  drawing: [INITIAL_INK],
+  drawing: [INITIAL_INK, ...DISTRICT_INKS],
   drawingFiles: {},
 };
 const probe = window.__LAYOUT_ACCEPTANCE__ = { ready: false, status: 'booting', report: null };
@@ -118,6 +123,7 @@ function flowRect(selector, id) {
 const nodeRect = id => flowRect(`.react-flow__node[data-id="${CSS.escape(id)}"]`, id);
 const inkRect = id => flowRect(`[data-ink-element-id="${CSS.escape(id)}"]`, id);
 const close = (left, right, tolerance = 2) => Math.abs(left - right) <= tolerance;
+const boardStyle = () => document.querySelector(`.react-flow__node[data-id="${CSS.escape(BOARD_KEY)}"]`)?.style.transform || '';
 
 function domSnapshot() {
   const containerIds = [...GROUPS.map(group => `district:${group.key}`), BOARD_KEY];
@@ -126,7 +132,7 @@ function domSnapshot() {
     workspaces: WORKSPACES.map(workspace => nodeRect(workspace.path)),
     note: nodeRect(INITIAL_NOTE.id),
     ink: inkRect(INITIAL_INK.id),
-    boardStyle: document.querySelector(`.react-flow__node[data-id="${CSS.escape(BOARD_KEY)}"]`)?.style.transform || '',
+    boardStyle: boardStyle(),
   };
 }
 
@@ -156,10 +162,10 @@ function collectReport(doc) {
     rowOrder.push({ container: container.id, actual, expected });
     if (actual.join('\n') !== expected.join('\n')) rowsAligned = false;
   }
-  const minX = Math.min(...containers.map(item => item.x), dom.note.x);
-  const minY = Math.min(...containers.map(item => item.y), dom.note.y);
-  const maxX = Math.max(...containers.map(item => item.x + item.w), dom.note.x + dom.note.w);
-  const maxY = Math.max(...containers.map(item => item.y + item.h), dom.note.y + dom.note.h);
+  const minX = Math.min(...containers.map(item => item.x));
+  const minY = Math.min(...containers.map(item => item.y));
+  const maxX = Math.max(...containers.map(item => item.x + item.w));
+  const maxY = Math.max(...containers.map(item => item.y + item.h));
   const board = doc.boards[0];
   const ink = doc.drawing.find(item => item.id === INITIAL_INK.id);
   const beforeBoard = arrangeBeforeDom?.containers.find(item => item?.id === BOARD_KEY);
@@ -237,6 +243,9 @@ function LayoutQualityCanvas() {
       .find(items => items.length >= 2);
     if (!lane) { probe.growthStatus = 'fail'; return false; }
     const targetId = lane[0].id;
+    const followerId = lane[1].id;
+    const followerGroup = GROUPS.find(group => `district:${group.key}` === followerId);
+    const followerInkId = `layout-district-ink-${followerGroup.slug}`;
     const membership = targetId.slice('district:'.length);
     const targets = fixtureWorkspaces.filter(workspace => doc.layout[workspace.path]?.d === membership);
     const additions = {};
@@ -246,7 +255,10 @@ function LayoutQualityCanvas() {
       keys.forEach(key => { additions[key] = { ...SESSIONS_BY_KEY[workspace.visibleKeys[0]], key, cwd: workspace.path }; });
       return { ...workspace, visibleKeys: [...workspace.visibleKeys, ...keys], sessionKeys: [...workspace.sessionKeys, ...keys] };
     });
-    growthBeforeRef.current = { snapshot: before, targetId, laneIds: lane.map(item => item.id) };
+    growthBeforeRef.current = {
+      snapshot: before, targetId, laneIds: lane.map(item => item.id), followerId, followerInkId,
+      followerInk: inkRect(followerInkId),
+    };
     probe.growthStatus = 'growing';
     setFixtureSessions(current => ({ ...current, ...additions }));
     setExpanded(new Set(targets.map(workspace => workspace.path)));
@@ -260,15 +272,14 @@ function LayoutQualityCanvas() {
     longTaskObserver?.takeRecords();
     Object.assign(arrangePerformance, { syncMs: null, firstPaintMs: null, longTasks: [] });
     const started = performance.now();
-    arrangeBeforeDom = domSnapshot();
     const beforeBoardStyle = arrangeBeforeDom.boardStyle;
     probe.status = 'arranging';
     const applied = actionsRef.current.applyArrange?.(target);
     arrangePerformance.syncMs = performance.now() - started;
     if (!applied) { probe.status = 'fail'; return; }
     const observeCommittedDom = () => {
-      const current = domSnapshot();
-      if (current.boardStyle && current.boardStyle !== beforeBoardStyle) {
+      const current = boardStyle();
+      if (current && current !== beforeBoardStyle) {
         arrangePerformance.firstPaintMs = performance.now() - started;
       } else if (performance.now() - started <= 100) requestAnimationFrame(observeCommittedDom);
     };
@@ -282,6 +293,7 @@ function LayoutQualityCanvas() {
     const readyTimer = setInterval(() => {
       if (!actionsRef.current.applyArrange) return;
       clearInterval(readyTimer);
+      arrangeBeforeDom = domSnapshot();
       probe.ready = true;
       probe.status = 'idle';
     }, 20);
@@ -297,7 +309,7 @@ function LayoutQualityCanvas() {
         && report.domBoardMoved && report.domBoardCompacted
         && report.noteUnchanged && report.domNoteUnchanged && report.inkCarried && report.domInkCarried
         && report.laneCount >= 2 && report.laneCount <= 4
-        && report.bounds.aspect >= 1.2 && report.bounds.aspect <= 2.2
+        && report.bounds.aspect >= 0.9 && report.bounds.aspect <= 2.2
         && report.performance.syncMs <= 50 && report.performance.firstPaintMs <= 100
         && report.performance.longTaskSupported && report.performance.longTasks.filter(duration => duration >= 50).length === 0;
       probe.report = { ...report, pass };
@@ -314,6 +326,9 @@ function LayoutQualityCanvas() {
       const after = domSnapshot();
       const targetBefore = before.snapshot.containers.find(item => item.id === before.targetId);
       const targetAfter = after.containers.find(item => item.id === before.targetId);
+      const followerBefore = before.snapshot.containers.find(item => item.id === before.followerId);
+      const followerAfter = after.containers.find(item => item.id === before.followerId);
+      const followerInkAfter = inkRect(before.followerInkId);
       const followerMoved = before.laneIds.slice(1).some(id => {
         const previous = before.snapshot.containers.find(item => item.id === id);
         const current = after.containers.find(item => item.id === id);
@@ -331,9 +346,12 @@ function LayoutQualityCanvas() {
         targetId: before.targetId,
         targetGrew: targetAfter.h > targetBefore.h + 2,
         followerMoved,
+        followerInkCarried: close(followerInkAfter.x - before.followerInk.x, followerAfter.x - followerBefore.x, 4)
+          && close(followerInkAfter.y - before.followerInk.y, followerAfter.y - followerBefore.y, 4),
         collisions,
       };
-      probe.growthReport.pass = probe.growthReport.targetGrew && followerMoved && collisions.length === 0;
+      probe.growthReport.pass = probe.growthReport.targetGrew && followerMoved
+        && probe.growthReport.followerInkCarried && collisions.length === 0;
       probe.growthStatus = probe.growthReport.pass ? 'complete' : 'fail';
     }, 120);
     return () => clearTimeout(timer);

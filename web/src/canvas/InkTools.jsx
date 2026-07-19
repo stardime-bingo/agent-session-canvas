@@ -1,7 +1,7 @@
 /**
- * [INPUT]: scene-store、ink.js 元素工厂、ink-selection.js 选择内核、drawing.js 命中、gestures.js 相机数学、RF instance
+ * [INPUT]: scene-store、输入前布局提交钩子、ink.js 元素工厂、ink-selection.js 选择内核、drawing.js 命中、gestures.js 相机数学、RF instance
  * [OUTPUT]: useInkTools——笔/形状/文字直写文档；单选/框选/多选、批量移动/缩放/旋转/删除/改样式、复制粘贴与 Alt 拖；
- *           V/P/R/O/A/T/E 快捷键、橡皮、真实指针落点不丢焦的就地文字编辑和单相机滚轮
+ *           V/P/R/O/A/T/E 快捷键、橡皮、真实指针落点不丢焦的就地文字编辑和单相机滚轮；指针写入前先落定只读布局投影
  * [POS]: canvas 的自研墨迹交互层。每一帧手势只做同步内存 mutate；持久化永远在 scene-store 后台
  * [PROTOCOL]: 变更时更新此头部，然后检查 web/CLAUDE.md
  */
@@ -51,7 +51,7 @@ function readClipboardPayload(data) {
   } catch { return null; }
 }
 
-export function useInkTools({ store, instRef, rootRef, hitAt, wheelModeRef, minZoom, maxZoom }) {
+export function useInkTools({ store, instRef, rootRef, hitAt, beforeInput, wheelModeRef, minZoom, maxZoom }) {
   const [tool, setToolState] = useState('none');
   const [selectedIds, setSelectedIdsState] = useState([]);
   const [style, setStyle] = useState({ strokeColor: '#e2611f', backgroundColor: 'transparent', strokeWidth: 2.5 });
@@ -264,6 +264,7 @@ export function useInkTools({ store, instRef, rootRef, hitAt, wheelModeRef, minZ
 
   const onPointerDown = useCallback(e => {
     if (!e.isPrimary || e.button !== 0 || spaceRef.current) return;
+    beforeInput?.();
     const active = toolRef.current;
     const p = flowPoint(e);
     if (!p) return;
@@ -290,7 +291,7 @@ export function useInkTools({ store, instRef, rootRef, hitAt, wheelModeRef, minZ
     gestureRef.current = { kind: 'draw', id: element.id, element, moved: false };
     mutateDrawing(els => upsertInkElement(els, element), { coalesce: `ink:${element.id}` });
     capturePointer(e.currentTarget, e.pointerId);
-  }, [flowPoint, textEdit, closeTextEditor, beginSelectGesture, eraseAt, style, mutateDrawing, openTextEditor, store]);
+  }, [beforeInput, flowPoint, textEdit, closeTextEditor, beginSelectGesture, eraseAt, style, mutateDrawing, openTextEditor, store]);
 
   const onPointerMove = useCallback(e => {
     const gesture = gestureRef.current;
